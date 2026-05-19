@@ -13,13 +13,13 @@ format: isort black pyproject justfmt
 
 [doc("Run ruff isort fixes over the source code")]
 isort:
-    ruff check --fix --select=I experiments/*.py
-    ruff check --fix --select=RUF022 experiments/*.py
+    ruff check --fix --select=I experiments/*.py scripts/*.py
+    ruff check --fix --select=RUF022 experiments/*.py scripts/*.py
     @echo -e "\e[1;32mruff isort clean!\e[0m"
 
 [doc("Run ruff format over the source code")]
 black:
-    ruff format experiments/*.py
+    ruff format experiments/*.py scripts/*.py
     @echo -e "\e[1;32mruff format clean!\e[0m"
 
 [doc("Run pyproject-fmt over the configuration")]
@@ -52,12 +52,12 @@ reuse:
 
 [doc("Run ruff checks over the source code")]
 ruff:
-    ruff check experiments/*.py
+    ruff check experiments/*.py scripts/*.py
     @echo -e "\e[1;32mruff clean!\e[0m"
 
 [doc("Run ty checks over the source code")]
 ty:
-    ty check experiments/*.py
+    ty check experiments/*.py scripts/*.py
     @echo -e "\e[1;32mty clean!\e[0m"
 
 # }}}
@@ -84,5 +84,23 @@ requirements_txt:
 
 [doc('Pin dependency versions to requirements.txt')]
 pin: requirements_txt
+
+# }}}
+# {{{ datasets
+DATASET_URL := 'https://raw.githubusercontent.com/alexfikl/2025-fractal-connectomes-paper-experiments/refs/heads/main/data'
+
+[private]
+download_dataset name:
+    curl -o "data/{{ name }}.mat" "{{ DATASET_URL }}/{{ name }}.mat"
+    {{ PYTHON }} scripts/mat2npz.py \
+        --variable-name 'w:matrices' \
+        --transpose \
+        "data/{{ name }}.mat"
+
+[doc("Download datasets")]
+dataset:
+    mkdir -p data
+    @just download_dataset Emotion_LR_Task
+    @just download_dataset Rest_LR_Task
 
 # }}}
