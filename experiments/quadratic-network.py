@@ -117,7 +117,7 @@ def main(
     maxit: int = 128,
     overwrite: bool = False,
 ) -> int:
-    from dmdaelib import determine_escape_radius, generate_dataset, iter_batches
+    from dmdaelib import determine_escape_radius, generate_dataset, iter_batches, timeit
 
     # {{{ vallidate inputs
 
@@ -163,23 +163,24 @@ def main(
     bbox = (-0.03, 0.03, -0.03, 0.03)
     log.info("Generating dataset on %s", bbox)
 
-    Z, c = generate_dataset(
-        mat,
-        bbox=bbox,
-        resolution=resolution,
-        escape_radius=escape_radius,
-        maxit=maxit,
-    )
+    with timeit("generate_dataset"):
+        Z, c = generate_dataset(
+            mat,
+            bbox=bbox,
+            resolution=resolution,
+            escape_radius=escape_radius,
+            maxit=maxit,
+        )
 
     mask = torch.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, dim=-1) < escape_radius**2
     log.info("Points:")
-    log.info("Converged: %d", torch.sum(mask))
-    log.info("Max: %.5e (radius %.5e)", Z.abs().max(), escape_radius)
-    log.info("Mean: %.5e", Z.abs().mean())
+    log.info("    Converged: %d", torch.sum(mask))
+    log.info("    Max: %.5e (radius %.5e)", Z.abs().max(), escape_radius)
+    log.info("    Mean: %.5e", Z.abs().mean())
 
     from dmdaelib import axis
 
-    with axis(outfile.with_suffix("")) as ax:
+    with axis(outfile.with_suffix("").with_stem(f"{outfile.stem}-dataset")) as ax:
         ax.imshow(mask, extent=bbox, cmap="binary")
 
     # }}}
@@ -201,13 +202,12 @@ def main(
     # {{{ train
 
     from torch import optim
-    from torch.nn.utils import clip_grad_norm_
 
     model = QuadraticNetwork(d, d, dtype=Z.dtype)
     model = cast("QuadraticNetwork", torch.compile(model))
 
     criterion = ComplexMSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=1.0e-3)
+    optimizer = optim.Adam(model.parameters(), lr=1.0e-1)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
     weightsfile = outfile.with_suffix(".pth")
@@ -223,14 +223,16 @@ def main(
         timer = TicTocTimer()
 
         epochs = 50
+        batch_size = 4096
+        num_batches = X.shape[0] // batch_size
         losses = torch.empty(epochs)
 
         for epoch in range(epochs):
             loss_epoch = torch.tensor(0.0)
             timer.tic()
 
-            for batch_x, batch_y in iter_batches(X, Y, batch_size=4096):
-                optimizer.zero_grad(set_to_none=True)
+            for batch_x, batch_y in iter_batches(X, Y, batch_size=batch_size):
+                optimizer.zero_grad()
 
                 # compute loss function
                 predictions = model(batch_x)
@@ -238,14 +240,13 @@ def main(
 
                 # compute gradient
                 loss.backward()
-                clip_grad_norm_(model.parameters(), max_norm=1.0)
 
                 # update weights
                 optimizer.step()
 
                 loss_epoch += loss.detach()
 
-            losses[epoch] = loss_epoch.item() / X.shape[0]
+            losses[epoch] = loss_epoch.item() / num_batches
             scheduler.step(losses[epoch])
 
             timer.toc()

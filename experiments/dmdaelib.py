@@ -29,19 +29,22 @@ DTypeLike: TypeAlias = np.typing.DTypeLike
 # {{{ logging
 
 
-def make_default_logger(module: str) -> logging.Logger:
+def make_default_logger(module: str, level: int | None = None) -> logging.Logger:
+    if level is None:
+        level = logging.ERROR
+
     path = pathlib.Path(module)
     if path.exists():
         module = path.stem.replace("-", "_")
 
     log = logging.getLogger(f"dmdaelib.{module}")
-    log.setLevel(logging.ERROR)
+    log.setLevel(level)
     log.addHandler(rich.logging.RichHandler())
 
     return log
 
 
-log = make_default_logger("dmdaelib")
+log = make_default_logger(__name__, level=logging.INFO)
 
 # }}}
 
@@ -222,6 +225,9 @@ def generate_dataset(
     A = A.to(A.dtype.to_complex())
     d = A.shape[0]
 
+    # NOTE: allow a maximum element z[i] such that norm(z) ~ escape_radius
+    max_z = (escape_radius + 1) / d**0.5
+
     # generate grid
     c = generate_grid(*bbox, nx=resolution, ny=resolution, dtype=A.dtype, xp=xp)
     c = c[:, :, None]
@@ -238,8 +244,7 @@ def generate_dataset(
         # clip escaped values over escape radius
         # NOTE: we set it to `R + 1 / sqrt(d)` so that `norm2(z) == R + 1`
         escaped = xp.sum(z_new.real**2 + z_new.imag**2, dim=-1) > escape_radius_sqr
-
-        z_new[escaped, :] = (escape_radius + 1) / d**0.5
+        z_new = xp.where(escaped[..., None], max_z, z_new)
 
         result[i] = z_new
 
