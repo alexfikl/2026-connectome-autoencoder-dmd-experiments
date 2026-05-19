@@ -154,6 +154,7 @@ def main(
             filename.parent
             / f"{filename.stem}-quad-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}.npz"
         )
+    basename = outfile.with_suffix("")
 
     # }}}
 
@@ -178,9 +179,12 @@ def main(
     log.info("    Max: %.5e (radius %.5e)", Z.abs().max(), escape_radius)
     log.info("    Mean: %.5e", Z.abs().mean())
 
-    from dmdaelib import axis
+    from dmdaelib import figure, make_colorbar_axes
 
-    with axis(outfile.with_suffix("").with_stem(f"{outfile.stem}-dataset")) as ax:
+    with figure(
+        basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
+    ) as fig:
+        ax = fig.gca()
         ax.imshow(mask, extent=bbox, cmap="binary")
 
     # }}}
@@ -204,8 +208,6 @@ def main(
     from torch import optim
 
     model = QuadraticNetwork(d, d, dtype=Z.dtype)
-    model = cast("QuadraticNetwork", torch.compile(model))
-
     criterion = ComplexMSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1.0e-1)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
@@ -217,6 +219,8 @@ def main(
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         losses = checkpoint["losses"]
+
+        compiled_model = cast("QuadraticNetwork", torch.compile(model))
     else:
         from dmdaelib import TicTocTimer
 
@@ -227,6 +231,8 @@ def main(
         num_batches = X.shape[0] // batch_size
         losses = torch.empty(epochs)
 
+        compiled_model = cast("QuadraticNetwork", torch.compile(model))
+
         for epoch in range(epochs):
             loss_epoch = torch.tensor(0.0)
             timer.tic()
@@ -235,7 +241,7 @@ def main(
                 optimizer.zero_grad()
 
                 # compute loss function
-                predictions = model(batch_x)
+                predictions = compiled_model(batch_x)
                 loss = criterion(predictions, batch_y)
 
                 # compute gradient
@@ -262,19 +268,72 @@ def main(
             weightsfile,
         )
 
-    with axis(outfile.with_suffix("").with_stem(f"{outfile.stem}-loss")) as ax:
+    with figure(
+        basename.with_stem(f"{basename.stem}-loss"), overwrite=overwrite
+    ) as fig:
+        ax = fig.gca()
+
         ax.semilogy(losses)
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
 
     # }}}
 
+    # {{{ weight error
+
+    # NOTE: the learned linear layer should approximate A (the input matrix),
+    #   so compare the two to get a sense of training quality
+    learned_A = model.model[0].weight.detach()  # ty: ignore[call-non-callable]
+    A = mat.to(learned_A.dtype)
+    E = torch.abs(learned_A - A) / torch.abs(A)
+
+    with figure(
+        basename.with_stem(f"{basename.stem}-weights"),
+        nrows=2,
+        ncols=2,
+        overwrite=overwrite,
+    ) as fig:
+        ax11, ax12, ax21, ax22 = fig.axes
+
+        A_eigs = torch.linalg.eigvals(A)
+        learned_A_eigs = torch.linalg.eigvals(learned_A)
+
+        im = ax11.imshow(A.real, vmin=-1.0, vmax=1.0)
+        ax11.set_title("$A$")
+        fig.colorbar(im, cax=make_colorbar_axes(ax11))
+
+        im = ax12.imshow(learned_A.real, vmin=-1.0, vmax=1.0)
+        ax12.set_title("$A_{learned}$")
+        fig.colorbar(im, cax=make_colorbar_axes(ax12))
+
+        im = ax21.imshow(torch.log10(E))
+        ax21.set_title(r"$\log_{10}$(Error)")
+        fig.colorbar(im, cax=make_colorbar_axes(ax21))
+
+        ax22.plot(A_eigs.real, A_eigs.imag, "o", label="eigs($A$)")
+        ax22.plot(
+            learned_A_eigs.real,
+            learned_A_eigs.imag,
+            "o",
+            label="eigs($A_{learned}$)",
+        )
+        ax22.set_xlabel(r"$\lambda_r$")
+        ax22.set_ylabel(r"$\lambda_i$")
+        ax22.set_title("Eigenvalues")
+
+    # }}}
+
     # {{{ forecast
 
-    Zpredict = predict(model, bbox=bbox, resolution=resolution, maxit=maxit)
+    Zpredict = predict(
+        compiled_model, bbox=bbox, resolution=2 * resolution, maxit=maxit
+    )
     mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
 
-    with axis(outfile.with_suffix("").with_stem(f"{outfile.stem}-predict")) as ax:
+    with figure(
+        basename.with_stem(f"{basename.stem}-predict"), overwrite=overwrite
+    ) as fig:
+        ax = fig.gca()
         ax.imshow(mask, extent=bbox, cmap="binary")
 
     # }}}

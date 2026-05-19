@@ -8,11 +8,14 @@ import pathlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import array_api_compat
 import numpy as np
 import rich.logging
+
+if TYPE_CHECKING:
+    import matplotlib.pyplot as mp
 
 # {{{ typing
 
@@ -52,69 +55,124 @@ log = make_default_logger(__name__, level=logging.INFO)
 # {{{ matplotlib
 
 
-def set_recommended_matplotlib() -> None:
-    try:
-        import matplotlib.pyplot as mp
-    except ImportError:
-        return
+def set_plotting_defaults() -> None:
+    """Sets default plotting settings from ``scienceplots``.
 
-    defaults: dict[str, dict[str, Any]] = {
-        "figure": {
-            "figsize": (10, 10),
-            "dpi": 300,
-            "constrained_layout.use": True,
-        },
-        "text": {"usetex": True},
-        "legend": {"fontsize": 20},
-        "lines": {"linewidth": 2, "markersize": 5},
-        "axes": {
-            "labelsize": 28,
-            "titlesize": 28,
-            "grid": True,
-            "grid.axis": "both",
-            "grid.which": "both",
-            # NOTE: preserve existing colors (the ones in "science" are ugly)
-            "prop_cycle": mp.rcParams["axes.prop_cycle"],
-        },
-        "xtick": {"labelsize": 20, "direction": "inout"},
-        "ytick": {"labelsize": 20, "direction": "inout"},
-        "xtick.major": {"size": 6.5, "width": 1.5},
-        "ytick.major": {"size": 6.5, "width": 1.5},
-        "xtick.minor": {"size": 4.0},
-        "ytick.minor": {"size": 4.0},
-    }
+    The defaults can be overwritten with a local ``default.mplstyle`` file.
+    """
+    import matplotlib.pyplot as mp
 
-    from contextlib import suppress
+    # NOTE: since v1.1.0 an import is required to import the styles
+    import scienceplots  # noqa: F401
 
-    with suppress(ImportError):
-        import scienceplots  # noqa: F401
+    dirname = pathlib.Path(__file__).parent
+    mp.style.use(["science", "ieee"])
 
-        mp.style.use(["science", "ieee"])
+    mplstyle = dirname / "default.mplstyle"
+    if mplstyle.exists():
+        mp.style.use(dirname / "default.mplstyle")
 
-    for group, params in defaults.items():
-        mp.rc(group, **params)
+    import os
+
+    ext = os.environ.get("DMDAELIB_FIGURE_FORMAT", "jpg")
+    mp.rcParams["savefig.format"] = ext
 
 
-set_recommended_matplotlib()
+set_plotting_defaults()
 
 
 @contextmanager
-def axis(filename: pathlib.Path) -> Iterator[Any]:
+def figure(
+    filename: pathlib.Path,
+    nrows: int = 1,
+    ncols: int = 1,
+    *,
+    constrained_layout: bool = True,
+    figsize: tuple[float, float] | None = None,
+    **kwargs: Any,
+) -> Iterator[mp.Figure]:
     import matplotlib.pyplot as mp
 
-    if not filename.suffix:
-        ext = mp.rcParams["savefig.format"]
-        filename = filename.with_suffix(f".{ext}")
+    fig = mp.figure(constrained_layout=constrained_layout)
 
-    fig = mp.figure(num=1)
-    ax = fig.gca()
+    for i in range(nrows * ncols):
+        fig.add_subplot(nrows, ncols, i + 1)
+
+    # FIXME: get size of one figure
+    if figsize is None:
+        width, height = mp.rcParams["figure.figsize"]
+        figsize = (width * ncols, height * nrows)
+    fig.set_size_inches(*figsize)
 
     try:
-        yield ax
+        yield fig
     finally:
-        log.info("Saving figure in '%s'.", filename)
-        fig.savefig(filename)
+        if not constrained_layout:
+            fig.tight_layout()
+            fig.subplots_adjust(wspace=0.3, hspace=0.1)
+
+        savefig(fig, filename, **kwargs)
         mp.close(fig)
+
+
+def savefig(
+    fig: mp.Figure,
+    filename: pathlib.Path,
+    *,
+    bbox_inches: str = "tight",
+    pad_inches: float = 0,
+    normalize: bool = False,
+    facecolor: str = "white",
+    transparent: bool = False,
+    overwrite: bool = True,
+    **kwargs: Any,
+) -> None:
+    import matplotlib.pyplot as mp
+
+    ext = mp.rcParams["savefig.format"]
+    filename = pathlib.Path(filename)
+
+    if not filename.suffix:
+        filename = filename.with_suffix(f".{ext}").resolve()
+
+    if not overwrite and filename.exists():
+        raise FileExistsError(f"output file '{filename}' already exists")
+
+    bbox_extra_artists = []
+    for ax in fig.axes:
+        legend = ax.get_legend()
+        if legend is not None:
+            bbox_extra_artists.append(legend)
+
+    log.info("Saving '%s'", filename)
+    fig.savefig(
+        filename,
+        bbox_extra_artists=tuple(bbox_extra_artists),
+        bbox_inches="tight",
+        pad_inches=pad_inches,
+        facecolor=facecolor,
+        transparent=transparent,
+        **kwargs,
+    )
+
+
+def make_colorbar_axes(
+    ax: mp.Axes,
+    *,
+    position: str = "right",
+    size: str = "5%",
+    pad: float = 0.1,
+) -> mp.Axes:
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes(position, size=size, pad=pad)
+
+    return cax
+
+
+def scale_axis(ax: mp.Axes, scale: float) -> mp.Axes:
+    return ax.inset_axes(((1.0 - scale) / 2, (1.0 - scale) / 2, scale, scale))
 
 
 # }}}

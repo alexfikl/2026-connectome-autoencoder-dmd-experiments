@@ -74,13 +74,14 @@ def main(
             / f"{filename.stem}-dmd-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}.npz"
         )
 
+    basename = outfile.with_suffix("")
     log.info("DMD")
 
     # }}}
 
     # {{{ generate dataset
 
-    from dmdaelib import axis, timeit
+    from dmdaelib import figure, timeit
 
     d = mat.shape[0]
     bbox = (-0.03, 0.03, -0.03, 0.03)
@@ -100,7 +101,8 @@ def main(
     log.info("Max: %.5e (radius %.5e)", torch.max(torch.abs(Z)), escape_radius)
     log.info("Mean: %.5e", torch.mean(torch.abs(Z)))
 
-    with axis(outfile.with_suffix("")) as ax:
+    with figure(basename.with_stem(f"{basename.stem}-dataset")) as fig:
+        ax = fig.gca()
         ax.imshow(mask, extent=bbox, cmap="binary")
 
     # }}}
@@ -130,7 +132,9 @@ def main(
     with timeit("Constructed DMD model"):
         model = dmd_build(X1, X2, eps=1.0e-6)
 
-    with axis(outfile.with_suffix("").with_stem(f"{outfile.stem}-sigma")) as ax:
+    with figure(basename.with_stem(f"{basename.stem}-sigma")) as fig:
+        ax = fig.gca()
+
         ax.semilogy(model.S.real)
         ax.set_xlabel("n")
         ax.set_ylabel(r"$\sigma$")
@@ -154,11 +158,14 @@ def main(
     # NOTE: try to tell who escaped by looking at the error
     error = torch.linalg.norm(Z[-1].permute(2, 0, 1) - Zpredict, dim=0)
 
-    with axis(outfile.with_suffix("").with_stem(f"{outfile.stem}-error")) as ax:
-        im = ax.imshow(torch.log10(error), extent=bbox)
-        ax.get_figure().colorbar(im, ax=ax)
+    with figure(basename.with_stem(f"{basename.stem}-error")) as fig:
+        ax = fig.gca()
 
-    with axis(outfile.with_suffix("").with_stem(f"{outfile.stem}-predict")) as ax:
+        im = ax.imshow(torch.log10(error), extent=bbox)
+        fig.colorbar(im, ax=ax)
+
+    with figure(basename.with_stem(f"{basename.stem}-predict")) as fig:
+        ax = fig.gca()
         ax.imshow(error < 1.0e-1, extent=bbox, cmap="binary")
 
     # }}}
