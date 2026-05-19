@@ -168,7 +168,7 @@ def determine_escape_radius(A: Matrix) -> float:
     n = A.shape[0]
     sigma = xp.linalg.svdvals(A)
 
-    return (2.0 * xp.sqrt(n) / xp.min(sigma) ** 2).item()
+    return (2.0 * n**0.5 / xp.min(sigma) ** 2).item()
 
 
 # }}}
@@ -196,7 +196,7 @@ def generate_grid(
 
     result = x[None, :] + 1j * y[:, None]
     if dtype is not None and dtype != result.dtype:
-        result = result.to(dtype)
+        result = xp.astype(result, dtype)
 
     return result
 
@@ -240,7 +240,7 @@ def generate_dataset(
         # NOTE: we set it to `R + 1 / sqrt(d)` so that `norm2(z) == R + 1`
         escaped = xp.sum(z_new.real**2 + z_new.imag**2, dim=-1) > escape_radius_sqr
 
-        z_new[escaped, :] = (escape_radius + 1) / xp.sqrt(d)
+        z_new[escaped, :] = (escape_radius + 1) / d**0.5
 
         result[i] = z_new
 
@@ -320,7 +320,7 @@ def dmd_predict(
     xp = array_api_compat.array_namespace(Z)
 
     maxit, nx, ny, d = Z.shape
-    c = generate_grid(*bbox, nx=nx, ny=ny, dtype=model.dtype)
+    c = generate_grid(*bbox, nx=nx, ny=ny, dtype=model.dtype, xp=xp)
     c = c[None, :, :]
 
     # initialize the state to (z0, c)

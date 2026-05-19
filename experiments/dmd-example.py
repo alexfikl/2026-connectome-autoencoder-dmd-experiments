@@ -7,7 +7,6 @@ import logging
 import pathlib
 
 import numpy as np
-import torch
 
 from dmdaelib import make_default_logger
 
@@ -36,6 +35,8 @@ def main(
     maxit: int = 128,
     overwrite: bool = False,
 ) -> int:
+    import torch
+
     from dmdaelib import determine_escape_radius, generate_dataset
 
     # {{{ vallidate inputs
