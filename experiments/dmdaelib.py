@@ -138,8 +138,7 @@ class TicTocTimer:
         return self.t_wall
 
     def __str__(self) -> str:
-        # NOTE: this matches how MATLAB shows the time from `toc`.
-        return f"Elapsed time is {self.t_wall:.5f} seconds."
+        return f"walltime {self.t_wall:.5f} seconds."
 
 
 @contextmanager
@@ -336,6 +335,26 @@ def dmd_predict(
 
     # NOTE: remove the last element because that corresponds to c theoretically
     return xp.einsum("ij,j...->i...", model.U, zhat)[:-1]
+
+
+# }}}
+
+
+# {{{ iter_batches
+
+
+def iter_batches(
+    X: Array2D,
+    Y: Array2D,
+    *,
+    batch_size: int = 4096,
+) -> Iterator[tuple[Array2D, Array2D]]:
+    xp = array_api_compat.array_namespace(X, Y)
+
+    idx = xp.randperm(len(X))
+    for start in range(0, len(X), batch_size):
+        sl = idx[start : start + batch_size]
+        yield X[sl], Y[sl]
 
 
 # }}}

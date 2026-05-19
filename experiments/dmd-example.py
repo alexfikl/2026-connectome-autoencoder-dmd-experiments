@@ -71,7 +71,7 @@ def main(
     if outfile is None:
         outfile = (
             filename.parent
-            / f"{filename.stem}-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}.npz"
+            / f"{filename.stem}-dmd-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}.npz"
         )
 
     log.info("DMD")

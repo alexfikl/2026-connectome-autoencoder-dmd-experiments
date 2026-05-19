@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -86,11 +86,15 @@ def predict(
     resolution: int = 128,
     maxit: int = 128,
 ) -> Array3D:
+    import array_api_compat
+
     from dmdaelib import generate_grid
 
     with torch.no_grad():
-        c = generate_grid(*bbox, nx=resolution, ny=resolution, dtype=model.dtype)
-        z = torch.zeros((*c.shape, model.input_size), dtype=model.dtype)  # ty: ignore[no-matching-overload]
+        z = torch.zeros((resolution, resolution, model.input_size), dtype=model.dtype)  # ty: ignore[no-matching-overload]
+        xp = array_api_compat.array_namespace(z)
+
+        c = generate_grid(*bbox, nx=resolution, ny=resolution, dtype=model.dtype, xp=xp)
         c = c[:, :, None]
 
         for _ in range(1, maxit):
@@ -113,7 +117,7 @@ def main(
     maxit: int = 128,
     overwrite: bool = False,
 ) -> int:
-    from dmdaelib import determine_escape_radius, generate_dataset
+    from dmdaelib import determine_escape_radius, generate_dataset, iter_batches
 
     # {{{ vallidate inputs
 
@@ -136,7 +140,8 @@ def main(
         log.error("Expected a 3 dimensional array: %s.", matrices.shape)
         return 1
 
-    mat = torch.from_numpy(matrices[dataidx])
+    # NOTE: we don't really need complex128 for this example, so save some memory
+    mat = torch.from_numpy(matrices[dataidx]).to(torch.complex64)
     if mat.shape[0] != mat.shape[1]:
         log.error("Expected a square matrix: %s.", mat.shape)
         return 1
@@ -147,7 +152,7 @@ def main(
     if outfile is None:
         outfile = (
             filename.parent
-            / f"{filename.stem}-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}.npz"
+            / f"{filename.stem}-quad-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}.npz"
         )
 
     # }}}
@@ -181,20 +186,15 @@ def main(
 
     # {{{ build torch dataset
 
-    from torch.utils.data import DataLoader, TensorDataset
-
     # NOTE: we have an array of shape (maxit, n, n, d) and we want to
     #   * make our input/output be (Z_n, Z_{n + 1}) so that we can learn the dynamics
     #   * take only the converged points (based on mask from above)
     #   * squish everything down to use d as the "features"
 
-    X = Z[:-1, mask, :].reshape(-1, d)
+    X = Z[:-1, mask, :].reshape(-1, d).contiguous()
     C = c.unsqueeze(0).unsqueeze(-1).expand(maxit - 1, -1, -1, d)
-    Y = (Z[1:, mask, :] - C[:, mask, :]).reshape(-1, d)
+    Y = (Z[1:, mask, :] - C[:, mask, :]).reshape(-1, d).contiguous()
     log.info("Dataset size: %s", X.shape)
-
-    dataset = TensorDataset(X, Y)
-    dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
 
     # }}}
 
@@ -204,6 +204,8 @@ def main(
     from torch.nn.utils import clip_grad_norm_
 
     model = QuadraticNetwork(d, d, dtype=Z.dtype)
+    model = cast("QuadraticNetwork", torch.compile(model))
+
     criterion = ComplexMSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1.0e-3)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
@@ -216,14 +218,19 @@ def main(
         optimizer.load_state_dict(checkpoint["optimizer"])
         losses = checkpoint["losses"]
     else:
+        from dmdaelib import TicTocTimer
+
+        timer = TicTocTimer()
+
         epochs = 50
         losses = torch.empty(epochs)
 
         for epoch in range(epochs):
-            loss_epoch = 0.0
+            loss_epoch = torch.tensor(0.0)
+            timer.tic()
 
-            for batch_x, batch_y in dataloader:
-                optimizer.zero_grad()
+            for batch_x, batch_y in iter_batches(X, Y, batch_size=4096):
+                optimizer.zero_grad(set_to_none=True)
 
                 # compute loss function
                 predictions = model(batch_x)
@@ -236,11 +243,13 @@ def main(
                 # update weights
                 optimizer.step()
 
-                loss_epoch += loss.item()
+                loss_epoch += loss.detach()
 
-            losses[epoch] = loss_epoch / len(dataloader)
+            losses[epoch] = loss_epoch.item() / X.shape[0]
             scheduler.step(losses[epoch])
-            log.info("[%03d/%03d] loss %.5e", epoch, epochs, loss_epoch)
+
+            timer.toc()
+            log.info("[%03d/%03d] loss %.5e (%s)", epoch, epochs, loss_epoch, timer)
 
         torch.save(
             {
