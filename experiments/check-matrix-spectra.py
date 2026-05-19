@@ -5,14 +5,12 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Any
 
 import numpy as np
-import rich.logging
 
-log = logging.getLogger(pathlib.Path(__file__).stem)
-log.setLevel(logging.ERROR)
-log.addHandler(rich.logging.RichHandler())
+from dmdaelib import Array1D, Array2D, DTypeLike, make_default_logger
+
+log = make_default_logger(__file__)
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
@@ -22,60 +20,6 @@ Example:
 
     > {SCRIPT_PATH.name} task-emotion.npz
 """
-
-Array1D = np.ndarray[tuple[int], np.dtype[np.floating[Any]]]
-Array2D = np.ndarray[tuple[int, int], np.dtype[np.floating[Any]]]
-DTypeLike = np.typing.DTypeLike
-
-
-# {{{ utils
-
-
-def set_recommended_matplotlib() -> None:
-    try:
-        import matplotlib.pyplot as mp
-    except ImportError:
-        return
-
-    defaults: dict[str, dict[str, Any]] = {
-        "figure": {
-            "figsize": (10, 10),
-            "dpi": 300,
-            "constrained_layout.use": True,
-        },
-        "text": {"usetex": True},
-        "legend": {"fontsize": 20},
-        "lines": {"linewidth": 2, "markersize": 5},
-        "axes": {
-            "labelsize": 28,
-            "titlesize": 28,
-            "grid": True,
-            "grid.axis": "both",
-            "grid.which": "both",
-            # NOTE: preserve existing colors (the ones in "science" are ugly)
-            "prop_cycle": mp.rcParams["axes.prop_cycle"],
-        },
-        "xtick": {"labelsize": 20, "direction": "inout"},
-        "ytick": {"labelsize": 20, "direction": "inout"},
-        "xtick.major": {"size": 6.5, "width": 1.5},
-        "ytick.major": {"size": 6.5, "width": 1.5},
-        "xtick.minor": {"size": 4.0},
-        "ytick.minor": {"size": 4.0},
-    }
-
-    from contextlib import suppress
-
-    with suppress(ImportError):
-        import scienceplots  # noqa: F401
-
-        mp.style.use(["science", "ieee"])
-
-    for group, params in defaults.items():
-        mp.rc(group, **params)
-
-
-# }}}
-
 
 # {{{ graph measures
 
@@ -216,7 +160,6 @@ def main(
     import matplotlib.pyplot as mp
     from matplotlib.colors import SymLogNorm
 
-    set_recommended_matplotlib()
     ext = ".{}".format(mp.rcParams["savefig.format"])
 
     for i in range(matrices.shape[0]):

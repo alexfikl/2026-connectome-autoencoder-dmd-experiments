@@ -5,18 +5,15 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from collections.abc import Iterator
-from contextlib import contextmanager
-from typing import Any, TypeAlias
+from typing import Any
 
 import numpy as np
-import rich.logging
 import torch
 from torch import nn
 
-log = logging.getLogger(pathlib.Path(__file__).stem)
-log.setLevel(logging.ERROR)
-log.addHandler(rich.logging.RichHandler())
+from dmdaelib import Array3D, make_default_logger
+
+log = make_default_logger(__file__)
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
@@ -26,79 +23,6 @@ Example:
 
     > {SCRIPT_PATH.name}
 """
-
-# FIXME: does torch.Tensor have any shape / dtype typing? couldn't find anything..
-Matrix: TypeAlias = torch.Tensor
-Array2D: TypeAlias = torch.Tensor
-Array3D: TypeAlias = torch.Tensor
-Array4D: TypeAlias = torch.Tensor
-
-# {{{ utils
-
-
-def set_recommended_matplotlib() -> None:
-    try:
-        import matplotlib.pyplot as mp
-    except ImportError:
-        return
-
-    defaults: dict[str, dict[str, Any]] = {
-        "figure": {
-            "figsize": (16, 8),
-            "dpi": 300,
-            "constrained_layout.use": True,
-        },
-        "text": {"usetex": True},
-        "legend": {"fontsize": 20},
-        "lines": {"linewidth": 2, "markersize": 5},
-        "axes": {
-            "labelsize": 28,
-            "titlesize": 28,
-            "grid": True,
-            "grid.axis": "both",
-            "grid.which": "both",
-            # NOTE: preserve existing colors (the ones in "science" are ugly)
-            "prop_cycle": mp.rcParams["axes.prop_cycle"],
-        },
-        "xtick": {"labelsize": 20, "direction": "inout"},
-        "ytick": {"labelsize": 20, "direction": "inout"},
-        "xtick.major": {"size": 6.5, "width": 1.5},
-        "ytick.major": {"size": 6.5, "width": 1.5},
-        "xtick.minor": {"size": 4.0},
-        "ytick.minor": {"size": 4.0},
-    }
-
-    from contextlib import suppress
-
-    with suppress(ImportError):
-        import scienceplots  # noqa: F401
-
-        mp.style.use(["science", "ieee"])
-
-    for group, params in defaults.items():
-        mp.rc(group, **params)
-
-
-@contextmanager
-def axis(filename: pathlib.Path) -> Iterator[Any]:
-    import matplotlib.pyplot as mp
-
-    if not filename.suffix:
-        ext = mp.rcParams["savefig.format"]
-        filename = filename.with_suffix(f".{ext}")
-
-    fig = mp.figure(num=1)
-    ax = fig.gca()
-
-    try:
-        yield ax
-    finally:
-        log.info("Saving figure in '%s'.", filename)
-        fig.savefig(filename)
-        mp.close(fig)
-
-
-# }}}
 
 
 # {{{ model
@@ -152,78 +76,6 @@ class QuadraticNetwork(nn.Module):
 
 # }}}
 
-# {{{ generate data
-
-
-def determine_escape_radius(A: Matrix) -> float:
-    assert A.shape[0] == A.shape[1]
-
-    n = A.shape[0]
-    sigma = torch.linalg.svdvals(A)
-
-    return 2.0 * np.sqrt(n) / np.min(sigma) ** 2
-
-
-def generate_grid(
-    xmin: float,
-    xmax: float,
-    ymin: float,
-    ymax: float,
-    *,
-    nx: int = 128,
-    ny: int = 128,
-    dtype: Any = None,
-) -> Array2D:
-    x = torch.linspace(xmin, xmax, nx)
-    y = torch.linspace(ymin, ymax, ny)
-
-    result = x[None, :] + 1j * y[:, None]
-    if dtype is not None and dtype != result.dtype:
-        result = result.to(dtype)
-
-    return result
-
-
-def generate_dataset(
-    A: Matrix,
-    *,
-    bbox: tuple[float, float, float, float],
-    escape_radius: float = 100.0,
-    resolution: int = 128,
-    maxit: int = 128,
-) -> tuple[Array4D, Array2D]:
-    assert A.shape[0] == A.shape[1]
-
-    # NOTE: promoting A to complex because einsum doesn't handle heterogeneous dtypes
-    A = A.to(A.dtype.to_complex())
-    d = A.shape[0]
-
-    # generate grid
-    c = generate_grid(*bbox, nx=resolution, ny=resolution, dtype=A.dtype)
-    c = c[:, :, None]
-
-    # iterate
-    escape_radius_sqr = escape_radius**2
-    result = torch.zeros((maxit, resolution, resolution, d), dtype=A.dtype)
-
-    for i in range(1, maxit):
-        # evolve
-        z_prev = result[i - 1]
-        z_new = torch.einsum("ij,klj->kli", A, z_prev) ** 2 + c
-
-        # clip escaped values over escape radius
-        # NOTE: we set it to `R + 1 / sqrt(d)` so that `norm(z) == R + 1`
-        escaped = torch.sum(z_new.real**2 + z_new.imag**2, dim=-1) > escape_radius_sqr
-        z_new[escaped, :] = (escape_radius + 1) / np.sqrt(d)
-
-        result[i] = z_new
-
-    return result, c.squeeze(-1)
-
-
-# }}}
-
-
 # {{{ predict
 
 
@@ -234,6 +86,8 @@ def predict(
     resolution: int = 128,
     maxit: int = 128,
 ) -> Array3D:
+    from dmdaelib import generate_grid
+
     with torch.no_grad():
         c = generate_grid(*bbox, nx=resolution, ny=resolution, dtype=model.dtype)
         z = torch.zeros((*c.shape, model.input_size), dtype=model.dtype)  # ty: ignore[no-matching-overload]
@@ -259,6 +113,8 @@ def main(
     maxit: int = 128,
     overwrite: bool = False,
 ) -> int:
+    from dmdaelib import determine_escape_radius, generate_dataset
+
     # {{{ vallidate inputs
 
     if not filename.exists():
@@ -294,8 +150,6 @@ def main(
             / f"{filename.stem}-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}.npz"
         )
 
-    set_recommended_matplotlib()
-
     # }}}
 
     # {{{ generate dataset
@@ -317,6 +171,8 @@ def main(
     log.info("Converged: %d", torch.sum(mask))
     log.info("Max: %.5e (radius %.5e)", Z.abs().max(), escape_radius)
     log.info("Mean: %.5e", Z.abs().mean())
+
+    from dmdaelib import axis
 
     with axis(outfile.with_suffix("")) as ax:
         ax.imshow(mask, extent=bbox, cmap="binary")

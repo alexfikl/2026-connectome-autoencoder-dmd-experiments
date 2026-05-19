@@ -5,13 +5,13 @@ requires = [
 ]
 
 [project]
-name = "trn-gap-junctions"
+name = "fractal-dmd-autoencoder"
 version = "2026.0"
-description = "Experiments for analyzing TRN gap junctions"
+description = "Experiments with learning quadratic networks with DMD Autoencoders"
 keywords = [
     "Complex systems theory",
+    "Fractals",
     "Oscillators",
-    "TRN",
 ]
 license = "MIT"
 maintainers = [ { name = "Alexandru Fikl", email = "alexfikl@gmail.com" } ]
@@ -34,15 +34,11 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "jitcode>=1.7.3",
+    "array-api-compat",
     "matplotlib>=3.10",
-    "networkx>=3.4",
     "numpy>=2",
-    "nxviz>=0.7.6",
-    "orbitkit @ git+https://github.com/alexfikl/orbitkit.git#egg=orbitkit",
     "rich",
     "scienceplots>=2.2",
-    "symengine>=0.13",
 ]
 
 [dependency-groups]
@@ -54,9 +50,6 @@ dev = [
     "typos",
     "uv",
 ]
-
-[tool.hatch]
-metadata.allow-direct-references = true
 
 [tool.ruff]
 line-length = 88
@@ -108,7 +101,7 @@ lint.flake8-quotes.inline-quotes = "double"
 lint.flake8-quotes.multiline-quotes = "double"
 lint.isort.force-wrap-aliases = true
 lint.isort.known-first-party = [
-    "orbitkit",
+    "dmdaelib",
 ]
 lint.isort.required-imports = [
     "from __future__ import annotations",
