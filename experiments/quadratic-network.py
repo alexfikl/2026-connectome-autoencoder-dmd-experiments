@@ -30,7 +30,8 @@ Example:
 
 class ComplexMSELoss(nn.Module):
     def forward(self, y_hat, y):
-        return (y_hat - y).abs().pow(2).mean()
+        dy = y_hat - y
+        return (dy.conj() * dy).real.mean()
 
 
 class QuadraticActivation(nn.Module):
