@@ -79,6 +79,30 @@ class ComplexLinear(nn.Linear):
                 self.bias.zero_()
 
 
+class RealToComplexLinear(nn.Module):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        *,
+        dtype: Any | None = None,
+    ):
+        super().__init__()
+
+        ftype = None if dtype is None else dtype.to_real()
+        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=ftype))
+
+        # standard Xavier initialization
+        stdv = 1.0 / np.sqrt(in_features)
+        nn.init.uniform_(self.weight, -stdv, stdv)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.complex(
+            nn.functional.linear(x.real, self.weight),
+            nn.functional.linear(x.imag, self.weight),
+        )
+
+
 class QuadraticNetwork(nn.Module):
     def __init__(
         self,
@@ -89,6 +113,9 @@ class QuadraticNetwork(nn.Module):
         if output_size is None:
             output_size = input_size
 
+        if dtype is None:
+            dtype = torch.complex64
+
         super().__init__()
 
         self.input_size = input_size
@@ -97,7 +124,7 @@ class QuadraticNetwork(nn.Module):
 
         # NOTE: we know that our function is (A x)^2 + c, so just encode that
         self.model = nn.Sequential(
-            nn.Linear(input_size, output_size, bias=False, dtype=dtype.to_real()),
+            RealToComplexLinear(input_size, output_size, dtype=dtype),
             QuadraticActivation(),
             BiasLayer(output_size, dtype=dtype),
         )
@@ -261,7 +288,7 @@ def main(
 
         timer = TicTocTimer()
 
-        epochs = 100
+        epochs = 50
         batch_size = 4096
         num_batches = X.shape[0] // batch_size
         losses = torch.empty(epochs)
@@ -322,7 +349,7 @@ def main(
     #   1. we do not expect the matrices to match
     learned_A = model.model[0].weight.detach()  # ty: ignore[call-non-callable]
     A = mat.to(learned_A.dtype)
-    # E = torch.abs(learned_A - A) / torch.abs(A)
+    # E = torch.abs(learned_A - A)
 
     with figure(
         basename.with_stem(f"{basename.stem}-weights"),
@@ -331,6 +358,9 @@ def main(
         overwrite=overwrite,
     ) as fig:
         ax11, ax12, ax21, ax22 = fig.axes
+
+        A_eigs = torch.linalg.eigvals(A)
+        learned_A_eigs = torch.linalg.eigvals(learned_A)
 
         _, A_sigma, _ = torch.linalg.svd(A)
         _, learned_A_sigma, _ = torch.linalg.svd(learned_A)
@@ -343,9 +373,17 @@ def main(
         ax12.set_title("$A_{learned}$")
         fig.colorbar(im, cax=make_colorbar_axes(ax12))
 
-        im = ax21.imshow(learned_A / A)
-        ax21.set_title("Ratio")
-        fig.colorbar(im, cax=make_colorbar_axes(ax21))
+        ax21.plot(A_eigs.real, A_eigs.imag, "o", label=r"$\lambda(A)$")
+        ax21.plot(
+            learned_A_eigs.real,
+            learned_A_eigs.imag,
+            "o",
+            label=r"$\lambda(A_{learned})$",
+        )
+        ax21.set_xlabel(r"$\lambda_r$")
+        ax21.set_ylabel(r"$\lambda_i$")
+        ax21.set_title("EIG")
+        ax21.legend()
 
         ax22.plot(A_sigma, "o", label=r"$\sigma(A)$")
         ax22.plot(learned_A_sigma, "o", label=r"$\sigma(A_{learned})$")
