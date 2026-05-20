@@ -70,7 +70,9 @@ def set_plotting_defaults() -> None:
 
     mplstyle = dirname / "default.mplstyle"
     if mplstyle.exists():
-        mp.style.use(dirname / "default.mplstyle")
+        mp.style.use(mplstyle)
+    else:
+        log.error("Could not find matplotlib style: '%s'.", mplstyle)
 
     import os
 

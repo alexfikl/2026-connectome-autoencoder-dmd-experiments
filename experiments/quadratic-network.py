@@ -97,7 +97,7 @@ class QuadraticNetwork(nn.Module):
 
         # NOTE: we know that our function is (A x)^2 + c, so just encode that
         self.model = nn.Sequential(
-            ComplexLinear(input_size, output_size, bias=False, dtype=dtype),
+            nn.Linear(input_size, output_size, bias=False, dtype=dtype.to_real()),
             QuadraticActivation(),
             BiasLayer(output_size, dtype=dtype),
         )
@@ -261,7 +261,7 @@ def main(
 
         timer = TicTocTimer()
 
-        epochs = 50
+        epochs = 100
         batch_size = 4096
         num_batches = X.shape[0] // batch_size
         losses = torch.empty(epochs)
@@ -316,11 +316,13 @@ def main(
 
     # {{{ weight error
 
-    # NOTE: the learned linear layer should approximate A (the input matrix),
-    #   so compare the two to get a sense of training quality
+    # NOTE: the nn is trained to appproximate the trajectory, not the matrix A,
+    # even though the structure is the same (`(W x)^2 + b`). We look at the
+    # linear layer to get a sense of what it managed to do here. However,
+    #   1. we do not expect the matrices to match
     learned_A = model.model[0].weight.detach()  # ty: ignore[call-non-callable]
     A = mat.to(learned_A.dtype)
-    E = torch.abs(learned_A - A) / torch.abs(A)
+    # E = torch.abs(learned_A - A) / torch.abs(A)
 
     with figure(
         basename.with_stem(f"{basename.stem}-weights"),
@@ -330,8 +332,8 @@ def main(
     ) as fig:
         ax11, ax12, ax21, ax22 = fig.axes
 
-        A_eigs = torch.linalg.eigvals(A)
-        learned_A_eigs = torch.linalg.eigvals(learned_A)
+        _, A_sigma, _ = torch.linalg.svd(A)
+        _, learned_A_sigma, _ = torch.linalg.svd(learned_A)
 
         im = ax11.imshow(A.real, vmin=-1.0, vmax=1.0)
         ax11.set_title("$A$")
@@ -341,20 +343,15 @@ def main(
         ax12.set_title("$A_{learned}$")
         fig.colorbar(im, cax=make_colorbar_axes(ax12))
 
-        im = ax21.imshow(torch.log10(E))
-        ax21.set_title(r"$\log_{10}$(Error)")
+        im = ax21.imshow(learned_A / A)
+        ax21.set_title("Ratio")
         fig.colorbar(im, cax=make_colorbar_axes(ax21))
 
-        ax22.plot(A_eigs.real, A_eigs.imag, "o", label="eigs($A$)")
-        ax22.plot(
-            learned_A_eigs.real,
-            learned_A_eigs.imag,
-            "o",
-            label="eigs($A_{learned}$)",
-        )
-        ax22.set_xlabel(r"$\lambda_r$")
-        ax22.set_ylabel(r"$\lambda_i$")
-        ax22.set_title("Eigenvalues")
+        ax22.plot(A_sigma, "o", label=r"$\sigma(A)$")
+        ax22.plot(learned_A_sigma, "o", label=r"$\sigma(A_{learned})$")
+        ax22.set_ylabel(r"$\sigma$")
+        ax22.set_title("SVD")
+        ax22.legend()
 
     # }}}
 
