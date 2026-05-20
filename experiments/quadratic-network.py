@@ -233,6 +233,9 @@ def main(
     Y = (Z[1:, mask, :] - C[:, mask, :]).reshape(-1, d).contiguous()
     log.info("Dataset size: %s", X.shape)
 
+    # Compute target scale for Normalized MSE (NMSE) loss to resolve vanishing gradients
+    target_scale = torch.mean(Y.conj() * Y).real
+
     # }}}
 
     # {{{ train
@@ -241,7 +244,7 @@ def main(
 
     model = QuadraticNetwork(d, d, dtype=Z.dtype)
     criterion = ComplexMSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=1.0e-1)
+    optimizer = optim.Adam(model.parameters(), lr=5.0e-3)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
     weightsfile = outfile.with_suffix(".pth")
@@ -274,7 +277,7 @@ def main(
 
                 # compute loss function
                 predictions = compiled_model(batch_x)
-                loss = criterion(predictions, batch_y)
+                loss = criterion(predictions, batch_y) / target_scale
 
                 # compute gradient
                 loss.backward()
