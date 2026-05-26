@@ -171,13 +171,32 @@ class Autoencoder(nn.Module):
         self.hidden_sizes = hidden_sizes
         self.dtype = dtype
 
-        # NOTE: we're making the decoder be completely symmetric to the encoder
-        inverse_hidden_sizes = (*hidden_sizes[:-1][::-1], input_size)
-        self.encoder = QuadraticLayer(input_size, hidden_sizes)
-        self.decoder = QuadraticLayer(self.latent_size, inverse_hidden_sizes)
+        # # NOTE: we're making the decoder be completely symmetric to the encoder
+        # inverse_hidden_sizes = (*hidden_sizes[:-1][::-1], input_size)
+        # self.encoder = QuadraticLayer(input_size, hidden_sizes)
+        # self.decoder = QuadraticLayer(self.latent_size, inverse_hidden_sizes)
+
+        from itertools import pairwise
+
+        layer_sizes = (input_size, *hidden_sizes)
+
+        self.encoder = nn.Sequential(*[
+            ComplexLinear(n_in, n_out, dtype=dtype)
+            for n_in, n_out in pairwise(layer_sizes)
+        ])
+
+        self.bottleneck = nn.Sequential(
+            QuadraticActivation(),
+            BiasLayer(self.latent_size, dtype=dtype),
+        )
+
+        self.decoder = nn.Sequential(*[
+            ComplexLinear(n_in, n_out, dtype=dtype)
+            for n_in, n_out in pairwise(layer_sizes[::-1])
+        ])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.decoder(self.encoder(x))
+        return self.decoder(self.bottleneck(self.encoder(x)))
 
 
 # }}}
@@ -316,9 +335,9 @@ def main(
 
     from torch import optim
 
-    model = Autoencoder(d, hidden_sizes=(d,), num_layers=1, dtype=Z.dtype)
+    model = Autoencoder(d, hidden_sizes=(d // 2,), num_layers=1, dtype=Z.dtype)
     criterion = ComplexMSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=5.0e-3)
+    optimizer = optim.Adam(model.parameters(), lr=2.5e-3)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
     weightsfile = outfile.with_suffix(".pth")
@@ -335,7 +354,7 @@ def main(
 
         timer = TicTocTimer()
 
-        epochs = 50
+        epochs = 100
         batch_size = 4096
         num_batches = X.shape[0] // batch_size
         losses = torch.empty(epochs)
