@@ -12,6 +12,7 @@ import torch
 from torch import nn
 
 from dmdaelib import Array3D, make_default_logger
+from torchlib import BiasLayer, ComplexLinear, ComplexMSELoss, QuadraticActivation
 
 log = make_default_logger(__file__)
 
@@ -26,50 +27,6 @@ Example:
 
 
 # {{{ model
-
-
-class ComplexMSELoss(nn.Module):
-    def forward(self, y_hat, y):
-        dy = y_hat - y
-        return (dy.conj() * dy).real.mean()
-
-
-class QuadraticActivation(nn.Module):
-    def forward(self, x):
-        return x**2
-
-
-class BiasLayer(nn.Module):
-    def __init__(self, size: int, *, dtype: Any = None) -> None:
-        super().__init__()
-        self.bias = nn.Parameter(torch.zeros(size, dtype=dtype))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.bias
-
-
-class ComplexLinear(nn.Module):
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        *,
-        dtype: Any | None = None,
-    ):
-        super().__init__()
-
-        ftype = None if dtype is None else dtype.to_real()
-        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=ftype))
-
-        # standard Xavier initialization
-        stdv = 1.0 / np.sqrt(in_features)
-        nn.init.uniform_(self.weight, -stdv, stdv)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.complex(
-            nn.functional.linear(x.real, self.weight),
-            nn.functional.linear(x.imag, self.weight),
-        )
 
 
 class QuadraticNetwork(nn.Module):
