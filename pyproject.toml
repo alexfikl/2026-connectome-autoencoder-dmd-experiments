@@ -101,6 +101,7 @@ lint.flake8-quotes.multiline-quotes = "double"
 lint.isort.force-wrap-aliases = true
 lint.isort.known-first-party = [
     "dmdaelib",
+    "torchlib",
 ]
 lint.isort.required-imports = [
     "from __future__ import annotations",

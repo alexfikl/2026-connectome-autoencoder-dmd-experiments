@@ -201,7 +201,7 @@ class TicTocTimer:
         return self.t_wall
 
     def __str__(self) -> str:
-        return f"walltime {self.t_wall:.5f} seconds."
+        return f"walltime {self.t_wall:.5f} seconds"
 
 
 @contextmanager
