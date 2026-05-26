@@ -12,6 +12,14 @@ import torch
 from torch import nn
 
 from dmdaelib import Array3D, make_default_logger
+from torchlib import (
+    BiasLayer,
+    ComplexLinear,
+    ComplexMSELoss,
+    LeakyQuadraticActivation,
+    QuadraticActivation,
+    init_xavier_uniform_,
+)
 
 log = make_default_logger(__file__)
 
@@ -28,137 +36,26 @@ Example:
 # {{{ model
 
 
-class ComplexMSELoss(nn.Module):
-    def forward(self, y_hat, y):
-        dy = y_hat - y
-        return (dy.conj() * dy).real.mean()
-
-
-class QuadraticActivation(nn.Module):
-    def forward(self, x):
-        return x**2
-
-
-class BiasLayer(nn.Module):
-    def __init__(self, size: int, *, dtype: Any = None) -> None:
-        super().__init__()
-        self.bias = nn.Parameter(torch.zeros(size, dtype=dtype))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.bias
-
-
-class ComplexLinear(nn.Module):
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        *,
-        dtype: Any | None = None,
-    ):
-        super().__init__()
-
-        ftype = None if dtype is None else dtype.to_real()
-        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=ftype))
-
-        # standard Xavier initialization
-        stdv = 1.0 / np.sqrt(in_features)
-        nn.init.uniform_(self.weight, -stdv, stdv)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.complex(
-            nn.functional.linear(x.real, self.weight),
-            nn.functional.linear(x.imag, self.weight),
-        )
-
-
-class ComplexQuadratic(nn.Module):
-    def __init__(
-        self, input_size: int, output_size: int | None = None, dtype: Any = None
-    ) -> None:
-        if output_size is None:
-            output_size = input_size
-
-        if dtype is None:
-            dtype = torch.complex64
-
-        super().__init__()
-
-        self.input_size = input_size
-        self.output_size = output_size
-        self.dtype = dtype
-
-        self.model = nn.Sequential(
-            ComplexLinear(input_size, output_size, dtype=dtype),
-            QuadraticActivation(),
-            BiasLayer(output_size, dtype=dtype),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(x)
-
-
-class QuadraticLayer(nn.Module):
-    def __init__(
-        self,
-        input_size: int,
-        hidden_sizes: int | tuple[int, ...] | None = None,
-        num_layers: int = 1,
-        dtype: Any = None,
-    ) -> None:
-        if hidden_sizes is None:
-            hidden_sizes = input_size
-
-        if isinstance(hidden_sizes, int):
-            hidden_sizes = (hidden_sizes,) * num_layers
-
-        if len(hidden_sizes) != num_layers:
-            raise ValueError(
-                f"'hidden_sizes' does not match 'num_layers': {hidden_sizes} "
-                f"sizes for {num_layers} layers"
-            )
-
-        if dtype is None:
-            dtype = torch.complex64
-
-        super().__init__()
-
-        self.input_size = input_size
-        self.hidden_sizes = hidden_sizes
-        self.dtype = dtype
-
-        layer_sizes = (input_size, *hidden_sizes)
-        layers = []
-        for i in range(num_layers):
-            layers.append(
-                ComplexQuadratic(layer_sizes[i], layer_sizes[i + 1], dtype=dtype)
-            )
-
-        self.model = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(x)
-
-
 class Autoencoder(nn.Module):
     def __init__(
         self,
         input_size: int,
-        hidden_sizes: int | tuple[int, ...] | None = None,
-        num_layers: int = 1,
+        *,
+        encoder_layer_sizes: int | tuple[int, ...] | None = None,
+        decoder_layer_sizes: int | tuple[int, ...] | None = None,
         dtype: Any = None,
     ) -> None:
-        if hidden_sizes is None:
-            hidden_sizes = input_size
+        if encoder_layer_sizes is None:
+            encoder_layer_sizes = input_size
 
-        if isinstance(hidden_sizes, int):
-            hidden_sizes = (hidden_sizes,) * num_layers
+        if isinstance(encoder_layer_sizes, int):
+            encoder_layer_sizes = (encoder_layer_sizes,)
 
-        if len(hidden_sizes) != num_layers:
-            raise ValueError(
-                f"'hidden_sizes' does not match 'num_layers': {hidden_sizes} "
-                f"sizes for {num_layers} layers"
-            )
+        if decoder_layer_sizes is None:
+            decoder_layer_sizes = encoder_layer_sizes[-1]
+
+        if isinstance(decoder_layer_sizes, int):
+            decoder_layer_sizes = (decoder_layer_sizes,)
 
         if dtype is None:
             dtype = torch.complex64
@@ -166,37 +63,41 @@ class Autoencoder(nn.Module):
         super().__init__()
 
         self.input_size = input_size
-        self.output_size = input_size
-        self.latent_size = hidden_sizes[-1]
-        self.hidden_sizes = hidden_sizes
+        self.output_size = decoder_layer_sizes[-1]
+        self.latent_size = encoder_layer_sizes[-1]
+        self.encoder_layer_sizes = encoder_layer_sizes
+        self.decoder_layer_sizes = decoder_layer_sizes
         self.dtype = dtype
-
-        # # NOTE: we're making the decoder be completely symmetric to the encoder
-        # inverse_hidden_sizes = (*hidden_sizes[:-1][::-1], input_size)
-        # self.encoder = QuadraticLayer(input_size, hidden_sizes)
-        # self.decoder = QuadraticLayer(self.latent_size, inverse_hidden_sizes)
 
         from itertools import pairwise
 
-        layer_sizes = (input_size, *hidden_sizes)
+        layer_sizes = (input_size, *encoder_layer_sizes)
+        encoder_layers = []
+        for i, (n_in, n_out) in enumerate(pairwise(layer_sizes)):
+            linear = ComplexLinear(n_in, n_out, dtype=dtype)
+            init_xavier_uniform_(linear.weight, nonlinearity="quadratic")
 
-        self.encoder = nn.Sequential(*[
-            ComplexLinear(n_in, n_out, dtype=dtype)
-            for n_in, n_out in pairwise(layer_sizes)
-        ])
+            encoder_layers.append(linear)
+            encoder_layers.append(
+                LeakyQuadraticActivation()
+                if i != len(encoder_layer_sizes) - 1
+                else QuadraticActivation()
+            )
+            encoder_layers.append(BiasLayer(n_out, dtype=dtype))
 
-        self.bottleneck = nn.Sequential(
-            QuadraticActivation(),
-            BiasLayer(self.latent_size, dtype=dtype),
-        )
+        layer_sizes = (self.latent_size, *decoder_layer_sizes)
+        decoder_layers = []
+        for n_in, n_out in pairwise(layer_sizes):
+            linear = ComplexLinear(n_in, n_out, dtype=dtype)
+            init_xavier_uniform_(linear.weight, nonlinearity="quadratic")
 
-        self.decoder = nn.Sequential(*[
-            ComplexLinear(n_in, n_out, dtype=dtype)
-            for n_in, n_out in pairwise(layer_sizes[::-1])
-        ])
+            decoder_layers.append(linear)
+
+        self.encoder = nn.Sequential(*encoder_layers)
+        self.decoder = nn.Sequential(*decoder_layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.decoder(self.bottleneck(self.encoder(x)))
+        return self.decoder(self.encoder(x))
 
 
 # }}}
@@ -326,8 +227,8 @@ def main(
     Y = (Z[1:, mask, :] - C[:, mask, :]).reshape(-1, d).contiguous()
     log.info("Dataset size: %s", X.shape)
 
-    # Compute target scale for Normalized MSE loss to resolve vanishing gradients
-    target_scale = torch.mean(Y.conj() * Y).real
+    # compute target scale for Normalized MSE loss to resolve vanishing gradients
+    target_scale = torch.mean(X.conj() * X).real
 
     # }}}
 
@@ -335,10 +236,23 @@ def main(
 
     from torch import optim
 
-    model = Autoencoder(d, hidden_sizes=(d // 2,), num_layers=1, dtype=Z.dtype)
+    model = Autoencoder(
+        d,
+        encoder_layer_sizes=(d, d // 2),
+        decoder_layer_sizes=(d,),
+        dtype=Z.dtype,
+    )
     criterion = ComplexMSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=2.5e-3)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
+    optimizer = optim.Adam(model.parameters(), lr=1.0e-3)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        patience=3,
+        factor=0.3,
+        min_lr=1.0e-5,
+        cooldown=2,
+    )
+
+    log.info("Network:\n%s", model)
 
     weightsfile = outfile.with_suffix(".pth")
     if weightsfile.exists():
