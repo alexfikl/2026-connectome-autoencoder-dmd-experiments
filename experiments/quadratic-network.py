@@ -48,38 +48,7 @@ class BiasLayer(nn.Module):
         return x + self.bias
 
 
-class ComplexLinear(nn.Linear):
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        *,
-        bias: bool = True,
-        dtype: Any | None = None,
-    ):
-        super().__init__(in_features, out_features, bias=bias, dtype=dtype)
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        if not hasattr(self, "weight"):
-            return
-
-        # use complex Xavier initialization for the weights
-        with torch.no_grad():
-            stdv = 1.0 / np.sqrt(self.in_features)
-            real_w = torch.empty(self.out_features, self.in_features).uniform_(
-                -stdv, stdv
-            )
-            imag_w = torch.empty(self.out_features, self.in_features).uniform_(
-                -stdv, stdv
-            )
-            self.weight.copy_(torch.complex(real_w, imag_w))
-
-            if self.bias is not None:
-                self.bias.zero_()
-
-
-class RealToComplexLinear(nn.Module):
+class ComplexLinear(nn.Module):
     def __init__(
         self,
         in_features: int,
@@ -124,7 +93,7 @@ class QuadraticNetwork(nn.Module):
 
         # NOTE: we know that our function is (A x)^2 + c, so just encode that
         self.model = nn.Sequential(
-            RealToComplexLinear(input_size, output_size, dtype=dtype),
+            ComplexLinear(input_size, output_size, dtype=dtype),
             QuadraticActivation(),
             BiasLayer(output_size, dtype=dtype),
         )

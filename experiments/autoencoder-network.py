@@ -72,7 +72,7 @@ class ComplexLinear(nn.Module):
         )
 
 
-class QuadraticLayer(nn.Module):
+class ComplexQuadratic(nn.Module):
     def __init__(
         self, input_size: int, output_size: int | None = None, dtype: Any = None
     ) -> None:
@@ -98,7 +98,7 @@ class QuadraticLayer(nn.Module):
         return self.model(x)
 
 
-class EncoderLayer(nn.Module):
+class QuadraticLayer(nn.Module):
     def __init__(
         self,
         input_size: int,
@@ -131,7 +131,7 @@ class EncoderLayer(nn.Module):
         layers = []
         for i in range(num_layers):
             layers.append(
-                QuadraticLayer(layer_sizes[i], layer_sizes[i + 1], dtype=dtype)
+                ComplexQuadratic(layer_sizes[i], layer_sizes[i + 1], dtype=dtype)
             )
 
         self.model = nn.Sequential(*layers)
@@ -173,8 +173,8 @@ class Autoencoder(nn.Module):
 
         # NOTE: we're making the decoder be completely symmetric to the encoder
         inverse_hidden_sizes = (*hidden_sizes[:-1][::-1], input_size)
-        self.encoder = EncoderLayer(input_size, hidden_sizes)
-        self.decoder = EncoderLayer(self.latent_size, inverse_hidden_sizes)
+        self.encoder = QuadraticLayer(input_size, hidden_sizes)
+        self.decoder = QuadraticLayer(self.latent_size, inverse_hidden_sizes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.decoder(self.encoder(x))
@@ -308,7 +308,7 @@ def main(
     log.info("Dataset size: %s", X.shape)
 
     # Compute target scale for Normalized MSE loss to resolve vanishing gradients
-    target_scale = torch.mean(X.conj() * X).real
+    target_scale = torch.mean(Y.conj() * Y).real
 
     # }}}
 
