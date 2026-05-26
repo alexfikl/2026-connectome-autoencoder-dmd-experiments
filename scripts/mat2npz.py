@@ -169,7 +169,7 @@ def convert_matlab(
 
         result[name] = new_mat
 
-    np.savez(outfile, **result)
+    np.savez(outfile, allow_pickle=True, **result)
     log.info("Saved matries to file: '%s'.", outfile)
 
     return int(bool(ret))
