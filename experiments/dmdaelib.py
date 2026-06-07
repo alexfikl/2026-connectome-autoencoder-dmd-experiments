@@ -122,7 +122,7 @@ def savefig(
     filename: pathlib.Path,
     *,
     bbox_inches: str = "tight",
-    pad_inches: float = 0,
+    pad_inches: float = 0.075,
     normalize: bool = False,
     facecolor: str = "white",
     transparent: bool = False,
@@ -282,7 +282,7 @@ def generate_dataset(
     assert A.shape[0] == A.shape[1]
 
     # NOTE: promoting A to complex because einsum doesn't handle heterogeneous dtypes
-    A = A.to(A.dtype.to_complex())
+    A = xp.astype(A, xp.result_type(A.dtype, xp.complex64))
     d = A.shape[0]
 
     # NOTE: allow a maximum element z[i] such that norm(z) ~ escape_radius
@@ -303,7 +303,7 @@ def generate_dataset(
 
         # clip escaped values over escape radius
         # NOTE: we set it to `R + 1 / sqrt(d)` so that `norm2(z) == R + 1`
-        escaped = xp.sum(z_new.real**2 + z_new.imag**2, dim=-1) > escape_radius_sqr
+        escaped = xp.sum(z_new.real**2 + z_new.imag**2, axis=-1) > escape_radius_sqr
         z_new = xp.where(escaped[..., None], max_z, z_new)
 
         result[i] = z_new
@@ -356,7 +356,7 @@ def dmd_build(
     xp = array_api_compat.array_namespace(X1, X2)
 
     U, S, Vh = xp.linalg.svd(X1, full_matrices=False)
-    S = S.to(X1.dtype)
+    S = xp.astype(S, X1.dtype)
 
     if rank is not None:
         U, S, Vh = U[:, :rank], S[:rank], Vh[:rank, :]

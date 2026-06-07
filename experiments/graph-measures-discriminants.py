@@ -23,16 +23,111 @@ Example:
 
 NAME_TO_LABEL = {
     "avg_strength": r"$\langle A \rangle$",
-    "avg_clustering": r"$\langle C \rangle$",
+    # "avg_clustering": r"$\langle C \rangle$",
     "transitivity": "T",
     "global_efficiency": "GE",
-    "local_efficiency": "LE",
+    # "local_efficiency": "LE",
     "avg_betweenness": r"$\langle BC \rangle$",
     "avg_eigenvector": r"$\langle EC \rangle$",
     "assortativity": "AC",
-    "modularity": "M",
-    "algebraic_connectivity": "AC",
+    # "modularity": "M",
+    # "algebraic_connectivity": "AC",
+    # "dmd_mode_1": r"$|b_1|$",
+    "dmd_mode_2": r"$|b_2|$",
+    "dmd_mode_3": r"$|b_3|$",
+    "dmd_mode_4": r"$|b_4|$",
+    # "dmd_eig_1": r"$|\lambda_1|$",
+    "dmd_eig_2": r"$|\lambda_2|$",
+    "dmd_eig_3": r"$|\lambda_3|$",
+    "dmd_eig_4": r"$|\lambda_4|$",
 }
+
+
+def dmd_optimal_mode_strengths(
+    mat: np.ndarray,
+    *,
+    n_modes: int = 4,
+    maxit: int = 64,
+    escape_radius: float = 100.0,
+    resolution: int = 32,
+) -> dict[str, np.ndarray]:
+    """Compute optimal DMD mode amplitudes and eigenvalue magnitudes.
+
+    Evolves the quadratic iteration z <- (A z)^2 + c over a grid of initial
+    conditions (matching dmd-reconstruction.py), builds the X1/X2 snapshot
+    pairs, fits a DMD model, then solves for optimal mode amplitudes by least
+    squares over all snapshots (Jovanovic et al. 2014).
+
+    Returns a dict with keys ``"modes"`` (optimal amplitude magnitudes |b_k|)
+    and ``"eigs"`` (eigenvalue magnitudes |lambda_k|), both sorted by
+    descending |eigenvalue| and of length *n_modes*.
+    """
+    from dmdaelib import dmd_build, generate_dataset
+
+    d = mat.shape[0]
+    bbox = (-0.025, 0.025, -0.025, 0.025)
+
+    Z, c = generate_dataset(
+        mat,
+        bbox=bbox,
+        resolution=resolution,
+        escape_radius=escape_radius,
+        maxit=maxit,
+    )
+
+    # mask out points that escaped
+    mask = np.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, axis=-1) < escape_radius**2
+
+    # build snapshot matrix: append c as extra variable, keep only converged points
+    C = np.tile(c[None, :, :, None], (maxit, 1, 1, 1))
+    X = np.concatenate([Z, C], axis=3)
+    X = X[:, mask, :]
+    X = X.reshape(maxit, -1)
+
+    X1 = X[:-1].reshape(-1, d + 1).T
+    X2 = X[1:].reshape(-1, d + 1).T
+
+    model = dmd_build(X1, X2, eps=1.0e-6)
+
+    # eigendecomposition of the reduced propagator; sort by descending |eigenvalue|
+    eigenvalues, eigenvectors = np.linalg.eig(model.Ahat)
+    order = np.argsort(np.abs(eigenvalues))[::-1]
+    eigenvalues = eigenvalues[order]
+    eigenvectors = eigenvectors[:, order]
+
+    # project all X1 snapshots into the reduced space: shape (rank, n_pairs)
+    # X1 has shape (d+1, n_pairs), U has shape (d+1, rank)
+    Xhat = model.U.conj().T @ X1
+
+    # optimal amplitude via Jovanovic normal equations:
+    #   P = (Phi^H Phi) o conj(V V^H),  q = diag(V Xhat^H Phi),  b = P^{-1} q
+    #
+    # The Vandermonde V[k, j] = lambda_k^{t(j)} where t(j) is the time index of
+    # snapshot pair j. Pairs are stacked as (maxit-1) blocks of n_converged points,
+    # so t(j) = j // n_converged.
+    n_converged = int(mask.sum())
+    t = np.repeat(np.arange(maxit - 1), n_converged)  # shape (n_pairs,)
+    n_modes_avail = len(eigenvalues)
+    Vdmd = eigenvalues[:, None] ** t[None, :]  # (n_modes_avail, n_pairs)
+
+    PhiH_Phi = eigenvectors.conj().T @ eigenvectors
+    Vdmd_VdmdH = Vdmd @ Vdmd.conj().T
+    P = PhiH_Phi * Vdmd_VdmdH.conj()
+    q = np.diag(Vdmd @ Xhat.conj().T @ eigenvectors)
+
+    b = np.linalg.solve(P, q)
+
+    n_out = min(n_modes, n_modes_avail)
+
+    def _pad(arr: np.ndarray) -> np.ndarray:
+        if n_out < n_modes:
+            arr = np.pad(arr, (0, n_modes - n_out))
+        return arr.astype(mat.dtype)
+
+    return {
+        "modes": _pad(np.abs(b[:n_out])),
+        "eigs": _pad(np.abs(eigenvalues[:n_out])),
+    }
 
 
 def compute_class_graph_measures(
@@ -80,11 +175,20 @@ def compute_class_graph_measures(
     assortativity = np.empty(nsamples, dtype=matrices.dtype)
     modularity = np.empty(nsamples, dtype=matrices.dtype)
     algebraic_connectivity = np.empty(nsamples, dtype=matrices.dtype)
+    dmd_modes = np.empty((nsamples, 4), dtype=matrices.dtype)
+    dmd_eigs = np.empty((nsamples, 4), dtype=matrices.dtype)
 
     for i in range(nsamples):
         # NOTE: this is a choice, maybe not the best one, but we need an unsigned
         # matrix for most of these measures.
         mat = np.abs(matrices[i])
+        log.info("%s: matrix %d / %d", filename, i + 1, nsamples)
+
+        # DMD evolves the quadratic iteration z <- (A z)^2 + c driven by this
+        # matrix; the snapshots are generated internally by generate_dataset
+        dmd_result = dmd_optimal_mode_strengths(matrices[i], n_modes=4)
+        dmd_modes[i] = dmd_result["modes"]
+        dmd_eigs[i] = dmd_result["eigs"]
 
         # clean up the matrices a bit to avoid noise
         np.fill_diagonal(mat, 0.0)
@@ -141,6 +245,14 @@ def compute_class_graph_measures(
         "assortativity": assortativity,
         "modularity": modularity,
         # "algebraic_connectivity": algebraic_connectivity,
+        "dmd_mode_1": dmd_modes[:, 0],
+        "dmd_mode_2": dmd_modes[:, 1],
+        "dmd_mode_3": dmd_modes[:, 2],
+        "dmd_mode_4": dmd_modes[:, 3],
+        "dmd_eig_1": dmd_eigs[:, 0],
+        "dmd_eig_2": dmd_eigs[:, 1],
+        "dmd_eig_3": dmd_eigs[:, 2],
+        "dmd_eig_4": dmd_eigs[:, 3],
     }
 
 
@@ -169,16 +281,16 @@ def main(
     else:
         datasets = {}
         for filename in filenames:
-            try:
-                datasets[filename.stem] = compute_class_graph_measures(
-                    filename,
-                    datakey=datakey,
-                    tol=tol,
-                )
-            except Exception as exc:
-                log.error("Failed to compute graph measures: '%s'.", filename)
-                log.error("Error: %s", exc)
-                return 1
+            # try:
+            datasets[filename.stem] = compute_class_graph_measures(
+                filename,
+                datakey=datakey,
+                tol=tol,
+            )
+            # except Exception as exc:
+            #     log.error("Failed to compute graph measures: '%s'.", filename)
+            #     log.error("Error: %s", exc)
+            #     return 1
 
         np.savez(outfile, datasets=datasets)  # ty: ignore[invalid-argument-type]
 
@@ -186,7 +298,8 @@ def main(
 
     # {{{ build stacked arrays and class labels
 
-    measure_names = list(next(iter(datasets.values())).keys())
+    available = set(next(iter(datasets.values())).keys())
+    measure_names = [m for m in NAME_TO_LABEL if m in available]
     class_names = list(datasets.keys())
     nmeasures = len(measure_names)
 
@@ -244,8 +357,8 @@ def main(
 
         ax.bar(np.arange(nmeasures), nmi, width=0.9)
         ax.set_xticks(np.arange(nmeasures))
-        ax.set_xticklabels(pretty_names, rotation=45, ha="right")
-        ax.set_ylabel(r"$\mathrm{MI}(X;\,Y) \,/\, H(Y)$")
+        ax.set_xticklabels(pretty_names, rotation=45, ha="right", fontsize=16)
+        ax.set_ylabel("NMI")
 
     # }}}
 
@@ -257,7 +370,7 @@ def main(
 
         ax.bar(np.arange(nmeasures), eta2, width=0.9)
         ax.set_xticks(np.arange(nmeasures))
-        ax.set_xticklabels(pretty_names, rotation=45, ha="right")
+        ax.set_xticklabels(pretty_names, rotation=45, ha="right", fontsize=16)
         ax.set_ylabel(r"$\eta^2$")
 
     # }}}
@@ -269,10 +382,10 @@ def main(
         ax.grid(visible=False, which="both")
 
         im = ax.imshow(corr, vmin=-1.0, vmax=1.0, cmap="seismic")
-        ax.set_xticks(np.arange(nmeasures) + 0.5)
-        ax.set_yticks(np.arange(nmeasures) + 0.5)
-        ax.set_xticklabels(pretty_names, rotation=45, ha="right")
-        ax.set_yticklabels(pretty_names)
+        ax.set_xticks(np.arange(nmeasures))
+        ax.set_yticks(np.arange(nmeasures))
+        ax.set_xticklabels(pretty_names, rotation=45, ha="right", fontsize=16)
+        ax.set_yticklabels(pretty_names, fontsize=16)
 
         cax = make_colorbar_axes(ax)
         fig.colorbar(im, cax=cax)
