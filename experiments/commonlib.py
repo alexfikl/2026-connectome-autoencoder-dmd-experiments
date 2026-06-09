@@ -187,8 +187,8 @@ def split_dataset(
         Y = Z[1:, mask, :].reshape(-1, d).contiguous()
 
     if split_real_imaginary:
-        X = xp.concat([X.real, X.imag], dim=-1)
-        Y = xp.concat([Y.real, Y.imag], dim=-1)
+        X = xp.concat([X.real, X.imag], axis=-1)
+        Y = xp.concat([Y.real, Y.imag], axis=-1)
 
     return X, Y
 

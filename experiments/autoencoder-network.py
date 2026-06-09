@@ -84,7 +84,7 @@ class Autoencoder(nn.Module):
             linear = ComplexLinear(n_in, n_out, bias=False, dtype=dtype)
 
             if nonlinearity == "quadratic":
-                nonlinearity = "quadratic" if is_last else "leaky_quadratic"
+                layer_nonlinearity = "quadratic" if is_last else "leaky_quadratic"
                 param = None if is_last else alpha
                 activation = (
                     ComplexLeakyQuadratic(alpha)
@@ -92,15 +92,20 @@ class Autoencoder(nn.Module):
                     else ComplexQuadratic()
                 )
             elif nonlinearity == "leaky_relu":
+                layer_nonlinearity = nonlinearity
                 param = alpha
                 activation = nn.LeakyReLU(negative_slope=alpha)
             else:
                 raise ValueError(f"unsupported nonlinearity: {nonlinearity!r}")
 
-            kaiming_uniform_(linear.kernel, nonlinearity=nonlinearity, param=param)  # ty: ignore[invalid-argument-type]
+            kaiming_uniform_(
+                linear.weight,
+                nonlinearity=layer_nonlinearity,
+                param=param,
+            )
             encoder_layers.append(linear)
             encoder_layers.append(activation)
-            encoder_layers.append(Bias(n_out, dtype=dtype))
+            encoder_layers.append(Bias(2 * n_out, dtype=dtype))
 
         # decoder
         layer_sizes = (self.latent_size, *decoder_layer_sizes)
@@ -225,7 +230,7 @@ def main(
         d,
         encoder_layer_sizes=(d, d // 2),
         decoder_layer_sizes=(d,),
-        dtype=Z.dtype,
+        dtype=X.dtype,
     )
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1.0e-3)
