@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pathlib
 from collections.abc import Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import array_api_compat
 import numpy as np
@@ -13,6 +13,9 @@ import numpy as np
 from nneuroutil.dmd import DMD
 from nneuroutil.helpers import module_logger
 from nneuroutil.typing import Array2D, Array3D, Array4D
+
+if TYPE_CHECKING:
+    from torch import nn
 
 log = module_logger("fractallib")
 
@@ -241,6 +244,48 @@ def iter_batches(
     for start in range(0, len(X), batch_size):
         sl = idx[start : start + batch_size]
         yield X[sl], Y[sl]
+
+
+# }}}
+
+
+# {{{ torch_predict
+
+
+def torch_predict(
+    model: nn.Module,
+    *,
+    bbox: tuple[float, float, float, float],
+    resolution: int = 128,
+    maxit: int = 128,
+) -> Array3D:
+    import array_api_compat
+    import torch
+
+    from fractallib import generate_grid
+
+    d = int(model.input_size)  # ty: ignore[invalid-argument-type]
+    dtype = model.dtype
+    assert isinstance(dtype, torch.dtype)
+    assert dtype.is_floating_point
+
+    with torch.no_grad():
+        z = torch.zeros((resolution, resolution, 2 * d), dtype=dtype)
+        c = generate_grid(
+            *bbox,
+            nx=resolution,
+            ny=resolution,
+            dtype=dtype.to_complex(),
+            xp=array_api_compat.array_namespace(z),
+        )
+        c = c[:, :, None]
+
+        for _ in range(1, maxit):
+            Az = model(z)
+            z[:, :, :d] = Az[:, :, :d] + c.real
+            z[:, :, d:] = Az[:, :, d:] + c.imag
+
+    return torch.complex(z[:, :, :d], z[:, :, d:])
 
 
 # }}}

@@ -12,7 +12,6 @@ import torch
 from torch import nn
 
 from nneuroutil.helpers import TicTocTimer, module_logger, tictoc
-from nneuroutil.typing import Array3D
 
 log = module_logger("fractallib.quadratic_network")
 
@@ -22,7 +21,7 @@ Trains a quadratic neural network.
 
 Example:
 
-    > {SCRIPT_PATH.name}
+    > {SCRIPT_PATH.name} dataset.npz
 """
 
 
@@ -59,46 +58,6 @@ class QuadraticNetwork(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
-
-
-# }}}
-
-# {{{ predict
-
-
-def predict(
-    model: nn.Module,
-    *,
-    bbox: tuple[float, float, float, float],
-    resolution: int = 128,
-    maxit: int = 128,
-) -> Array3D:
-    import array_api_compat
-
-    from fractallib import generate_grid
-
-    d = int(model.input_size)  # ty: ignore[invalid-argument-type]
-    dtype = model.dtype
-    assert isinstance(dtype, torch.dtype)
-    assert dtype.is_floating_point
-
-    with torch.no_grad():
-        z = torch.zeros((resolution, resolution, 2 * d), dtype=dtype)
-        c = generate_grid(
-            *bbox,
-            nx=resolution,
-            ny=resolution,
-            dtype=dtype.to_complex(),
-            xp=array_api_compat.array_namespace(z),
-        )
-        c = c[:, :, None]
-
-        for _ in range(1, maxit):
-            Az = model(z)
-            z[:, :, :d] = Az[:, :, :d] + c.real
-            z[:, :, d:] = Az[:, :, d:] + c.imag
-
-    return torch.complex(z[:, :, :d], z[:, :, d:])
 
 
 # }}}
@@ -208,6 +167,8 @@ def main(
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=5.0e-3)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
+
+    log.info("Network:\n%s", model)
 
     weightsfile = outfile.with_suffix(".pkl")
     if weightsfile.exists():
@@ -328,8 +289,13 @@ def main(
 
     # {{{ forecast
 
-    Zpredict = predict(
-        compiled_model, bbox=bbox, resolution=2 * resolution, maxit=maxit
+    from fractallib import torch_predict
+
+    Zpredict = torch_predict(
+        compiled_model,
+        bbox=bbox,
+        resolution=2 * resolution,
+        maxit=maxit,
     )
     mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
 
