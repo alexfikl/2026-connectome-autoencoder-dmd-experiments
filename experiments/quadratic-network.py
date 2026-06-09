@@ -13,7 +13,7 @@ from torch import nn
 
 from nneuroutil.helpers import TicTocTimer, module_logger, tictoc
 
-log = module_logger("fractallib.quadratic_network")
+log = module_logger("lib.quadratic_network")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
@@ -102,7 +102,7 @@ def main(
         return 1
 
     if escape_radius is None:
-        from fractallib import determine_escape_radius
+        from commonlib import determine_escape_radius
 
         escape_radius = determine_escape_radius(mat)
 
@@ -122,7 +122,7 @@ def main(
     log.info("Generating dataset on %s", bbox)
 
     with tictoc("generate_dataset"):
-        from fractallib import generate_dataset
+        from commonlib import generate_dataset
 
         Z, c = generate_dataset(
             mat,
@@ -150,7 +150,7 @@ def main(
 
     # {{{ build torch dataset
 
-    from fractallib import iter_batches, split_dataset
+    from commonlib import iter_batches, split_dataset
 
     # Compute target scale for Normalized MSE (NMSE) loss to resolve vanishing gradients
     X, Y = split_dataset(Z, C=c, escape_radius=escape_radius, split_real_imaginary=True)
@@ -289,7 +289,7 @@ def main(
 
     # {{{ forecast
 
-    from fractallib import torch_predict
+    from commonlib import torch_predict
 
     Zpredict = torch_predict(
         compiled_model,

@@ -17,7 +17,7 @@ from nneuroutil.typing import Array2D, Array3D, Array4D
 if TYPE_CHECKING:
     from torch import nn
 
-log = module_logger("fractallib")
+log = module_logger("lib")
 
 # {{{ matplotlib
 
@@ -261,8 +261,6 @@ def torch_predict(
 ) -> Array3D:
     import array_api_compat
     import torch
-
-    from fractallib import generate_grid
 
     d = int(model.input_size)  # ty: ignore[invalid-argument-type]
     dtype = model.dtype

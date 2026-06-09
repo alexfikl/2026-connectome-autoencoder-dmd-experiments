@@ -10,7 +10,7 @@ import numpy as np
 
 from nneuroutil.helpers import module_logger, tictoc
 
-log = module_logger("fractallib.dmd")
+log = module_logger("lib.dmd")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
@@ -37,7 +37,7 @@ def main(
 ) -> int:
     import torch
 
-    from fractallib import determine_escape_radius, generate_dataset
+    from commonlib import determine_escape_radius, generate_dataset
 
     # {{{ vallidate inputs
 
@@ -149,7 +149,7 @@ def main(
     #   - What's a good tolerance for the escaped points based on the error?
     #   - bumping the resolution to 128x128 seems to fail (everybody escapes?)
 
-    from fractallib import dmd_predict
+    from commonlib import dmd_predict
 
     with tictoc("Predicting"):
         Zpredict = dmd_predict(model, Z, bbox=bbox)

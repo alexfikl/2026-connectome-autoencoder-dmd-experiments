@@ -11,7 +11,7 @@ import numpy as np
 from nneuroutil.helpers import module_logger
 from nneuroutil.typing import Array1D, Array2D, DTypeLike
 
-log = module_logger("fractallib.check_matrix_spectra")
+log = module_logger("lib.check_matrix_spectra")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
@@ -161,7 +161,7 @@ def main(
     import matplotlib.pyplot as mp
     from matplotlib.colors import SymLogNorm
 
-    from fractallib import set_plotting_defaults  # noqa: F401
+    from commonlib import set_plotting_defaults  # noqa: F401
 
     ext = ".{}".format(mp.rcParams["savefig.format"])
 

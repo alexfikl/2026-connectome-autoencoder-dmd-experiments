@@ -11,7 +11,7 @@ import numpy as np
 from nneuroutil.helpers import module_logger
 from nneuroutil.typing import Array1D
 
-log = module_logger("fractallib.graph_measures")
+log = module_logger("lib.graph_measures")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
@@ -63,7 +63,7 @@ def dmd_optimal_mode_strengths(
     and ``"eigs"`` (eigenvalue magnitudes |lambda_k|), both sorted by
     descending |eigenvalue| and of length *n_modes*.
     """
-    from fractallib import generate_dataset
+    from commonlib import generate_dataset
 
     d = mat.shape[0]
     bbox = (-0.025, 0.025, -0.025, 0.025)
@@ -351,7 +351,7 @@ def main(
 
     # {{{ mutual information bar plot
 
-    from fractallib import set_plotting_defaults  # noqa: F401
+    from commonlib import set_plotting_defaults  # noqa: F401
     from nneuroutil.visualization import figure, make_colorbar_axes
 
     pretty_names = [NAME_TO_LABEL[name] for name in measure_names]
