@@ -10,7 +10,6 @@ from typing import Any, cast
 import numpy as np
 import torch
 from torch import nn
-from torchlib import BiasLayer, ComplexLinear, ComplexMSELoss, QuadraticActivation
 
 from nneuroutil.helpers import TicTocTimer, module_logger, tictoc
 from nneuroutil.typing import Array3D
@@ -41,7 +40,7 @@ class QuadraticNetwork(nn.Module):
             output_size = input_size
 
         if dtype is None:
-            dtype = torch.complex64
+            dtype = torch.float32
 
         super().__init__()
 
@@ -49,11 +48,13 @@ class QuadraticNetwork(nn.Module):
         self.output_size = output_size
         self.dtype = dtype
 
+        from nneuroutil.torch_extras import Bias, ComplexLinear, ComplexQuadratic
+
         # NOTE: we know that our function is (A x)^2 + c, so just encode that
         self.model = nn.Sequential(
-            ComplexLinear(input_size, output_size, dtype=dtype),
-            QuadraticActivation(),
-            BiasLayer(output_size, dtype=dtype),
+            ComplexLinear(input_size, output_size, bias=False, dtype=dtype),
+            ComplexQuadratic(),
+            Bias(2 * output_size, dtype=dtype),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -76,17 +77,28 @@ def predict(
 
     from fractallib import generate_grid
 
-    with torch.no_grad():
-        z = torch.zeros((resolution, resolution, model.input_size), dtype=model.dtype)  # ty: ignore[no-matching-overload]
-        xp = array_api_compat.array_namespace(z)
+    d = int(model.input_size)  # ty: ignore[invalid-argument-type]
+    dtype = model.dtype
+    assert isinstance(dtype, torch.dtype)
+    assert dtype.is_floating_point
 
-        c = generate_grid(*bbox, nx=resolution, ny=resolution, dtype=model.dtype, xp=xp)
+    with torch.no_grad():
+        z = torch.zeros((resolution, resolution, 2 * d), dtype=dtype)
+        c = generate_grid(
+            *bbox,
+            nx=resolution,
+            ny=resolution,
+            dtype=dtype.to_complex(),
+            xp=array_api_compat.array_namespace(z),
+        )
         c = c[:, :, None]
 
         for _ in range(1, maxit):
-            z = model(z) + c
+            Az = model(z)
+            z[:, :, :d] = Az[:, :, :d] + c.real
+            z[:, :, d:] = Az[:, :, d:] + c.imag
 
-    return z
+    return torch.complex(z[:, :, :d], z[:, :, d:])
 
 
 # }}}
@@ -103,8 +115,6 @@ def main(
     maxit: int = 128,
     overwrite: bool = False,
 ) -> int:
-    from fractallib import determine_escape_radius, generate_dataset, iter_batches
-
     # {{{ vallidate inputs
 
     if not filename.exists():
@@ -133,6 +143,8 @@ def main(
         return 1
 
     if escape_radius is None:
+        from fractallib import determine_escape_radius
+
         escape_radius = determine_escape_radius(mat)
 
     if outfile is None:
@@ -151,6 +163,8 @@ def main(
     log.info("Generating dataset on %s", bbox)
 
     with tictoc("generate_dataset"):
+        from fractallib import generate_dataset
+
         Z, c = generate_dataset(
             mat,
             bbox=bbox,
@@ -177,18 +191,12 @@ def main(
 
     # {{{ build torch dataset
 
-    # NOTE: we have an array of shape (maxit, n, n, d) and we want to
-    #   * make our input/output be (Z_n, Z_{n + 1}) so that we can learn the dynamics
-    #   * take only the converged points (based on mask from above)
-    #   * squish everything down to use d as the "features"
-
-    X = Z[:-1, mask, :].reshape(-1, d).contiguous()
-    C = c.unsqueeze(0).unsqueeze(-1).expand(maxit - 1, -1, -1, d)
-    Y = (Z[1:, mask, :] - C[:, mask, :]).reshape(-1, d).contiguous()
-    log.info("Dataset size: %s", X.shape)
+    from fractallib import iter_batches, split_dataset
 
     # Compute target scale for Normalized MSE (NMSE) loss to resolve vanishing gradients
+    X, Y = split_dataset(Z, C=c, escape_radius=escape_radius, split_real_imaginary=True)
     target_scale = torch.mean(Y.conj() * Y).real
+    log.info("Dataset: %s", X.shape)
 
     # }}}
 
@@ -196,12 +204,12 @@ def main(
 
     from torch import optim
 
-    model = QuadraticNetwork(d, d, dtype=Z.dtype)
-    criterion = ComplexMSELoss()
+    model = QuadraticNetwork(d, d, dtype=X.dtype)
+    criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=5.0e-3)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
-    weightsfile = outfile.with_suffix(".pth")
+    weightsfile = outfile.with_suffix(".pkl")
     if weightsfile.exists():
         checkpoint = torch.load(weightsfile)
 
