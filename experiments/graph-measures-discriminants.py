@@ -8,9 +8,10 @@ import pathlib
 
 import numpy as np
 
-from dmdaelib import Array1D, make_default_logger
+from nneuroutil.helpers import module_logger
+from nneuroutil.typing import Array1D
 
-log = make_default_logger(__file__)
+log = module_logger("fractallib.graph_measures")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
@@ -62,7 +63,7 @@ def dmd_optimal_mode_strengths(
     and ``"eigs"`` (eigenvalue magnitudes |lambda_k|), both sorted by
     descending |eigenvalue| and of length *n_modes*.
     """
-    from dmdaelib import dmd_build, generate_dataset
+    from fractallib import generate_dataset
 
     d = mat.shape[0]
     bbox = (-0.025, 0.025, -0.025, 0.025)
@@ -87,7 +88,9 @@ def dmd_optimal_mode_strengths(
     X1 = X[:-1].reshape(-1, d + 1).T
     X2 = X[1:].reshape(-1, d + 1).T
 
-    model = dmd_build(X1, X2, eps=1.0e-6)
+    from nneuroutil.dmd import build_dmd
+
+    model = build_dmd(X1, X2, eps=1.0e-6)
 
     # eigendecomposition of the reduced propagator; sort by descending |eigenvalue|
     eigenvalues, eigenvectors = np.linalg.eig(model.Ahat)
@@ -348,7 +351,8 @@ def main(
 
     # {{{ mutual information bar plot
 
-    from dmdaelib import figure, make_colorbar_axes
+    from fractallib import set_plotting_defaults  # noqa: F401
+    from nneuroutil.visualization import figure, make_colorbar_axes
 
     pretty_names = [NAME_TO_LABEL[name] for name in measure_names]
     with figure(basename.with_stem(f"{basename.stem}-mi")) as fig:
