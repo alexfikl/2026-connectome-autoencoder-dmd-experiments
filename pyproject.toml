@@ -38,6 +38,7 @@ dependencies = [
     "numpy>=2",
     "rich",
     "scienceplots>=2.2",
+    "nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git#egg=nneuroutil",
 ]
 
 [dependency-groups]
