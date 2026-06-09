@@ -8,9 +8,9 @@ import pathlib
 
 import numpy as np
 
-from dmdaelib import make_default_logger
+from nneuroutil.helpers import module_logger, tictoc
 
-log = make_default_logger(__file__)
+log = module_logger("fractallib.dmd")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
@@ -20,7 +20,7 @@ Uses a classic DMD to learn the dynamics of a quadratic iteration
 
 Example:
 
-    > {SCRIPT_PATH.name}
+    > {SCRIPT_PATH.name} dataset.npz
 """
 
 
@@ -32,12 +32,12 @@ def main(
     dataidx: int = 5,
     escape_radius: float | None = 100.0,
     resolution: int = 128,
-    maxit: int = 128,
+    maxit: int = 192,
     overwrite: bool = False,
 ) -> int:
     import torch
 
-    from dmdaelib import determine_escape_radius, generate_dataset
+    from fractallib import determine_escape_radius, generate_dataset
 
     # {{{ vallidate inputs
 
@@ -81,12 +81,10 @@ def main(
 
     # {{{ generate dataset
 
-    from dmdaelib import figure, timeit
-
     d = mat.shape[0]
-    bbox = (-0.03, 0.03, -0.03, 0.03)
+    bbox = (-0.04, 0.04, -0.04, 0.04)
 
-    with timeit(f"Generated dataset on {bbox}"):
+    with tictoc(f"Generated dataset on {bbox}"):
         Z, c = generate_dataset(
             mat,
             bbox=bbox,
@@ -100,6 +98,8 @@ def main(
     log.info("Converged: %d", torch.sum(mask))
     log.info("Max: %.5e (radius %.5e)", torch.max(torch.abs(Z)), escape_radius)
     log.info("Mean: %.5e", torch.mean(torch.abs(Z)))
+
+    from nneuroutil.visualization import figure, make_colorbar_axes
 
     with figure(basename.with_stem(f"{basename.stem}-dataset")) as fig:
         ax = fig.gca()
@@ -127,10 +127,11 @@ def main(
 
     # {{{ train
 
-    from dmdaelib import dmd_build, dmd_predict
+    from nneuroutil.dmd import build_dmd, total_least_squares
 
-    with timeit("Constructed DMD model"):
-        model = dmd_build(X1, X2, eps=1.0e-6)
+    with tictoc("Constructed DMD model"):
+        X1, X2 = total_least_squares(X1, X2, eps=1.0e-6)
+        model = build_dmd(X1, X2, eps=1.0e-6)
 
     with figure(basename.with_stem(f"{basename.stem}-sigma")) as fig:
         ax = fig.gca()
@@ -148,7 +149,9 @@ def main(
     #   - What's a good tolerance for the escaped points based on the error?
     #   - bumping the resolution to 128x128 seems to fail (everybody escapes?)
 
-    with timeit("Predicting"):
+    from fractallib import dmd_predict
+
+    with tictoc("Predicting"):
         Zpredict = dmd_predict(model, Z, bbox=bbox)
 
     # NOTE: this is a linear operator, so we expect everybody to converge
@@ -162,11 +165,14 @@ def main(
         ax = fig.gca()
 
         im = ax.imshow(torch.log10(error), extent=bbox)
-        fig.colorbar(im, ax=ax)
+        fig.colorbar(im, cax=make_colorbar_axes(ax))
 
     with figure(basename.with_stem(f"{basename.stem}-predict")) as fig:
         ax = fig.gca()
-        ax.imshow(error < 1.0e-1, extent=bbox, cmap="binary")
+
+        # NOTE: this threshold is matrix-dependent, so we'll need to play with it
+        # to actualy get the result back, but it can theoretically work
+        ax.imshow(error < 6.0e-1, extent=bbox, cmap="binary")
 
     # }}}
 
@@ -187,6 +193,12 @@ if __name__ == "__main__":
         description=SCRIPT_LONG_HELP,
     )
     parser.add_argument("filename", type=pathlib.Path)
+    parser.add_argument(
+        "--dataidx",
+        type=int,
+        default=5,
+        help="Index of the matrix to reconstruct",
+    )
     parser.add_argument(
         "-r",
         "--resolution",
@@ -220,6 +232,7 @@ if __name__ == "__main__":
     raise SystemExit(
         main(
             args.filename,
+            dataidx=args.dataidx,
             resolution=args.resolution,
             overwrite=args.force,
         )

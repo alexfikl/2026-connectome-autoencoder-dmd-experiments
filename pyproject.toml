@@ -35,10 +35,10 @@ classifiers = [
 dependencies = [
     "array-api-compat",
     "matplotlib>=3.10",
+    "nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git#egg=nneuroutil",
     "numpy>=2",
     "rich",
     "scienceplots>=2.2",
-    "nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git#egg=nneuroutil",
 ]
 
 [dependency-groups]
@@ -101,8 +101,8 @@ lint.flake8-quotes.inline-quotes = "double"
 lint.flake8-quotes.multiline-quotes = "double"
 lint.isort.force-wrap-aliases = true
 lint.isort.known-first-party = [
-    "dmdaelib",
-    "torchlib",
+    "fractallib",
+    "nneuroutil",
 ]
 lint.isort.required-imports = [
     "from __future__ import annotations",
