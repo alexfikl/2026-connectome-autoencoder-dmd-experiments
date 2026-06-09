@@ -10,19 +10,10 @@ from typing import Any, cast
 import numpy as np
 import torch
 from torch import nn
-from torchlib import (
-    BiasLayer,
-    ComplexLinear,
-    ComplexMSELoss,
-    LeakyQuadraticActivation,
-    QuadraticActivation,
-    init_xavier_uniform_,
-)
 
 from nneuroutil.helpers import TicTocTimer, module_logger, tictoc
-from nneuroutil.typing import Array3D
 
-log = module_logger("fractallib.autoencoder_network")
+log = module_logger("lib.autoencoder_network")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
@@ -30,7 +21,7 @@ Trains a standard Autoencoder neural network.
 
 Example:
 
-    > {SCRIPT_PATH.name}
+    > {SCRIPT_PATH.name} dataset.npz
 """
 
 
@@ -44,6 +35,8 @@ class Autoencoder(nn.Module):
         *,
         encoder_layer_sizes: int | tuple[int, ...] | None = None,
         decoder_layer_sizes: int | tuple[int, ...] | None = None,
+        nonlinearity: str = "quadratic",
+        alpha: float = 0.1,
         dtype: Any = None,
     ) -> None:
         if encoder_layer_sizes is None:
@@ -59,7 +52,7 @@ class Autoencoder(nn.Module):
             decoder_layer_sizes = (decoder_layer_sizes,)
 
         if dtype is None:
-            dtype = torch.complex64
+            dtype = torch.float32
 
         super().__init__()
 
@@ -70,64 +63,59 @@ class Autoencoder(nn.Module):
         self.decoder_layer_sizes = decoder_layer_sizes
         self.dtype = dtype
 
+        # {{{ construct autoencoder
+
         from itertools import pairwise
 
-        layer_sizes = (input_size, *encoder_layer_sizes)
+        from nneuroutil.torch_extras import (
+            Bias,
+            ComplexLeakyQuadratic,
+            ComplexLinear,
+            ComplexQuadratic,
+            kaiming_uniform_,
+        )
+
+        # encoder
+        layer_sizes = (self.input_size, *encoder_layer_sizes)
         encoder_layers = []
         for i, (n_in, n_out) in enumerate(pairwise(layer_sizes)):
-            linear = ComplexLinear(n_in, n_out, dtype=dtype)
-            init_xavier_uniform_(linear.weight, nonlinearity="quadratic")
+            is_last = i == len(encoder_layer_sizes) - 1
 
+            linear = ComplexLinear(n_in, n_out, bias=False, dtype=dtype)
+
+            if nonlinearity == "quadratic":
+                nonlinearity = "quadratic" if is_last else "leaky_quadratic"
+                param = None if is_last else alpha
+                activation = (
+                    ComplexLeakyQuadratic(alpha)
+                    if i != len(encoder_layer_sizes) - 1
+                    else ComplexQuadratic()
+                )
+            elif nonlinearity == "leaky_relu":
+                param = alpha
+                activation = nn.LeakyReLU(negative_slope=alpha)
+            else:
+                raise ValueError(f"unsupported nonlinearity: {nonlinearity!r}")
+
+            kaiming_uniform_(linear.kernel, nonlinearity=nonlinearity, param=param)  # ty: ignore[invalid-argument-type]
             encoder_layers.append(linear)
-            encoder_layers.append(
-                LeakyQuadraticActivation()
-                if i != len(encoder_layer_sizes) - 1
-                else QuadraticActivation()
-            )
-            encoder_layers.append(BiasLayer(n_out, dtype=dtype))
+            encoder_layers.append(activation)
+            encoder_layers.append(Bias(n_out, dtype=dtype))
 
+        # decoder
         layer_sizes = (self.latent_size, *decoder_layer_sizes)
         decoder_layers = []
         for n_in, n_out in pairwise(layer_sizes):
             linear = ComplexLinear(n_in, n_out, dtype=dtype)
-            init_xavier_uniform_(linear.weight, nonlinearity="quadratic")
-
             decoder_layers.append(linear)
 
         self.encoder = nn.Sequential(*encoder_layers)
         self.decoder = nn.Sequential(*decoder_layers)
 
+        # }}}
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.decoder(self.encoder(x))
-
-
-# }}}
-
-# {{{ predict
-
-
-def predict(
-    model: nn.Module,
-    *,
-    bbox: tuple[float, float, float, float],
-    resolution: int = 128,
-    maxit: int = 128,
-) -> Array3D:
-    import array_api_compat
-
-    from fractallib import generate_grid
-
-    with torch.no_grad():
-        z = torch.zeros((resolution, resolution, model.input_size), dtype=model.dtype)  # ty: ignore[no-matching-overload]
-        xp = array_api_compat.array_namespace(z)
-
-        c = generate_grid(*bbox, nx=resolution, ny=resolution, dtype=model.dtype, xp=xp)
-        c = c[:, :, None]
-
-        for _ in range(1, maxit):
-            z = model(z) + c
-
-    return z
 
 
 # }}}
@@ -144,8 +132,6 @@ def main(
     maxit: int = 128,
     overwrite: bool = False,
 ) -> int:
-    from fractallib import determine_escape_radius, generate_dataset, iter_batches
-
     # {{{ vallidate inputs
 
     if not filename.exists():
@@ -174,6 +160,8 @@ def main(
         return 1
 
     if escape_radius is None:
+        from commonlib import determine_escape_radius
+
         escape_radius = determine_escape_radius(mat)
 
     if outfile is None:
@@ -192,6 +180,8 @@ def main(
     log.info("Generating dataset on %s", bbox)
 
     with tictoc("generate_dataset"):
+        from commonlib import generate_dataset
+
         Z, c = generate_dataset(
             mat,
             bbox=bbox,
@@ -218,18 +208,12 @@ def main(
 
     # {{{ build torch dataset
 
-    # NOTE: we have an array of shape (maxit, n, n, d) and we want to
-    #   * make our input/output be (Z_n, Z_{n + 1}) so that we can learn the dynamics
-    #   * take only the converged points (based on mask from above)
-    #   * squish everything down to use d as the "features"
+    from commonlib import iter_batches, split_dataset
 
-    X = Z[:-1, mask, :].reshape(-1, d).contiguous()
-    C = c.unsqueeze(0).unsqueeze(-1).expand(maxit - 1, -1, -1, d)
-    Y = (Z[1:, mask, :] - C[:, mask, :]).reshape(-1, d).contiguous()
-    log.info("Dataset size: %s", X.shape)
-
-    # compute target scale for Normalized MSE loss to resolve vanishing gradients
-    target_scale = torch.mean(X.conj() * X).real
+    # Compute target scale for Normalized MSE (NMSE) loss to resolve vanishing gradients
+    X, Y = split_dataset(Z, C=c, escape_radius=escape_radius, split_real_imaginary=True)
+    target_scale = torch.mean(Y.conj() * Y).real
+    log.info("Dataset: %s", X.shape)
 
     # }}}
 
@@ -243,7 +227,7 @@ def main(
         decoder_layer_sizes=(d,),
         dtype=Z.dtype,
     )
-    criterion = ComplexMSELoss()
+    criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1.0e-3)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
@@ -255,7 +239,7 @@ def main(
 
     log.info("Network:\n%s", model)
 
-    weightsfile = outfile.with_suffix(".pth")
+    weightsfile = outfile.with_suffix(".pkl")
     if weightsfile.exists():
         checkpoint = torch.load(weightsfile)
 
@@ -322,7 +306,9 @@ def main(
 
     # {{{ forecast
 
-    Zpredict = predict(
+    from commonlib import torch_predict
+
+    Zpredict = torch_predict(
         compiled_model, bbox=bbox, resolution=2 * resolution, maxit=maxit
     )
     mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
