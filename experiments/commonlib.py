@@ -174,17 +174,18 @@ def split_dataset(
     else:
         mask = xp.ones((nx, ny), dtype=xp.bool)
 
-    X = Z[:-1, mask, :].reshape(-1, d).contiguous()
+    X = Z[:-1, mask, :].reshape(-1, d)
 
     # if provided, strip the constant offset so we predict
     #   Y' = X
     #   where Y' = Z[1:] - c
     #         X = Z[:-1]
     if C is not None:
-        C = C.unsqueeze(0).unsqueeze(-1).expand(maxit - 1, -1, -1, d)
-        Y = (Z[1:, mask, :] - C[:, mask, :]).reshape(-1, d).contiguous()
+        C = xp.expand_dims(xp.expand_dims(C, axis=0), axis=-1)
+        C = xp.broadcast_to(C, (maxit - 1, nx, ny, d))
+        Y = xp.reshape(Z[1:, mask, :] - C[:, mask, :], (-1, d))
     else:
-        Y = Z[1:, mask, :].reshape(-1, d).contiguous()
+        Y = xp.reshape(Z[1:, mask, :], (-1, d))
 
     if split_real_imaginary:
         X = xp.concat([X.real, X.imag], axis=-1)
