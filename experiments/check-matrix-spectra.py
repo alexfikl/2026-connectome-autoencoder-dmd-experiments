@@ -8,9 +8,10 @@ import pathlib
 
 import numpy as np
 
-from dmdaelib import Array1D, Array2D, DTypeLike, make_default_logger
+from nneuroutil.helpers import module_logger
+from nneuroutil.typing import Array1D, Array2D, DTypeLike
 
-log = make_default_logger(__file__)
+log = module_logger("fractallib.check_matrix_spectra")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
@@ -159,6 +160,8 @@ def main(
 
     import matplotlib.pyplot as mp
     from matplotlib.colors import SymLogNorm
+
+    from fractallib import set_plotting_defaults  # noqa: F401
 
     ext = ".{}".format(mp.rcParams["savefig.format"])
 

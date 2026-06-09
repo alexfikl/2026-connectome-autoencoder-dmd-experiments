@@ -13,20 +13,20 @@ figure.constrained_layout.use: True
 savefig.format: jpg
 
 # axes
-axes.labelsize: 28
-axes.titlesize: 28
+axes.labelsize: 20
+axes.titlesize: 20
 axes.grid: True
 axes.grid.axis: both
 axes.grid.which: both
 
 # ticks
-xtick.labelsize: 28
+xtick.labelsize: 20
 xtick.direction: in
 xtick.major.size: 6.5
 xtick.major.width: 1.5
 xtick.minor.size: 4.0
 
-ytick.labelsize: 28
+ytick.labelsize: 20
 ytick.direction: in
 ytick.major.size: 6.5
 ytick.major.width: 1.5

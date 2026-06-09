@@ -171,7 +171,7 @@ def main(
         ax = fig.gca()
 
         # NOTE: this threshold is matrix-dependent, so we'll need to play with it
-        # to actualy get the result back, but it can theoretically work
+        # to actually get the result back, but it can theoretically work
         ax.imshow(error < 6.0e-1, extent=bbox, cmap="binary")
 
     # }}}
