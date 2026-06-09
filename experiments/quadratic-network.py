@@ -10,11 +10,12 @@ from typing import Any, cast
 import numpy as np
 import torch
 from torch import nn
-
-from dmdaelib import Array3D, make_default_logger
 from torchlib import BiasLayer, ComplexLinear, ComplexMSELoss, QuadraticActivation
 
-log = make_default_logger(__file__)
+from nneuroutil.helpers import TicTocTimer, module_logger, tictoc
+from nneuroutil.typing import Array3D
+
+log = module_logger("fractallib.quadratic_network")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
@@ -73,7 +74,7 @@ def predict(
 ) -> Array3D:
     import array_api_compat
 
-    from dmdaelib import generate_grid
+    from fractallib import generate_grid
 
     with torch.no_grad():
         z = torch.zeros((resolution, resolution, model.input_size), dtype=model.dtype)  # ty: ignore[no-matching-overload]
@@ -102,7 +103,7 @@ def main(
     maxit: int = 128,
     overwrite: bool = False,
 ) -> int:
-    from dmdaelib import determine_escape_radius, generate_dataset, iter_batches, timeit
+    from fractallib import determine_escape_radius, generate_dataset, iter_batches
 
     # {{{ vallidate inputs
 
@@ -149,7 +150,7 @@ def main(
     bbox = (-0.03, 0.03, -0.03, 0.03)
     log.info("Generating dataset on %s", bbox)
 
-    with timeit("generate_dataset"):
+    with tictoc("generate_dataset"):
         Z, c = generate_dataset(
             mat,
             bbox=bbox,
@@ -164,7 +165,7 @@ def main(
     log.info("    Max: %.5e (radius %.5e)", Z.abs().max(), escape_radius)
     log.info("    Mean: %.5e", Z.abs().mean())
 
-    from dmdaelib import figure, make_colorbar_axes
+    from nneuroutil.visualization import figure, make_colorbar_axes
 
     with figure(
         basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
@@ -210,8 +211,6 @@ def main(
 
         compiled_model = cast("QuadraticNetwork", torch.compile(model))
     else:
-        from dmdaelib import TicTocTimer
-
         timer = TicTocTimer()
 
         epochs = 50
