@@ -144,6 +144,55 @@ def generate_dataset(
 # }}}
 
 
+# {{{ split_dataset
+
+
+def split_dataset(
+    Z: Array4D,
+    *,
+    C: Array4D | None = None,
+    escape_radius: float | None = None,
+    split_real_imaginary: bool = True,
+    xp: Any = None,
+) -> tuple[Array2D, Array2D]:
+    if xp is None:
+        xp = array_api_compat.array_namespace(Z, C)
+
+    # NOTE: we have an array of shape (maxit, n, n, d) and we want to
+    #   * make our input/output be (Z_n, Z_{n + 1}) so that we can learn the dynamics
+    #   * take only the converged points (based on mask)
+    #   * squish everything down to use d as the "features"
+
+    maxit, nx, ny, d = Z.shape
+
+    # if provided, strip out points that escaped
+    if escape_radius is not None:
+        mask = xp.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, axis=-1) < escape_radius**2
+    else:
+        mask = xp.ones((nx, ny), dtype=xp.bool)
+
+    X = Z[:-1, mask, :].reshape(-1, d).contiguous()
+
+    # if provided, strip the constant offset so we predict
+    #   Y' = X
+    #   where Y' = Z[1:] - c
+    #         X = Z[:-1]
+    if C is not None:
+        C = C.unsqueeze(0).unsqueeze(-1).expand(maxit - 1, -1, -1, d)
+        Y = (Z[1:, mask, :] - C[:, mask, :]).reshape(-1, d).contiguous()
+    else:
+        Y = Z[1:, mask, :].reshape(-1, d).contiguous()
+
+    if split_real_imaginary:
+        X = xp.concat([X.real, X.imag], dim=-1)
+        Y = xp.concat([Y.real, Y.imag], dim=-1)
+
+    return X, Y
+
+
+# }}}
+
+
 # {{{ dmd
 
 
