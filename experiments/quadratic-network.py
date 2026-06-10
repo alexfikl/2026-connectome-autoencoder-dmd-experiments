@@ -63,6 +63,98 @@ class QuadraticNetwork(nn.Module):
 # }}}
 
 
+# {{{ training
+
+
+def generate_training_dataset(
+    mat: torch.Tensor,
+    *,
+    bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
+    resolution: int = 128,
+    maxit: int = 128,
+    escape_radius: float = 100.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    from commonlib import generate_dataset, split_dataset
+
+    log.info("Generating dataset on %s", bbox)
+
+    with tictoc("generate_dataset"):
+        Z, c = generate_dataset(
+            mat,
+            bbox=bbox,
+            resolution=resolution,
+            escape_radius=escape_radius,
+            maxit=maxit,
+        )
+
+    # Compute target scale for Normalized MSE (NMSE) loss to resolve vanishing gradients
+    X, Y = split_dataset(Z, C=c, escape_radius=escape_radius, split_real_imaginary=True)
+    log.info("Dataset: %s", X.shape)
+
+    mask = torch.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, dim=-1) < escape_radius**2
+    log.info("Points:")
+    log.info("    Converged: %d", torch.sum(mask))
+    log.info("    Max: %.5e (radius %.5e)", Z.abs().max(), escape_radius)
+    log.info("    Mean: %.5e", Z.abs().mean())
+
+    return X, Y, mask
+
+
+def train(
+    model: QuadraticNetwork,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    X: torch.Tensor,
+    Y: torch.Tensor,
+    *,
+    epochs: int = 50,
+    batch_size: int = 4096,
+) -> tuple[QuadraticNetwork, torch.optim.Optimizer, torch.Tensor]:
+    from commonlib import iter_batches
+
+    timer = TicTocTimer()
+
+    device = X.device
+    compiled_model = cast("QuadraticNetwork", torch.compile(model))
+
+    num_batches = X.shape[0] // batch_size
+
+    losses = torch.empty(epochs, device=device)
+    target_scale = torch.mean(Y.conj() * Y).real
+
+    for epoch in range(epochs):
+        loss_epoch = torch.tensor(0.0, device=device)
+
+        timer.tic()
+
+        for batch_x, batch_y in iter_batches(X, Y, batch_size=batch_size):
+            optimizer.zero_grad()
+
+            # compute loss function
+            predictions = compiled_model(batch_x)
+            loss = criterion(predictions, batch_y) / target_scale
+
+            # compute gradient
+            loss.backward()
+
+            # update weights
+            optimizer.step()
+
+            loss_epoch += loss.detach()
+
+        losses[epoch] = loss_epoch.item() / num_batches
+        scheduler.step(losses[epoch])  # ty: ignore[invalid-argument-type]
+
+        timer.toc()
+        log.info("[%03d/%03d] loss %.5e (%s)", epoch, epochs, loss_epoch, timer)
+
+    return model, optimizer, losses
+
+
+# }}}
+
+
 def main(
     filename: pathlib.Path,
     *,
@@ -118,62 +210,24 @@ def main(
 
     # }}}
 
-    # {{{ generate dataset
-
-    d = mat.shape[0]
-    bbox = (-0.03, 0.03, -0.03, 0.03)
-    log.info("Generating dataset on %s", bbox)
-
-    with tictoc("generate_dataset"):
-        from commonlib import generate_dataset
-
-        Z, c = generate_dataset(
-            mat,
-            bbox=bbox,
-            resolution=resolution,
-            escape_radius=escape_radius,
-            maxit=maxit,
-        )
-
-    mask = torch.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, dim=-1) < escape_radius**2
-    log.info("Points:")
-    log.info("    Converged: %d", torch.sum(mask))
-    log.info("    Max: %.5e (radius %.5e)", Z.abs().max(), escape_radius)
-    log.info("    Mean: %.5e", Z.abs().mean())
-
-    from nneuroutil.visualization import figure, make_colorbar_axes
-
-    with figure(
-        basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
-    ) as fig:
-        ax = fig.gca()
-        ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
-
-    # }}}
-
-    # {{{ build torch dataset
-
-    from commonlib import iter_batches, split_dataset
-
-    # Compute target scale for Normalized MSE (NMSE) loss to resolve vanishing gradients
-    X, Y = split_dataset(Z, C=c, escape_radius=escape_radius, split_real_imaginary=True)
-    target_scale = torch.mean(Y.conj() * Y).real
-    log.info("Dataset: %s", X.shape)
-
-    # }}}
-
     # {{{ train
 
     from torch import optim
 
-    model = QuadraticNetwork(d, d, dtype=X.dtype)
+    d = mat.shape[0]
+
+    model = QuadraticNetwork(d, d)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=5.0e-3)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
     log.info("Network:\n%s", model)
 
+    from nneuroutil.visualization import figure, make_colorbar_axes
+
+    bbox = (-0.03, 0.03, -0.03, 0.03)
     weightsfile = outfile.with_suffix(".pkl")
+
     if weightsfile.exists():
         checkpoint = torch.load(weightsfile, map_location=device, weights_only=True)
 
@@ -183,39 +237,41 @@ def main(
 
         compiled_model = cast("QuadraticNetwork", torch.compile(model))
     else:
-        timer = TicTocTimer()
+        # {{{ generate dataset
+
+        X, Y, mask = generate_training_dataset(
+            mat,
+            bbox=bbox,
+            resolution=resolution,
+            maxit=maxit,
+            escape_radius=escape_radius,
+        )
+
+        with figure(
+            basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
+        ) as fig:
+            ax = fig.gca()
+            ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
+
+        # }}}
+
+        # {{{ train
 
         epochs = 50
-        batch_size = 4096
-        num_batches = X.shape[0] // batch_size
-        losses = torch.empty(epochs, device=device)
+        compiled_model, optimizer, losses = train(
+            model,
+            criterion,
+            optimizer,
+            scheduler,
+            X,
+            Y,
+            epochs=epochs,
+            batch_size=4096,
+        )
 
-        compiled_model = cast("QuadraticNetwork", torch.compile(model))
+        # }}}
 
-        for epoch in range(epochs):
-            loss_epoch = torch.tensor(0.0, device=device)
-            timer.tic()
-
-            for batch_x, batch_y in iter_batches(X, Y, batch_size=batch_size):
-                optimizer.zero_grad()
-
-                # compute loss function
-                predictions = compiled_model(batch_x)
-                loss = criterion(predictions, batch_y) / target_scale
-
-                # compute gradient
-                loss.backward()
-
-                # update weights
-                optimizer.step()
-
-                loss_epoch += loss.detach()
-
-            losses[epoch] = loss_epoch.item() / num_batches
-            scheduler.step(losses[epoch])
-
-            timer.toc()
-            log.info("[%03d/%03d] loss %.5e (%s)", epoch, epochs, loss_epoch, timer)
+        # {{{ checkpoint
 
         torch.save(
             {
@@ -226,6 +282,8 @@ def main(
             },
             weightsfile,
         )
+
+        # }}}
 
     with figure(
         basename.with_stem(f"{basename.stem}-loss"), overwrite=overwrite
@@ -294,7 +352,7 @@ def main(
 
     # }}}
 
-    # {{{ forecast
+    # {{{ predict
 
     from commonlib import torch_predict
 
