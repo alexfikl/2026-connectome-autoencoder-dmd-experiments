@@ -17,11 +17,11 @@ log = module_logger("lib.quadratic_network")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
-Trains a quadratic neural network.
+Trains a quadratic neural network: f(z) = (W z)^2 + b.
 
 Example:
 
-    > {SCRIPT_PATH.name} dataset.npz
+    > {SCRIPT_PATH.name} --device cuda dataset.npz
 """
 
 
@@ -97,6 +97,7 @@ def generate_training_dataset(
     log.info("    Max: %.5e (radius %.5e)", Z.abs().max(), escape_radius)
     log.info("    Mean: %.5e", Z.abs().mean())
 
+    # NOTE: mask only returned for plotting
     return X, Y, mask
 
 
@@ -161,9 +162,12 @@ def main(
     outfile: pathlib.Path | None = None,
     datakey: str = "matrices",
     dataidx: int = 5,
+    bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
     escape_radius: float | None = 100.0,
     resolution: int = 128,
     maxit: int = 128,
+    epochs: int = 50,
+    batch_size: int = 4096,
     overwrite: bool = False,
 ) -> int:
     device = torch.get_default_device()
@@ -215,7 +219,6 @@ def main(
     from torch import optim
 
     d = mat.shape[0]
-
     model = QuadraticNetwork(d, d)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=5.0e-3)
@@ -223,23 +226,20 @@ def main(
 
     log.info("Network:\n%s", model)
 
-    from nneuroutil.visualization import figure, make_colorbar_axes
-
-    bbox = (-0.03, 0.03, -0.03, 0.03)
     weightsfile = outfile.with_suffix(".pkl")
-
     if weightsfile.exists():
         checkpoint = torch.load(weightsfile, map_location=device, weights_only=True)
 
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         losses = checkpoint["losses"]
+        Zmask = checkpoint["Zmask"]
 
         compiled_model = cast("QuadraticNetwork", torch.compile(model))
     else:
         # {{{ generate dataset
 
-        X, Y, mask = generate_training_dataset(
+        X, Y, Zmask = generate_training_dataset(
             mat,
             bbox=bbox,
             resolution=resolution,
@@ -247,17 +247,10 @@ def main(
             escape_radius=escape_radius,
         )
 
-        with figure(
-            basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
-        ) as fig:
-            ax = fig.gca()
-            ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
-
         # }}}
 
         # {{{ train
 
-        epochs = 50
         compiled_model, optimizer, losses = train(
             model,
             criterion,
@@ -266,7 +259,7 @@ def main(
             X,
             Y,
             epochs=epochs,
-            batch_size=4096,
+            batch_size=batch_size,
         )
 
         # }}}
@@ -279,11 +272,28 @@ def main(
                 "optimizer": optimizer.state_dict(),
                 "epochs": epochs,
                 "losses": losses,
+                "Zmask": Zmask,
             },
             weightsfile,
         )
 
         # }}}
+
+    from nneuroutil.visualization import figure, make_colorbar_axes
+
+    # }}}
+
+    # {{{ plot fractal
+
+    with figure(
+        basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
+    ) as fig:
+        ax = fig.gca()
+        ax.imshow(Zmask.cpu().numpy(), extent=bbox, cmap="binary")
+
+    # }}}
+
+    # {{{ plot loss
 
     with figure(
         basename.with_stem(f"{basename.stem}-loss"), overwrite=overwrite
@@ -296,15 +306,17 @@ def main(
 
     # }}}
 
-    # {{{ weight error
+    # {{{ plot weight matrices
 
     # NOTE: the nn is trained to appproximate the trajectory, not the matrix A,
     # even though the structure is the same (`(W x)^2 + b`). We look at the
     # linear layer to get a sense of what it managed to do here. However,
     #   1. we do not expect the matrices to match
+    #   2. we do expect them to have similar singular values (i.e. the nn captured
+    #      the general dynamics of the problem)
+
     learned_A = model.model[0].weight.detach()  # ty: ignore[call-non-callable]
     A = mat.to(learned_A.dtype)
-    # E = torch.abs(learned_A - A)
 
     with figure(
         basename.with_stem(f"{basename.stem}-weights"),
@@ -352,7 +364,7 @@ def main(
 
     # }}}
 
-    # {{{ predict
+    # {{{ plot prediction
 
     from commonlib import torch_predict
 
@@ -390,6 +402,25 @@ if __name__ == "__main__":
     )
     parser.add_argument("filename", type=pathlib.Path)
     parser.add_argument(
+        "--dataidx",
+        type=int,
+        default=5,
+        help="Index of the matrix to reconstruct",
+    )
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda"),
+        default="cpu",
+        help="The default deviced used by the framework",
+    )
+    parser.add_argument(
+        "-r",
+        "--resolution",
+        type=int,
+        default=128,
+        help="Resolution (in the c complex plane) of the images",
+    )
+    parser.add_argument(
         "-o",
         "--outfile",
         type=pathlib.Path,
@@ -407,12 +438,6 @@ if __name__ == "__main__":
         action="store_true",
         help="Only show error messages",
     )
-    parser.add_argument(
-        "--device",
-        choices=("cpu", "cuda"),
-        default="cpu",
-        help="The default deviced used by the framework",
-    )
     args = parser.parse_args()
 
     if not args.quiet:
@@ -425,6 +450,8 @@ if __name__ == "__main__":
         raise SystemExit(
             main(
                 args.filename,
+                dataidx=args.dataidx,
+                resolution=args.resolution,
                 overwrite=args.force,
             )
         )
