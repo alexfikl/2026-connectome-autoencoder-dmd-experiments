@@ -98,6 +98,9 @@ def main(
     maxit: int = 128,
     overwrite: bool = False,
 ) -> int:
+    device = torch.get_default_device()
+    log.info("Device: %s", device)
+
     # {{{ vallidate inputs
 
     if not filename.exists():
@@ -120,7 +123,7 @@ def main(
         return 1
 
     # NOTE: we don't really need complex128 for this example, so save some memory
-    mat = torch.from_numpy(matrices[dataidx]).to(torch.complex64)
+    mat = torch.from_numpy(matrices[dataidx]).to(torch.complex64).to(device)
     if mat.shape[0] != mat.shape[1]:
         log.error("Expected a square matrix: %s.", mat.shape)
         return 1
@@ -131,9 +134,8 @@ def main(
         escape_radius = determine_escape_radius(mat)
 
     if outfile is None:
-        outfile = (
-            filename.parent
-            / f"{filename.stem}-ae-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}.npz"
+        outfile = filename.parent / (
+            f"{filename.stem}-ae-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}-{device.type}.npz"
         )
     basename = outfile.with_suffix("")
 
@@ -168,7 +170,7 @@ def main(
         basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
     ) as fig:
         ax = fig.gca()
-        ax.imshow(mask, extent=bbox, cmap="binary")
+        ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
 
     # }}}
 
@@ -250,6 +252,7 @@ def main(
                 "optimizer": optimizer.state_dict(),
                 "epochs": epochs,
                 "losses": losses,
+                "mask": mask,
             },
             weightsfile,
         )
@@ -259,7 +262,7 @@ def main(
     ) as fig:
         ax = fig.gca()
 
-        ax.semilogy(losses)
+        ax.semilogy(losses.cpu().numpy())
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
 
@@ -278,7 +281,7 @@ def main(
         basename.with_stem(f"{basename.stem}-predict"), overwrite=overwrite
     ) as fig:
         ax = fig.gca()
-        ax.imshow(mask, extent=bbox, cmap="binary")
+        ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
 
     # }}}
 
@@ -299,6 +302,25 @@ if __name__ == "__main__":
         description=SCRIPT_LONG_HELP,
     )
     parser.add_argument("filename", type=pathlib.Path)
+    parser.add_argument(
+        "--dataidx",
+        type=int,
+        default=5,
+        help="Index of the matrix to reconstruct",
+    )
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda"),
+        default="cpu",
+        help="The default deviced used by the framework",
+    )
+    parser.add_argument(
+        "-r",
+        "--resolution",
+        type=int,
+        default=128,
+        help="Resolution (in the c complex plane) of the images",
+    )
     parser.add_argument(
         "-o",
         "--outfile",
@@ -322,9 +344,15 @@ if __name__ == "__main__":
     if not args.quiet:
         log.setLevel(logging.INFO)
 
-    raise SystemExit(
-        main(
-            args.filename,
-            overwrite=args.force,
+    with torch.device(args.device):
+        # NOTE: use TF32 for matrix multiplication (should be faster, similar precision)
+        torch.set_float32_matmul_precision("high")
+
+        raise SystemExit(
+            main(
+                args.filename,
+                dataidx=args.dataidx,
+                resolution=args.resolution,
+                overwrite=args.force,
+            )
         )
-    )
