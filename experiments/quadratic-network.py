@@ -317,17 +317,17 @@ if __name__ == "__main__":
         help="Index of the matrix to reconstruct",
     )
     parser.add_argument(
-        "--device",
-        choices=("cpu", "cuda"),
-        default="cpu",
-        help="The default deviced used by the framework",
-    )
-    parser.add_argument(
         "-r",
         "--resolution",
         type=int,
         default=128,
         help="Resolution (in the c complex plane) of the images",
+    )
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda"),
+        default="cpu",
+        help="The default deviced used by the framework",
     )
     parser.add_argument(
         "-o",

@@ -153,6 +153,8 @@ def generate_training_dataset(
     maxit: int = 128,
     escape_radius: float = 100.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    import torch
+
     log.info("Generating dataset on %s", bbox)
 
     with tictoc("generate_dataset"):
@@ -298,6 +300,8 @@ def torch_train(
     epochs: int = 50,
     batch_size: int = 4096,
 ) -> tuple[nn.Module, torch.optim.Optimizer, torch.Tensor]:
+    import torch
+
     timer = TicTocTimer()
 
     device = X.device

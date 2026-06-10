@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from nneuroutil.helpers import TicTocTimer, module_logger, tictoc
+from nneuroutil.helpers import module_logger
 
 log = module_logger("lib.autoencoder_network")
 
@@ -93,9 +93,12 @@ def main(
     outfile: pathlib.Path | None = None,
     datakey: str = "matrices",
     dataidx: int = 5,
+    bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
     escape_radius: float | None = 100.0,
     resolution: int = 128,
     maxit: int = 128,
+    epochs: int = 100,
+    batch_size: int = 4096,
     overwrite: bool = False,
 ) -> int:
     device = torch.get_default_device()
@@ -135,53 +138,9 @@ def main(
 
     if outfile is None:
         outfile = filename.parent / (
-            f"{filename.stem}-ae-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}-{device.type}.npz"
+            f"{filename.stem}-ae-relu-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}-{device.type}.npz"
         )
     basename = outfile.with_suffix("")
-
-    # }}}
-
-    # {{{ generate dataset
-
-    d = mat.shape[0]
-    bbox = (-0.03, 0.03, -0.03, 0.03)
-    log.info("Generating dataset on %s", bbox)
-
-    with tictoc("generate_dataset"):
-        from commonlib import generate_dataset
-
-        Z, c = generate_dataset(
-            mat,
-            bbox=bbox,
-            resolution=resolution,
-            escape_radius=escape_radius,
-            maxit=maxit,
-        )
-
-    mask = torch.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, dim=-1) < escape_radius**2
-    log.info("Points:")
-    log.info("    Converged: %d", torch.sum(mask))
-    log.info("    Max: %.5e (radius %.5e)", Z.abs().max(), escape_radius)
-    log.info("    Mean: %.5e", Z.abs().mean())
-
-    from nneuroutil.visualization import figure
-
-    with figure(
-        basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
-    ) as fig:
-        ax = fig.gca()
-        ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
-
-    # }}}
-
-    # {{{ build torch dataset
-
-    from commonlib import iter_batches, split_dataset
-
-    # Compute target scale for Normalized MSE (NMSE) loss to resolve vanishing gradients
-    X, Y = split_dataset(Z, C=c, escape_radius=escape_radius, split_real_imaginary=True)
-    target_scale = torch.mean(Y.conj() * Y).real
-    log.info("Dataset: %s", X.shape)
 
     # }}}
 
@@ -189,7 +148,8 @@ def main(
 
     from torch import optim
 
-    model = Autoencoder(d, d, use_complex_linear=False, dtype=X.dtype)
+    d = mat.shape[0]
+    model = Autoencoder(d, d, use_complex_linear=False)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1.0e-3)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -204,47 +164,45 @@ def main(
 
     weightsfile = outfile.with_suffix(".pkl")
     if weightsfile.exists():
-        checkpoint = torch.load(weightsfile)
+        checkpoint = torch.load(weightsfile, map_location=device, weights_only=True)
 
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         losses = checkpoint["losses"]
+        Zmask = checkpoint["Zmask"]
 
         compiled_model = cast("Autoencoder", torch.compile(model))
     else:
-        timer = TicTocTimer()
+        from commonlib import generate_training_dataset, torch_train
 
-        epochs = 100
-        batch_size = 4096
-        num_batches = X.shape[0] // batch_size
-        losses = torch.empty(epochs)
+        # {{{ generate dataset
 
-        compiled_model = cast("Autoencoder", torch.compile(model))
+        X, Y, Zmask = generate_training_dataset(
+            mat,
+            bbox=bbox,
+            resolution=resolution,
+            maxit=maxit,
+            escape_radius=escape_radius,
+        )
 
-        for epoch in range(epochs):
-            loss_epoch = torch.tensor(0.0)
-            timer.tic()
+        # }}}
 
-            for batch_x, batch_y in iter_batches(X, Y, batch_size=batch_size):
-                optimizer.zero_grad(set_to_none=True)
+        # {{{ train
 
-                # compute loss function
-                predictions = compiled_model(batch_x)
-                loss = criterion(predictions, batch_y) / target_scale
+        compiled_model, optimizer, losses = torch_train(
+            model,
+            criterion,
+            optimizer,
+            scheduler,
+            X,
+            Y,
+            epochs=epochs,
+            batch_size=batch_size,
+        )
 
-                # compute gradient
-                loss.backward()
+        # }}}
 
-                # update weights
-                optimizer.step()
-
-                loss_epoch += loss.detach()
-
-            losses[epoch] = loss_epoch.item() / num_batches
-            scheduler.step(losses[epoch])
-
-            timer.toc()
-            log.info("[%03d/%03d] loss %.5e (%s)", epoch, epochs, loss_epoch, timer)
+        # {{{ checkpoint
 
         torch.save(
             {
@@ -252,10 +210,28 @@ def main(
                 "optimizer": optimizer.state_dict(),
                 "epochs": epochs,
                 "losses": losses,
-                "mask": mask,
+                "Zmask": Zmask,
             },
             weightsfile,
         )
+
+        # }}}
+
+    # }}}
+
+    from nneuroutil.visualization import figure
+
+    # {{{ plot fractal
+
+    with figure(
+        basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
+    ) as fig:
+        ax = fig.gca()
+        ax.imshow(Zmask.cpu().numpy(), extent=bbox, cmap="binary")
+
+    # }}}
+
+    # {{{ plot loss
 
     with figure(
         basename.with_stem(f"{basename.stem}-loss"), overwrite=overwrite
@@ -268,7 +244,7 @@ def main(
 
     # }}}
 
-    # {{{ forecast
+    # {{{ plot prediction
 
     from commonlib import torch_predict
 
@@ -309,17 +285,17 @@ if __name__ == "__main__":
         help="Index of the matrix to reconstruct",
     )
     parser.add_argument(
-        "--device",
-        choices=("cpu", "cuda"),
-        default="cpu",
-        help="The default deviced used by the framework",
-    )
-    parser.add_argument(
         "-r",
         "--resolution",
         type=int,
         default=128,
         help="Resolution (in the c complex plane) of the images",
+    )
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda"),
+        default="cpu",
+        help="The default deviced used by the framework",
     )
     parser.add_argument(
         "-o",
