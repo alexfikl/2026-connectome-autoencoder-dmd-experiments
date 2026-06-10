@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from nneuroutil.helpers import TicTocTimer, module_logger, tictoc
+from nneuroutil.helpers import module_logger
 
 log = module_logger("lib.quadratic_network")
 
@@ -58,99 +58,6 @@ class QuadraticNetwork(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
-
-
-# }}}
-
-
-# {{{ training
-
-
-def generate_training_dataset(
-    mat: torch.Tensor,
-    *,
-    bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
-    resolution: int = 128,
-    maxit: int = 128,
-    escape_radius: float = 100.0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    from commonlib import generate_dataset, split_dataset
-
-    log.info("Generating dataset on %s", bbox)
-
-    with tictoc("generate_dataset"):
-        Z, c = generate_dataset(
-            mat,
-            bbox=bbox,
-            resolution=resolution,
-            escape_radius=escape_radius,
-            maxit=maxit,
-        )
-
-    # Compute target scale for Normalized MSE (NMSE) loss to resolve vanishing gradients
-    X, Y = split_dataset(Z, C=c, escape_radius=escape_radius, split_real_imaginary=True)
-    log.info("Dataset: %s", X.shape)
-
-    mask = torch.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, dim=-1) < escape_radius**2
-    log.info("Points:")
-    log.info("    Converged: %d", torch.sum(mask))
-    log.info("    Max: %.5e (radius %.5e)", Z.abs().max(), escape_radius)
-    log.info("    Mean: %.5e", Z.abs().mean())
-
-    # NOTE: mask only returned for plotting
-    return X, Y, mask
-
-
-def train(
-    model: QuadraticNetwork,
-    criterion: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
-    X: torch.Tensor,
-    Y: torch.Tensor,
-    *,
-    epochs: int = 50,
-    batch_size: int = 4096,
-) -> tuple[QuadraticNetwork, torch.optim.Optimizer, torch.Tensor]:
-    from commonlib import iter_batches
-
-    timer = TicTocTimer()
-
-    device = X.device
-    compiled_model = cast("QuadraticNetwork", torch.compile(model))
-
-    num_batches = X.shape[0] // batch_size
-
-    losses = torch.empty(epochs, device=device)
-    target_scale = torch.mean(Y.conj() * Y).real
-
-    for epoch in range(epochs):
-        loss_epoch = torch.tensor(0.0, device=device)
-
-        timer.tic()
-
-        for batch_x, batch_y in iter_batches(X, Y, batch_size=batch_size):
-            optimizer.zero_grad()
-
-            # compute loss function
-            predictions = compiled_model(batch_x)
-            loss = criterion(predictions, batch_y) / target_scale
-
-            # compute gradient
-            loss.backward()
-
-            # update weights
-            optimizer.step()
-
-            loss_epoch += loss.detach()
-
-        losses[epoch] = loss_epoch.item() / num_batches
-        scheduler.step(losses[epoch])  # ty: ignore[invalid-argument-type]
-
-        timer.toc()
-        log.info("[%03d/%03d] loss %.5e (%s)", epoch, epochs, loss_epoch, timer)
-
-    return model, optimizer, losses
 
 
 # }}}
@@ -237,6 +144,8 @@ def main(
 
         compiled_model = cast("QuadraticNetwork", torch.compile(model))
     else:
+        from commonlib import generate_training_dataset, torch_train
+
         # {{{ generate dataset
 
         X, Y, Zmask = generate_training_dataset(
@@ -251,7 +160,7 @@ def main(
 
         # {{{ train
 
-        compiled_model, optimizer, losses = train(
+        compiled_model, optimizer, losses = torch_train(
             model,
             criterion,
             optimizer,
