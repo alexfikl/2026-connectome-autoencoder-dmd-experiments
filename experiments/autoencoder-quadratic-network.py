@@ -137,6 +137,9 @@ def main(
     maxit: int = 128,
     overwrite: bool = False,
 ) -> int:
+    device = torch.get_default_device()
+    log.info("Device: %s", device)
+
     # {{{ vallidate inputs
 
     if not filename.exists():
@@ -159,7 +162,7 @@ def main(
         return 1
 
     # NOTE: we don't really need complex128 for this example, so save some memory
-    mat = torch.from_numpy(matrices[dataidx]).to(torch.complex64)
+    mat = torch.from_numpy(matrices[dataidx]).to(torch.complex64).to(device)
     if mat.shape[0] != mat.shape[1]:
         log.error("Expected a square matrix: %s.", mat.shape)
         return 1
@@ -170,9 +173,8 @@ def main(
         escape_radius = determine_escape_radius(mat)
 
     if outfile is None:
-        outfile = (
-            filename.parent
-            / f"{filename.stem}-ae-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}.npz"
+        outfile = filename.parent / (
+            f"{filename.stem}-ae-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}-{device.type}.npz"
         )
     basename = outfile.with_suffix("")
 
@@ -207,7 +209,7 @@ def main(
         basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
     ) as fig:
         ax = fig.gca()
-        ax.imshow(mask, extent=bbox, cmap="binary")
+        ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
 
     # }}}
 
@@ -246,7 +248,7 @@ def main(
 
     weightsfile = outfile.with_suffix(".pkl")
     if weightsfile.exists():
-        checkpoint = torch.load(weightsfile)
+        checkpoint = torch.load(weightsfile, map_location=device)
 
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -259,12 +261,12 @@ def main(
         epochs = 100
         batch_size = 4096
         num_batches = X.shape[0] // batch_size
-        losses = torch.empty(epochs)
+        losses = torch.empty(epochs, device=device)
 
         compiled_model = cast("Autoencoder", torch.compile(model))
 
         for epoch in range(epochs):
-            loss_epoch = torch.tensor(0.0)
+            loss_epoch = torch.tensor(0.0, device=device)
             timer.tic()
 
             for batch_x, batch_y in iter_batches(X, Y, batch_size=batch_size):
@@ -303,7 +305,7 @@ def main(
     ) as fig:
         ax = fig.gca()
 
-        ax.semilogy(losses)
+        ax.semilogy(losses.cpu().numpy())
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
 
@@ -322,7 +324,7 @@ def main(
         basename.with_stem(f"{basename.stem}-predict"), overwrite=overwrite
     ) as fig:
         ax = fig.gca()
-        ax.imshow(mask, extent=bbox, cmap="binary")
+        ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
 
     # }}}
 
@@ -361,14 +363,24 @@ if __name__ == "__main__":
         action="store_true",
         help="Only show error messages",
     )
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda"),
+        default="cpu",
+        help="The default deviced used by the framework",
+    )
     args = parser.parse_args()
 
     if not args.quiet:
         log.setLevel(logging.INFO)
 
-    raise SystemExit(
-        main(
-            args.filename,
-            overwrite=args.force,
+    with torch.device(args.device):
+        # NOTE: use TF32 for matrix multiplication (should be faster, similar precision)
+        torch.set_float32_matmul_precision("high")
+
+        raise SystemExit(
+            main(
+                args.filename,
+                overwrite=args.force,
+            )
         )
-    )
