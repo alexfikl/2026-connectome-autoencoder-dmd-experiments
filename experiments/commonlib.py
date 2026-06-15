@@ -177,7 +177,7 @@ def generate_training_dataset(
     log.info("    Mean: %.5e", Z.abs().mean())
 
     # NOTE: mask only returned for plotting
-    return X, Y, mask
+    return X, Y, Z[-1]
 
 
 # }}}

@@ -170,9 +170,11 @@ def main(
         escape_radius = determine_escape_radius(mat)
 
     if outfile is None:
-        outfile = filename.parent / (
-            f"{filename.stem}-ae-quad-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}-{device.type}.npz"
-        )
+        outfile = filename.parent / f"{filename.stem}-ae-quad.npz"
+
+    outfile = outfile.with_stem(
+        f"{outfile.stem}-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}-{device.type}"
+    )
     basename = outfile.with_suffix("")
 
     # }}}
@@ -214,13 +216,14 @@ def main(
 
         # {{{ generate dataset
 
-        X, Y, Zmask = generate_training_dataset(
+        X, Y, Zlast = generate_training_dataset(
             mat,
             bbox=bbox,
             resolution=resolution,
             maxit=maxit,
             escape_radius=escape_radius,
         )
+        Zmask = torch.sum(Zlast.real**2 + Zlast.imag**2, dim=-1) < escape_radius**2
 
         # }}}
 
@@ -243,11 +246,20 @@ def main(
 
         torch.save(
             {
+                # model
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "epochs": epochs,
                 "losses": losses,
                 "Zmask": Zmask,
+                "Zlast": Zlast,
+                # parameters
+                "inputfile": filename,
+                "dataidx": dataidx,
+                "bbox": bbox,
+                "escape_radius": escape_radius,
+                "resolution": resolution,
+                "maxit": maxit,
             },
             weightsfile,
         )
