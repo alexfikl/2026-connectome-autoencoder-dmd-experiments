@@ -11,7 +11,8 @@ import numpy as np
 import torch
 from torch import nn
 
-from nneuroutil.helpers import module_logger
+from nneuroutil.helpers import FuzzyChoiceAction, module_logger
+from nneuroutil.torch_extras import available_device_names
 
 log = module_logger("lib.quadratic_network")
 
@@ -336,7 +337,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--device",
-        choices=("cpu", "cuda"),
+        action=FuzzyChoiceAction,
+        choices=sorted(available_device_names()),
         default="cpu",
         help="The default deviced used by the framework",
     )
@@ -359,6 +361,9 @@ if __name__ == "__main__":
         help="Only show error messages",
     )
     args = parser.parse_args()
+    print(args)
+    print(args.device)
+    raise SystemExit(0)
 
     if not args.quiet:
         log.setLevel(logging.INFO)

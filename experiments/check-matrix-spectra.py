@@ -161,7 +161,7 @@ def main(
     import matplotlib.pyplot as mp
     from matplotlib.colors import SymLogNorm
 
-    from commonlib import set_plotting_defaults  # noqa: F401
+    from commonlib import set_matplotlib_style  # noqa: F401
 
     ext = ".{}".format(mp.rcParams["savefig.format"])
 

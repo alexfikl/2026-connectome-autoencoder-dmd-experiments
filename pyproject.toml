@@ -50,6 +50,8 @@ dev = [
     "typos",
     "uv",
 ]
+flax = [ "flax" ]
+torch = [ "torch" ]
 
 [tool.ruff]
 line-length = 88
@@ -95,6 +97,8 @@ lint.ignore = [
     "PLR6301", # no-self-use
     "S101",    # assert
     "S102",    # exec-builtin
+    "S301",    # insecure-pickle-load
+    "S403",    # insecure-pickle
 ]
 lint.flake8-quotes.docstring-quotes = "double"
 lint.flake8-quotes.inline-quotes = "double"

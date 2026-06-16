@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
@@ -23,32 +24,31 @@ log = module_logger("lib")
 # {{{ matplotlib
 
 
-def set_plotting_defaults() -> None:
+def set_matplotlib_style() -> None:
     """Sets default plotting settings from ``scienceplots``.
 
     The defaults can be overwritten with a local ``default.mplstyle`` file.
     """
     import matplotlib.pyplot as mp
 
-    # NOTE: since v1.1.0 an import is required to import the styles
-    import scienceplots  # noqa: F401
+    from nneuroutil.visualization import load_scienceplots_styles
 
-    dirname = pathlib.Path(__file__).parent
-    mp.style.use(["science", "ieee"])
+    # load scienceplots
+    styles = load_scienceplots_styles()
+    mp.style.use(styles.get(["science", "ieee"]))
 
-    mplstyle = dirname / "default.mplstyle"
+    # load our overwrites
+    mplstyle = pathlib.Path(__file__).parent / "default.mplstyle"
     if mplstyle.exists():
         mp.style.use(mplstyle)
     else:
         log.error("Could not find matplotlib style: '%s'.", mplstyle)
 
-    import os
-
-    ext = os.environ.get("DMDAELIB_FIGURE_FORMAT", "jpg")
-    mp.rcParams["savefig.format"] = ext
+    ext = os.environ.get("PROJECT_FIGURE_FORMAT", "jpg")
+    mp.rc("savefig", format=ext)
 
 
-set_plotting_defaults()
+set_matplotlib_style()
 
 # }}}
 
@@ -83,12 +83,13 @@ def generate_grid(
     ny: int = 128,
     dtype: Any = None,
     xp: Any = None,
+    device: Any = None,
 ) -> Array2D:
     if xp is None:
         xp = np
 
-    x = xp.linspace(xmin, xmax, nx)
-    y = xp.linspace(ymin, ymax, ny)
+    x = xp.linspace(xmin, xmax, nx, device=device)
+    y = xp.linspace(ymin, ymax, ny, device=device)
 
     result = x[None, :] + 1j * y[:, None]
     if dtype is not None and dtype != result.dtype:
@@ -113,22 +114,26 @@ def generate_dataset(
 ) -> tuple[Array4D, Array2D]:
     xp = array_api_compat.array_namespace(A)
 
-    assert A.shape[0] == A.shape[1]
-
-    # NOTE: promoting A to complex because einsum doesn't handle heterogeneous dtypes
-    A = xp.astype(A, xp.result_type(A.dtype, xp.complex64))
     d = A.shape[0]
+    assert A.shape[0] == A.shape[1]
 
     # NOTE: allow a maximum element z[i] such that norm(z) ~ escape_radius
     max_z = (escape_radius + 1) / d**0.5
+    escape_radius_sqr = escape_radius**2
 
     # generate grid
-    c = generate_grid(*bbox, nx=resolution, ny=resolution, dtype=A.dtype, xp=xp)
+    c = generate_grid(
+        *bbox,
+        nx=resolution,
+        ny=resolution,
+        dtype=A.dtype,
+        xp=xp,
+        device=A.device,
+    )
     c = c[:, :, None]
 
     # iterate
-    escape_radius_sqr = escape_radius**2
-    result = xp.zeros((maxit, resolution, resolution, d), dtype=A.dtype)
+    result = [xp.zeros((resolution, resolution, d), dtype=A.dtype, device=A.device)]
 
     for i in range(1, maxit):
         # evolve
@@ -136,24 +141,25 @@ def generate_dataset(
         z_new = xp.einsum("ij,klj->kli", A, z_prev) ** 2 + c
 
         # clip escaped values over escape radius
-        # NOTE: we set it to `R + 1 / sqrt(d)` so that `norm2(z) == R + 1`
         escaped = xp.sum(z_new.real**2 + z_new.imag**2, axis=-1) > escape_radius_sqr
         z_new = xp.where(escaped[..., None], max_z, z_new)
 
-        result[i] = z_new
+        result.append(z_new)
 
-    return result, c.squeeze(-1)
+    return xp.stack(result, dtype=A.dtype), c.squeeze(-1)
 
 
 def generate_training_dataset(
-    mat: torch.Tensor,
+    mat: Array2D,
     *,
     bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
     resolution: int = 128,
     maxit: int = 128,
     escape_radius: float = 100.0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    import torch
+    xp: Any = None,
+) -> tuple[Array2D, Array2D, Array2D]:
+    if xp is None:
+        xp = array_api_compat.array_namespace(mat)
 
     log.info("Generating dataset on %s", bbox)
 
@@ -170,11 +176,11 @@ def generate_training_dataset(
     X, Y = split_dataset(Z, C=c, escape_radius=escape_radius, split_real_imaginary=True)
     log.info("Dataset: %s", X.shape)
 
-    mask = torch.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, dim=-1) < escape_radius**2
+    mask = xp.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, axis=-1) < escape_radius**2
     log.info("Points:")
-    log.info("    Converged: %d", torch.sum(mask))
-    log.info("    Max: %.5e (radius %.5e)", Z.abs().max(), escape_radius)
-    log.info("    Mean: %.5e", Z.abs().mean())
+    log.info("    Converged: %d", xp.sum(mask))
+    log.info("    Max: %.5e (radius %.5e)", xp.max(xp.abs(Z)), escape_radius)
+    log.info("    Mean: %.5e", xp.mean(xp.abs(Z)))
 
     # NOTE: mask only returned for plotting
     return X, Y, Z[-1]
@@ -208,7 +214,7 @@ def split_dataset(
     if escape_radius is not None:
         mask = xp.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, axis=-1) < escape_radius**2
     else:
-        mask = xp.ones((nx, ny), dtype=xp.bool)
+        mask = xp.ones((nx, ny), dtype=xp.bool, device=Z.device)
 
     X = Z[:-1, mask, :].reshape(-1, d)
 
@@ -243,13 +249,14 @@ def dmd_predict(
     bbox: tuple[float, float, float, float],
 ) -> Array3D:
     xp = array_api_compat.array_namespace(Z)
+    device = Z.device
 
     maxit, nx, ny, d = Z.shape
-    c = generate_grid(*bbox, nx=nx, ny=ny, dtype=model.dtype, xp=xp)
+    c = generate_grid(*bbox, nx=nx, ny=ny, dtype=model.dtype, xp=xp, device=device)
     c = c[None, :, :]
 
     # initialize the state to (z0, c)
-    z = xp.zeros((d + 1, nx, ny), dtype=model.dtype)
+    z = xp.zeros((d + 1, nx, ny), dtype=model.dtype, device=device)
     z[-1, :, :] = c
 
     # project the state back to the reduced state space
@@ -274,10 +281,13 @@ def iter_batches(
     Y: Array2D,
     *,
     batch_size: int = 4096,
+    rng: np.random.Generator | None = None,
 ) -> Iterator[tuple[Array2D, Array2D]]:
     xp = array_api_compat.array_namespace(X, Y)
+    if rng is None:
+        rng = np.random.default_rng()
 
-    idx = xp.randperm(len(X))
+    idx = xp.asarray(rng.permutation(len(X)), dtype=xp.int32, device=X.device)
     for start in range(0, len(X), batch_size):
         sl = idx[start : start + batch_size]
         yield X[sl], Y[sl]
@@ -336,7 +346,7 @@ def torch_train(
         scheduler.step(losses[epoch])  # ty: ignore[invalid-argument-type]
 
         timer.toc()
-        log.info("[%03d/%03d] loss %.5e (%s)", epoch, epochs, loss_epoch, timer)
+        log.info("[%03d/%03d] loss %.5e (%s)", epoch + 1, epochs, loss_epoch, timer)
 
     return model, optimizer, losses
 
@@ -353,6 +363,7 @@ def torch_predict(
     bbox: tuple[float, float, float, float],
     resolution: int = 128,
     maxit: int = 128,
+    device: Any = None,
 ) -> Array3D:
     import array_api_compat
     import torch
@@ -363,13 +374,14 @@ def torch_predict(
     assert dtype.is_floating_point
 
     with torch.no_grad():
-        z = torch.zeros((resolution, resolution, 2 * d), dtype=dtype)
+        z = torch.zeros((resolution, resolution, 2 * d), dtype=dtype, device=device)
         c = generate_grid(
             *bbox,
             nx=resolution,
             ny=resolution,
             dtype=dtype.to_complex(),
             xp=array_api_compat.array_namespace(z),
+            device=device,
         )
         c = c[:, :, None]
 
