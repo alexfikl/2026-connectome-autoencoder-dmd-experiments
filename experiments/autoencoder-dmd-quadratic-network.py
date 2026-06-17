@@ -1,0 +1,407 @@
+# SPDX-FileCopyrightText: 2026 Alexandru Fikl <alexfikl@gmail.com>
+# SPDX-License-Identifier: MIT
+
+from __future__ import annotations
+
+import logging
+import pathlib
+from typing import Any, cast
+
+import numpy as np
+import torch
+from torch import nn
+
+from nneuroutil.helpers import FuzzyChoiceAction, module_logger
+from nneuroutil.torch_extras import available_device_names
+
+log = module_logger("lib.autoencoder_network")
+
+SCRIPT_PATH = pathlib.Path(__file__)
+SCRIPT_LONG_HELP = f"""\
+Trains a standard Autoencoder neural network.
+
+Example:
+
+    > {SCRIPT_PATH.name} dataset.npz
+"""
+
+
+# {{{ model
+
+
+def make_layers(
+    sizes: tuple[int, ...],
+    nonlinearities: tuple[str, ...],
+    *,
+    alpha: float | None = None,
+    dtype: Any = None,
+) -> list[nn.Module]:
+    from itertools import pairwise
+
+    from nneuroutil.torch_extras import (
+        Bias,
+        ComplexLeakyQuadratic,
+        ComplexLinear,
+        ComplexQuadratic,
+        kaiming_uniform_,
+    )
+
+    layers = []
+    for (n_in, n_out), nonlinearity in zip(
+        pairwise(sizes), nonlinearities, strict=True
+    ):
+        # build nonlinearity
+        if nonlinearity == "quadratic":
+            activation = ComplexQuadratic()
+        elif nonlinearity == "leaky_quadratic":
+            activation = ComplexLeakyQuadratic(alpha)
+        else:
+            raise ValueError(f"unsupported nonlinearity: {nonlinearity!r}")
+
+        # build linear layer
+        linear = ComplexLinear(n_in, n_out, bias=False, dtype=dtype)
+        kaiming_uniform_(
+            linear.weight,
+            nonlinearity=nonlinearity,
+            param=alpha,
+        )
+
+        layers.append(linear)
+        layers.append(activation)
+        layers.append(Bias(2 * n_out, dtype=dtype))
+
+    return layers
+
+
+class Autoencoder(nn.Module):
+    def __init__(
+        self,
+        input_size: int,
+        *,
+        encoder_layer_sizes: int | tuple[int, ...] | None = None,
+        decoder_layer_sizes: int | tuple[int, ...] | None = None,
+        alpha: float = 0.1,
+        dtype: Any = None,
+    ) -> None:
+        if encoder_layer_sizes is None:
+            encoder_layer_sizes = input_size
+
+        if isinstance(encoder_layer_sizes, int):
+            encoder_layer_sizes = (encoder_layer_sizes,)
+
+        if decoder_layer_sizes is None:
+            decoder_layer_sizes = encoder_layer_sizes[-1]
+
+        if isinstance(decoder_layer_sizes, int):
+            decoder_layer_sizes = (decoder_layer_sizes,)
+
+        if not encoder_layer_sizes:
+            raise ValueError("'encoder_layer_sizes' cannot be empty")
+
+        if not decoder_layer_sizes:
+            raise ValueError("'decoder_layer_sizes' cannot be empty")
+
+        if dtype is None:
+            dtype = torch.float32
+
+        super().__init__()
+
+        self.input_size = input_size
+        self.output_size = decoder_layer_sizes[-1]
+        self.latent_size = encoder_layer_sizes[-1]
+        self.encoder_layer_sizes = encoder_layer_sizes
+        self.decoder_layer_sizes = decoder_layer_sizes
+        self.dtype = dtype
+
+        # {{{ construct autoencoder
+
+        # encoder
+        nlayers = len(encoder_layer_sizes)
+        encoder_layers = make_layers(
+            (self.input_size, *encoder_layer_sizes),
+            (*(("leaky_quadratic",) * (nlayers - 1)), "quadratic"),
+            alpha=alpha,
+            dtype=dtype,
+        )
+        self.encoder = nn.Sequential(*encoder_layers)
+
+        # decoder
+        nlayers = len(decoder_layer_sizes)
+        decoder_layers = make_layers(
+            (self.latent_size, *decoder_layer_sizes),
+            ("quadratic", *(("leaky_quadratic",) * (nlayers - 1))),
+            alpha=alpha,
+            dtype=dtype,
+        )
+        self.decoder = nn.Sequential(*decoder_layers)
+
+        # }}}
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.decoder(self.encoder(x))
+
+
+# }}}
+
+
+def main(
+    filename: pathlib.Path,
+    *,
+    outfile: pathlib.Path | None = None,
+    datakey: str = "matrices",
+    dataidx: int = 5,
+    bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
+    escape_radius: float | None = 100.0,
+    resolution: int = 128,
+    maxit: int = 128,
+    epochs: int = 100,
+    batch_size: int = 4096,
+    overwrite: bool = False,
+) -> int:
+    device = torch.get_default_device()
+    log.info("Device: %s", device)
+
+    # {{{ vallidate inputs
+
+    if not filename.exists():
+        log.error("File does not exist: '%s'.", filename)
+        return 1
+
+    try:
+        data = np.load(filename)
+    except Exception:
+        log.error("Failed to load data from file: '%s'.", filename)
+        return 1
+
+    if datakey not in data:
+        log.error("File does not contain '%s' dataset: '%s'.", datakey, filename)
+        return 1
+
+    matrices = data[datakey]
+    if matrices.ndim != 3:
+        log.error("Expected a 3 dimensional array: %s.", matrices.shape)
+        return 1
+
+    # NOTE: we don't really need complex128 for this example, so save some memory
+    mat = torch.from_numpy(matrices[dataidx]).to(torch.complex64).to(device)
+    if mat.shape[0] != mat.shape[1]:
+        log.error("Expected a square matrix: %s.", mat.shape)
+        return 1
+
+    if escape_radius is None:
+        from commonlib import determine_escape_radius
+
+        escape_radius = determine_escape_radius(mat)
+
+    if outfile is None:
+        outfile = filename.parent / f"{filename.stem}-ae-dmd-quad.npz"
+
+    outfile = outfile.with_stem(
+        f"{outfile.stem}-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}-{device.type}"
+    )
+    basename = outfile.with_suffix("")
+
+    # }}}
+
+    # {{{ train
+
+    from torch import optim
+
+    d = mat.shape[0]
+    model = Autoencoder(
+        d,
+        encoder_layer_sizes=(d, d),
+        decoder_layer_sizes=(d, d),
+    )
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=1.0e-3)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        patience=3,
+        factor=0.3,
+        min_lr=1.0e-5,
+        cooldown=2,
+    )
+
+    log.info("Network:\n%s", model)
+
+    weightsfile = outfile.with_suffix(".pkl")
+    if weightsfile.exists():
+        checkpoint = torch.load(weightsfile, map_location=device, weights_only=True)
+
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        losses = checkpoint["losses"]
+        Zmask = checkpoint["Zmask"]
+
+        compiled_model = cast("Autoencoder", torch.compile(model))
+    else:
+        from commonlib import generate_training_dataset, torch_train
+
+        # {{{ generate dataset
+
+        X, Y, Zlast = generate_training_dataset(
+            mat,
+            bbox=bbox,
+            resolution=resolution,
+            maxit=maxit,
+            escape_radius=escape_radius,
+        )
+        Zmask = torch.sum(Zlast.real**2 + Zlast.imag**2, dim=-1) < escape_radius**2
+
+        # }}}
+
+        # {{{ train
+
+        compiled_model, optimizer, losses = torch_train(
+            model,
+            criterion,
+            optimizer,
+            scheduler,
+            X,
+            Y,
+            epochs=epochs,
+            batch_size=batch_size,
+        )
+
+        # }}}
+
+        # {{{ checkpoint
+
+        torch.save(
+            {
+                # model
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "epochs": epochs,
+                "losses": losses,
+                "Zmask": Zmask,
+                "Zlast": Zlast,
+                # parameters
+                "inputfile": str(filename),
+                "dataidx": dataidx,
+                "bbox": bbox,
+                "escape_radius": escape_radius,
+                "resolution": resolution,
+                "maxit": maxit,
+            },
+            weightsfile,
+        )
+
+        # }}}
+
+    # }}}
+
+    from commonlib import torch_predict
+    from nneuroutil.visualization import figure
+
+    # {{{ plot fractal
+
+    with figure(
+        basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
+    ) as fig:
+        ax = fig.gca()
+        ax.imshow(Zmask.cpu().numpy(), extent=bbox, cmap="binary")
+
+    # }}}
+
+    # {{{ plot loss
+
+    with figure(
+        basename.with_stem(f"{basename.stem}-loss"), overwrite=overwrite
+    ) as fig:
+        ax = fig.gca()
+
+        ax.semilogy(losses.cpu().numpy())
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+
+    # }}}
+
+    # {{{ plot prediction
+
+    Zpredict = torch_predict(
+        compiled_model, bbox=bbox, resolution=2 * resolution, maxit=maxit
+    )
+    mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
+
+    with figure(
+        basename.with_stem(f"{basename.stem}-predict"), overwrite=overwrite
+    ) as fig:
+        ax = fig.gca()
+        ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
+
+    # }}}
+
+    return 0
+
+
+if __name__ == "__main__":
+    import argparse
+
+    class HelpFormatter(
+        argparse.ArgumentDefaultsHelpFormatter,
+        argparse.RawDescriptionHelpFormatter,
+    ):
+        pass
+
+    parser = argparse.ArgumentParser(
+        formatter_class=HelpFormatter,
+        description=SCRIPT_LONG_HELP,
+    )
+    parser.add_argument("filename", type=pathlib.Path)
+    parser.add_argument(
+        "--dataidx",
+        type=int,
+        default=5,
+        help="Index of the matrix to reconstruct",
+    )
+    parser.add_argument(
+        "-r",
+        "--resolution",
+        type=int,
+        default=128,
+        help="Resolution (in the c complex plane) of the images",
+    )
+    parser.add_argument(
+        "--device",
+        action=FuzzyChoiceAction,
+        choices=sorted(available_device_names()),
+        default="cpu",
+        help="The default deviced used by the framework",
+    )
+    parser.add_argument(
+        "-o",
+        "--outfile",
+        type=pathlib.Path,
+        default=None,
+        help="Basename for output files (named '{basename}-XX')",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force overwrite of existing files",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Only show error messages",
+    )
+    args = parser.parse_args()
+
+    if not args.quiet:
+        log.setLevel(logging.INFO)
+
+    with torch.device(args.device):
+        # NOTE: use TF32 for matrix multiplication (should be faster, similar precision)
+        torch.set_float32_matmul_precision("high")
+
+        raise SystemExit(
+            main(
+                args.filename,
+                dataidx=args.dataidx,
+                resolution=args.resolution,
+                overwrite=args.force,
+            )
+        )
