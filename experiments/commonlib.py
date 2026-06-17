@@ -146,7 +146,7 @@ def generate_dataset(
 
         result.append(z_new)
 
-    return xp.stack(result, dtype=A.dtype), c.squeeze(-1)
+    return xp.stack(result), c.squeeze(-1)
 
 
 def generate_training_dataset(

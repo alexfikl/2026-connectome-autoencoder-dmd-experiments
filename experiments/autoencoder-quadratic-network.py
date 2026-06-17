@@ -255,7 +255,7 @@ def main(
                 "Zmask": Zmask,
                 "Zlast": Zlast,
                 # parameters
-                "inputfile": filename,
+                "inputfile": str(filename),
                 "dataidx": dataidx,
                 "bbox": bbox,
                 "escape_radius": escape_radius,
@@ -269,6 +269,7 @@ def main(
 
     # }}}
 
+    from commonlib import torch_predict
     from nneuroutil.visualization import figure
 
     # {{{ plot fractal
@@ -295,8 +296,6 @@ def main(
     # }}}
 
     # {{{ plot prediction
-
-    from commonlib import torch_predict
 
     Zpredict = torch_predict(
         compiled_model, bbox=bbox, resolution=2 * resolution, maxit=maxit

@@ -188,7 +188,7 @@ def main(
                 "Zmask": Zmask,
                 "Zlast": Zlast,
                 # parameters
-                "inputfile": filename,
+                "inputfile": str(filename),
                 "dataidx": dataidx,
                 "bbox": bbox,
                 "escape_radius": escape_radius,
@@ -200,6 +200,7 @@ def main(
 
         # }}}
 
+    from commonlib import torch_predict
     from nneuroutil.visualization import figure, make_colorbar_axes
 
     # }}}
@@ -287,8 +288,6 @@ def main(
 
     # {{{ plot prediction
 
-    from commonlib import torch_predict
-
     Zpredict = torch_predict(
         compiled_model,
         bbox=bbox,
@@ -361,9 +360,6 @@ if __name__ == "__main__":
         help="Only show error messages",
     )
     args = parser.parse_args()
-    print(args)
-    print(args.device)
-    raise SystemExit(0)
 
     if not args.quiet:
         log.setLevel(logging.INFO)
