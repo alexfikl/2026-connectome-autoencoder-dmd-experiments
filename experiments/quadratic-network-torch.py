@@ -34,6 +34,8 @@ class QuadraticNetwork(nn.Module):
         self,
         input_size: int,
         output_size: int | None = None,
+        *,
+        device: str | torch.device | None = None,
         dtype: Any = None,
     ) -> None:
         if output_size is None:
@@ -52,9 +54,15 @@ class QuadraticNetwork(nn.Module):
 
         # NOTE: we know that our function is (A x)^2 + c, so just encode that
         self.model = nn.Sequential(
-            ComplexLinear(input_size, output_size, bias=False, dtype=dtype),
+            ComplexLinear(
+                input_size,
+                output_size,
+                bias=False,
+                device=device,
+                dtype=dtype,
+            ),
             ComplexQuadratic(),
-            Bias(2 * output_size, dtype=dtype),
+            Bias(2 * output_size, device=device, dtype=dtype),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -128,7 +136,7 @@ def main(
     from torch import optim
 
     d = mat.shape[0]
-    model = QuadraticNetwork(d, d)
+    model = QuadraticNetwork(d, d, device=device, dtype=mat.dtype.to_real())
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=5.0e-3)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)

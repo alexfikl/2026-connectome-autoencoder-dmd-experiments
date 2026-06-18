@@ -37,6 +37,7 @@ class Autoencoder(nn.Module):
         *,
         alpha: float = 0.1,
         use_complex_linear: bool = True,
+        device: str | torch.device | None = None,
         dtype: Any = None,
     ) -> None:
         if dtype is None:
@@ -61,22 +62,22 @@ class Autoencoder(nn.Module):
             cls: type[nn.Module] = nn.Linear
 
         self.encoder = nn.Sequential(
-            cls(fac * self.input_size, fac * 256),
+            cls(fac * self.input_size, fac * 256, device=device, dtype=dtype),
             nn.LeakyReLU(alpha),
-            cls(fac * 256, fac * 128),
+            cls(fac * 256, fac * 128, device=device, dtype=dtype),
             nn.LeakyReLU(alpha),
-            cls(fac * 128, fac * 64),
+            cls(fac * 128, fac * 64, device=device, dtype=dtype),
             nn.LeakyReLU(alpha),
-            cls(fac * 64, fac * self.latent_size),
+            cls(fac * 64, fac * self.latent_size, device=device, dtype=dtype),
         )
         self.decoder = nn.Sequential(
-            cls(fac * self.latent_size, fac * 64),
+            cls(fac * self.latent_size, fac * 64, device=device, dtype=dtype),
             nn.LeakyReLU(alpha),
-            cls(fac * 64, fac * 128),
+            cls(fac * 64, fac * 128, device=device, dtype=dtype),
             nn.LeakyReLU(alpha),
-            cls(fac * 128, fac * 256),
+            cls(fac * 128, fac * 256, device=device, dtype=dtype),
             nn.LeakyReLU(alpha),
-            cls(fac * 256, fac * self.output_size),
+            cls(fac * 256, fac * self.output_size, device=device, dtype=dtype),
         )
 
         # }}}
@@ -152,7 +153,13 @@ def main(
     from torch import optim
 
     d = mat.shape[0]
-    model = Autoencoder(d, d, use_complex_linear=False)
+    model = Autoencoder(
+        d,
+        d,
+        use_complex_linear=False,
+        device=device,
+        dtype=mat.dtype.to_real(),
+    )
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1.0e-3)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(

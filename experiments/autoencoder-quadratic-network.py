@@ -37,6 +37,7 @@ class Autoencoder(nn.Module):
         encoder_layer_sizes: int | tuple[int, ...] | None = None,
         decoder_layer_sizes: int | tuple[int, ...] | None = None,
         alpha: float = 0.1,
+        device: str | torch.device | None = None,
         dtype: Any = None,
     ) -> None:
         if encoder_layer_sizes is None:
@@ -69,8 +70,8 @@ class Autoencoder(nn.Module):
 
         from nneuroutil.torch_extras import (
             Bias,
-            ComplexLeakyQuadratic,
             ComplexLinear,
+            ComplexLinearQuadratic,
             ComplexQuadratic,
             kaiming_uniform_,
         )
@@ -82,16 +83,16 @@ class Autoencoder(nn.Module):
             is_last = i == len(encoder_layer_sizes) - 1
 
             # build nonlinearity
-            layer_nonlinearity = "quadratic" if is_last else "leaky_quadratic"
+            layer_nonlinearity = "quadratic" if is_last else "linear_quadratic"
             param = None if is_last else alpha
             activation = (
-                ComplexLeakyQuadratic(alpha)
+                ComplexLinearQuadratic(alpha)
                 if i != len(encoder_layer_sizes) - 1
                 else ComplexQuadratic()
             )
 
             # build linear layer
-            linear = ComplexLinear(n_in, n_out, bias=False, dtype=dtype)
+            linear = ComplexLinear(n_in, n_out, bias=False, device=device, dtype=dtype)
             kaiming_uniform_(
                 linear.weight,
                 nonlinearity=layer_nonlinearity,
@@ -100,13 +101,13 @@ class Autoencoder(nn.Module):
 
             encoder_layers.append(linear)
             encoder_layers.append(activation)
-            encoder_layers.append(Bias(2 * n_out, dtype=dtype))
+            encoder_layers.append(Bias(2 * n_out, device=device, dtype=dtype))
 
         # decoder
         layer_sizes = (self.latent_size, *decoder_layer_sizes)
         decoder_layers = []
         for n_in, n_out in pairwise(layer_sizes):
-            linear = ComplexLinear(n_in, n_out, dtype=dtype)
+            linear = ComplexLinear(n_in, n_out, device=device, dtype=dtype)
             decoder_layers.append(linear)
 
         self.encoder = nn.Sequential(*encoder_layers)
@@ -189,6 +190,8 @@ def main(
         d,
         encoder_layer_sizes=(d, d // 2),
         decoder_layer_sizes=(d,),
+        device=device,
+        dtype=mat.dtype.to_real(),
     )
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1.0e-3)
