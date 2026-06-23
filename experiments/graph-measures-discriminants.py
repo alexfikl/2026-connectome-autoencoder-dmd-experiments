@@ -295,7 +295,7 @@ def main(
             #     log.error("Error: %s", exc)
             #     return 1
 
-        np.savez(outfile, datasets=datasets)  # ty: ignore[invalid-argument-type]
+        np.savez(outfile, datasets=datasets)
 
     # }}}
 

@@ -111,3 +111,6 @@ lint.isort.known-first-party = [
 lint.isort.required-imports = [
     "from __future__ import annotations",
 ]
+
+[tool.typos]
+default.extend-words.yhat = "yhat"

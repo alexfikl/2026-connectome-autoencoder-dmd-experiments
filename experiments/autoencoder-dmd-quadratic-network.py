@@ -5,14 +5,16 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import torch
 from torch import nn
+from torch.utils.data import DataLoader
 
-from nneuroutil.helpers import FuzzyChoiceAction, module_logger
+from nneuroutil.helpers import FuzzyChoiceAction, TicTocTimer, module_logger
 from nneuroutil.torch_extras import available_device_names
+from nneuroutil.typing import Array3D
 
 log = module_logger("lib.autoencoder_network")
 
@@ -34,13 +36,15 @@ def make_layers(
     nonlinearities: tuple[str, ...],
     *,
     alpha: float | None = None,
+    device: str | torch.device | None = None,
     dtype: Any = None,
 ) -> list[nn.Module]:
+    """Construct a sequential module of layers of the form ``f(W x) + b``."""
     from itertools import pairwise
 
     from nneuroutil.torch_extras import (
         Bias,
-        ComplexLeakyQuadratic,
+        ComplexBlendedQuadratic,
         ComplexLinear,
         ComplexQuadratic,
         kaiming_uniform_,
@@ -53,27 +57,39 @@ def make_layers(
         # build nonlinearity
         if nonlinearity == "quadratic":
             activation = ComplexQuadratic()
-        elif nonlinearity == "leaky_quadratic":
-            activation = ComplexLeakyQuadratic(alpha)
+        elif nonlinearity == "blended_quadratic":
+            activation = ComplexBlendedQuadratic(0.5 if alpha is None else alpha)
         else:
             raise ValueError(f"unsupported nonlinearity: {nonlinearity!r}")
 
         # build linear layer
-        linear = ComplexLinear(n_in, n_out, bias=False, dtype=dtype)
+        linear = ComplexLinear(n_in, n_out, bias=False, device=device, dtype=dtype)
         kaiming_uniform_(
             linear.weight,
             nonlinearity=nonlinearity,
             param=alpha,
         )
 
+        # add the whole thing as `f(W z) + b`
         layers.append(linear)
         layers.append(activation)
-        layers.append(Bias(2 * n_out, dtype=dtype))
+        layers.append(Bias(2 * n_out, device=device, dtype=dtype))
 
     return layers
 
 
-class Autoencoder(nn.Module):
+class DMDAutoencoderResult(NamedTuple):
+    y_out: torch.Tensor
+    """Output of the autoencoder."""
+    x_latent: torch.Tensor
+    """Output of the encoder."""
+    xhat_latent: torch.Tensor
+    """DMD reconstructed latent vector :attr:`x_latent`."""
+    yhat_out: torch.Tensor
+    """Output of the decoder applied to :atr:`xhat_latent`."""
+
+
+class DMDAutoencoder(nn.Module):
     def __init__(
         self,
         input_size: int,
@@ -90,7 +106,7 @@ class Autoencoder(nn.Module):
             encoder_layer_sizes = (encoder_layer_sizes,)
 
         if decoder_layer_sizes is None:
-            decoder_layer_sizes = encoder_layer_sizes[-1]
+            decoder_layer_sizes = encoder_layer_sizes[::-1]
 
         if isinstance(decoder_layer_sizes, int):
             decoder_layer_sizes = (decoder_layer_sizes,)
@@ -119,7 +135,7 @@ class Autoencoder(nn.Module):
         nlayers = len(encoder_layer_sizes)
         encoder_layers = make_layers(
             (self.input_size, *encoder_layer_sizes),
-            (*(("leaky_quadratic",) * (nlayers - 1)), "quadratic"),
+            (*(("blended_quadratic",) * (nlayers - 1)), "quadratic"),
             alpha=alpha,
             dtype=dtype,
         )
@@ -129,7 +145,7 @@ class Autoencoder(nn.Module):
         nlayers = len(decoder_layer_sizes)
         decoder_layers = make_layers(
             (self.latent_size, *decoder_layer_sizes),
-            ("quadratic", *(("leaky_quadratic",) * (nlayers - 1))),
+            ("quadratic", *(("blended_quadratic",) * (nlayers - 1))),
             alpha=alpha,
             dtype=dtype,
         )
@@ -137,8 +153,241 @@ class Autoencoder(nn.Module):
 
         # }}}
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.decoder(self.encoder(x))
+    def forward(self, x: torch.Tensor) -> DMDAutoencoderResult:
+        from nneuroutil.dmd import build_dmd
+
+        # NOTE: x has a shape of (batch_size, window_size, 2 d) and we want to
+        # do DMD on it, so we go
+        # 1. X = x[:, :-1, :].reshape(-1, d).T
+        #    Y = x[:, 1:, :].reshape(-1, d).T
+        # 2. build the DMD operator for this batch with (X, Y)
+
+        # go to latent space
+        x_latent = self.encoder(x)
+
+        # construct DMD operator in latent space
+        d = x.shape[-1]
+        X = x_latent[:, :-1, :].reshape(-1, d)
+        Y = x_latent[:, 1:, :].reshape(-1, d)
+        dmd = build_dmd(X, Y)
+
+        # predict with DMD in latent space
+        # NOTE: x_latent is not transposed so we write these out explicitly
+        xhat_latent = torch.einsum("ij,...j->...i", dmd.Vh, x_latent)
+        xhat_latent = torch.einsum("ij,...j->...i", dmd.Ahat, xhat_latent)
+        xhat_latent = torch.einsum("ji,...j->...i", torch.conj(dmd.Vh), xhat_latent)
+
+        return DMDAutoencoderResult(
+            y_out=self.decoder(x_latent),
+            x_latent=x_latent,
+            xhat_latent=xhat_latent,
+            yhat_out=self.decoder(xhat_latent),
+        )
+
+
+# }}}
+
+
+# {{{ loss
+
+
+class DMDLossResult(NamedTuple):
+    total: torch.Tensor
+    """Total value of the loss function. The gradient will be applied to this."""
+    loss_rec: torch.Tensor
+    """Reconstruction loss."""
+    loss_lin: torch.Tensor
+    """Linear approximation loss."""
+    loss_pre: torch.Tensor
+    """Linear prediction loss."""
+
+    def tensor(self) -> torch.Tensor:
+        return torch.stack([self.total, self.loss_rec, self.loss_lin, self.loss_pre])
+
+    def detach(self) -> DMDLossResult:
+        return DMDLossResult(
+            total=self.total.detach(),
+            loss_rec=self.loss_rec.detach(),
+            loss_lin=self.loss_lin.detach(),
+            loss_pre=self.loss_pre.detach(),
+        )
+
+    def backward(self, *args: Any, **kwargs: Any) -> None:
+        self.total.backward(*args, **kwargs)
+
+
+class DMDLoss(nn.Module):
+    def __init__(
+        self,
+        *,
+        gamma_rec: float = 1.0,
+        gamma_lin: float = 1.0,
+        gamma_pre: float = 1.0,
+        scale: float = 1.0,
+    ) -> None:
+        super().__init__()
+
+        self.mse = nn.MSELoss()
+        self.gamma_rec = gamma_rec / scale
+        self.gamma_lin = gamma_lin / scale
+        self.gamma_pre = gamma_pre / scale
+
+    @property
+    def dim(self) -> int:
+        return 4
+
+    def forward(
+        self,
+        x_in: torch.Tensor,
+        y_out: torch.Tensor,
+        *,
+        x_latent: torch.Tensor,
+        xhat_latent: torch.Tensor,
+        yhat_out: torch.Tensor,
+    ) -> DMDLossResult:
+        # reconstruction loss
+        loss_rec = self.mse(x_in, y_out)
+
+        # latent space linearity loss
+        loss_lin = self.mse(x_latent, xhat_latent)
+
+        # linear reconstruction loss
+        loss_pre = self.mse(y_out, yhat_out)
+
+        total = (
+            self.gamma_rec * loss_rec
+            + self.gamma_lin * loss_lin
+            + self.gamma_pre * loss_pre
+        )
+
+        return DMDLossResult(
+            total=total,
+            loss_rec=loss_rec,
+            loss_lin=loss_lin,
+            loss_pre=loss_pre,
+        )
+
+
+# }}}
+
+
+# {{{ torch_train
+
+
+def torch_train(
+    model: nn.Module,
+    criterion: DMDLoss,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    X: torch.Tensor,
+    Y: torch.Tensor,
+    *,
+    window_size: int = 32,
+    epochs: int = 50,
+    batch_size: int = 2048,
+) -> tuple[nn.Module, torch.optim.Optimizer, torch.Tensor]:
+    import torch
+
+    timer = TicTocTimer()
+
+    device = X.device
+    # compiled_model = torch.compile(model)
+    compiled_model = model
+
+    from nneuroutil.torch_extras import SlidingWindowDataset
+
+    dataset = SlidingWindowDataset(X, Y, window_size=window_size)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        # NOTE: this is needed otherwise the DataLoader seems to want to use the
+        # 'cpu' device even when there is another default device..
+        generator=torch.Generator(device),
+    )
+
+    num_batches = X.shape[0] // batch_size
+    losses = torch.empty((epochs, criterion.dim), device=device)
+
+    for epoch in range(epochs):
+        loss_epoch = torch.zeros(criterion.dim, device=device)
+        timer.tic()
+
+        for i, (batch_x, batch_y) in enumerate(loader):
+            assert i >= 0
+            optimizer.zero_grad()
+
+            # compute loss function
+            predictions = compiled_model(batch_x)
+            loss = criterion(
+                batch_y,
+                y_out=predictions.y_out,
+                x_latent=predictions.x_latent,
+                xhat_latent=predictions.xhat_latent,
+                yhat_out=predictions.yhat_out,
+            )
+
+            # compute gradient
+            loss.backward()
+
+            # update weights
+            optimizer.step()
+
+            loss_epoch += loss.tensor().detach()
+
+        losses[epoch] = loss_epoch / num_batches
+        scheduler.step(losses[epoch, 0])  # ty: ignore[invalid-argument-type]
+
+        timer.toc()
+        log.info(
+            "[%03d/%03d] loss %.5e (%s)", epoch + 1, epochs, losses[epoch, 0], timer
+        )
+
+    return model, optimizer, losses
+
+
+# }}}
+
+
+# {{{ torch_predict
+
+
+def torch_predict(
+    model: nn.Module,
+    *,
+    bbox: tuple[float, float, float, float],
+    resolution: int = 128,
+    maxit: int = 128,
+    device: Any = None,
+) -> Array3D:
+    import array_api_compat
+    import torch
+
+    d = int(model.input_size)  # ty: ignore[invalid-argument-type]
+    dtype = model.dtype
+    assert isinstance(dtype, torch.dtype)
+    assert dtype.is_floating_point
+
+    from commonlib import generate_grid
+
+    with torch.no_grad():
+        z = torch.zeros((resolution, resolution, 2 * d), dtype=dtype, device=device)
+        c = generate_grid(
+            *bbox,
+            nx=resolution,
+            ny=resolution,
+            dtype=dtype.to_complex(),
+            xp=array_api_compat.array_namespace(z),
+            device=device,
+        )
+        c = c[:, :, None]
+
+        for _ in range(1, maxit):
+            Az = model(z)
+            z[:, :, :d] = Az[:, :, :d] + c.real
+            z[:, :, d:] = Az[:, :, d:] + c.imag
+
+    return torch.complex(z[:, :, :d], z[:, :, d:])
 
 
 # }}}
@@ -155,9 +404,11 @@ def main(
     resolution: int = 128,
     maxit: int = 128,
     epochs: int = 100,
-    batch_size: int = 4096,
+    batch_size: int = 2048,
     overwrite: bool = False,
 ) -> int:
+    from commonlib import determine_escape_radius
+
     device = torch.get_default_device()
     log.info("Device: %s", device)
 
@@ -189,8 +440,6 @@ def main(
         return 1
 
     if escape_radius is None:
-        from commonlib import determine_escape_radius
-
         escape_radius = determine_escape_radius(mat)
 
     if outfile is None:
@@ -208,20 +457,12 @@ def main(
     from torch import optim
 
     d = mat.shape[0]
-    model = Autoencoder(
+    model = DMDAutoencoder(
         d,
         encoder_layer_sizes=(d, d),
         decoder_layer_sizes=(d, d),
     )
-    criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1.0e-3)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        patience=3,
-        factor=0.3,
-        min_lr=1.0e-5,
-        cooldown=2,
-    )
 
     log.info("Network:\n%s", model)
 
@@ -234,24 +475,36 @@ def main(
         losses = checkpoint["losses"]
         Zmask = checkpoint["Zmask"]
 
-        compiled_model = cast("Autoencoder", torch.compile(model))
+        compiled_model = cast("DMDAutoencoder", torch.compile(model))
     else:
-        from commonlib import generate_training_dataset, torch_train
+        from commonlib import generate_training_dataset
 
         # {{{ generate dataset
 
         X, Y, Zlast = generate_training_dataset(
             mat,
             bbox=bbox,
+            escape_radius=escape_radius,
             resolution=resolution,
             maxit=maxit,
-            escape_radius=escape_radius,
+            in_dmd=True,
         )
         Zmask = torch.sum(Zlast.real**2 + Zlast.imag**2, dim=-1) < escape_radius**2
 
         # }}}
 
         # {{{ train
+
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            patience=3,
+            factor=0.3,
+            min_lr=1.0e-5,
+            cooldown=2,
+        )
+
+        target_scale = torch.mean(Y.conj() * Y).real.item()
+        criterion = DMDLoss(scale=target_scale)
 
         compiled_model, optimizer, losses = torch_train(
             model,
@@ -292,7 +545,6 @@ def main(
 
     # }}}
 
-    from commonlib import torch_predict
     from nneuroutil.visualization import figure
 
     # {{{ plot fractal

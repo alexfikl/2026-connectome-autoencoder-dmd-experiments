@@ -70,8 +70,8 @@ class Autoencoder(nn.Module):
 
         from nneuroutil.torch_extras import (
             Bias,
+            ComplexBlendedQuadratic,
             ComplexLinear,
-            ComplexLinearQuadratic,
             ComplexQuadratic,
             kaiming_uniform_,
         )
@@ -83,10 +83,10 @@ class Autoencoder(nn.Module):
             is_last = i == len(encoder_layer_sizes) - 1
 
             # build nonlinearity
-            layer_nonlinearity = "quadratic" if is_last else "linear_quadratic"
+            layer_nonlinearity = "quadratic" if is_last else "blended_quadratic"
             param = None if is_last else alpha
             activation = (
-                ComplexLinearQuadratic(alpha)
+                ComplexBlendedQuadratic(alpha)
                 if i != len(encoder_layer_sizes) - 1
                 else ComplexQuadratic()
             )

@@ -153,9 +153,10 @@ def generate_training_dataset(
     mat: Array2D,
     *,
     bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
+    escape_radius: float = 100.0,
     resolution: int = 128,
     maxit: int = 128,
-    escape_radius: float = 100.0,
+    in_dmd: bool = False,
     xp: Any = None,
 ) -> tuple[Array2D, Array2D, Array2D]:
     if xp is None:
@@ -172,8 +173,13 @@ def generate_training_dataset(
             maxit=maxit,
         )
 
-    # Compute target scale for Normalized MSE (NMSE) loss to resolve vanishing gradients
-    X, Y = split_dataset(Z, C=c, escape_radius=escape_radius, split_real_imaginary=True)
+    X, Y = split_dataset(
+        Z,
+        C=c,
+        escape_radius=escape_radius,
+        in_dmd=in_dmd,
+        split_real_imaginary=True,
+    )
     log.info("Dataset: %s", X.shape)
 
     mask = xp.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, axis=-1) < escape_radius**2
@@ -183,7 +189,7 @@ def generate_training_dataset(
     log.info("    Mean: %.5e", xp.mean(xp.abs(Z)))
 
     # NOTE: mask only returned for plotting
-    return X, Y, Z[-1]
+    return X, Y, Z[-1].clone()
 
 
 # }}}
@@ -197,6 +203,7 @@ def split_dataset(
     *,
     C: Array4D | None = None,
     escape_radius: float | None = None,
+    in_dmd: bool = False,
     split_real_imaginary: bool = True,
     xp: Any = None,
 ) -> tuple[Array2D, Array2D]:
@@ -208,6 +215,10 @@ def split_dataset(
     #   * take only the converged points (based on mask)
     #   * squish everything down to use d as the "features"
 
+    # NOTE: we reshape the array in two different ways:
+    #   1. if `in_dmd`: to a 3D array of shape (n * n, maxit, d)
+    #   2. if not `in_dmd`: to a 2D array of shape (n * n * maxit, d)
+
     maxit, nx, ny, d = Z.shape
 
     # if provided, strip out points that escaped
@@ -216,7 +227,11 @@ def split_dataset(
     else:
         mask = xp.ones((nx, ny), dtype=xp.bool, device=Z.device)
 
-    X = Z[:-1, mask, :].reshape(-1, d)
+    X = Z[:-1, mask, :]
+    if in_dmd:  # noqa: SIM108
+        X = xp.permute_dims(X, (1, 0, 2))
+    else:
+        X = xp.reshape(X, (-1, d))
 
     # if provided, strip the constant offset so we predict
     #   Y' = X
@@ -225,9 +240,14 @@ def split_dataset(
     if C is not None:
         C = xp.expand_dims(xp.expand_dims(C, axis=0), axis=-1)
         C = xp.broadcast_to(C, (maxit - 1, nx, ny, d))
-        Y = xp.reshape(Z[1:, mask, :] - C[:, mask, :], (-1, d))
+        Y = Z[1:, mask, :] - C[:, mask, :]
     else:
-        Y = xp.reshape(Z[1:, mask, :], (-1, d))
+        Y = Z[1:, mask, :]
+
+    if in_dmd:  # noqa: SIM108
+        Y = xp.permute_dims(Y, (1, 0, 2))
+    else:
+        Y = xp.reshape(Y, (-1, d))
 
     if split_real_imaginary:
         X = xp.concat([X.real, X.imag], axis=-1)
