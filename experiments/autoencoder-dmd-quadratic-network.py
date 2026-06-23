@@ -79,6 +79,9 @@ def make_layers(
 
 
 class DMDAutoencoderResult(NamedTuple):
+    A_dmd: torch.Tensor
+    """DMD approximated linear operator in the latent space."""
+
     y_out: torch.Tensor
     """Output of the autoencoder."""
     x_latent: torch.Tensor
@@ -96,6 +99,7 @@ class DMDAutoencoder(nn.Module):
         *,
         encoder_layer_sizes: int | tuple[int, ...] | None = None,
         decoder_layer_sizes: int | tuple[int, ...] | None = None,
+        dmd_enabled: bool = False,
         alpha: float = 0.1,
         dtype: Any = None,
     ) -> None:
@@ -128,6 +132,7 @@ class DMDAutoencoder(nn.Module):
         self.encoder_layer_sizes = encoder_layer_sizes
         self.decoder_layer_sizes = decoder_layer_sizes
         self.dtype = dtype
+        self.dmd_enabled = dmd_enabled
 
         # {{{ construct autoencoder
 
@@ -164,24 +169,34 @@ class DMDAutoencoder(nn.Module):
 
         # go to latent space
         x_latent = self.encoder(x)
+        y_out = self.decoder(x_latent)
 
-        # construct DMD operator in latent space
-        d = x.shape[-1]
-        X = x_latent[:, :-1, :].reshape(-1, d)
-        Y = x_latent[:, 1:, :].reshape(-1, d)
-        dmd = build_dmd(X, Y)
+        d = x_latent.shape[-1]
+        assert d == 2 * self.latent_size
 
-        # predict with DMD in latent space
-        # NOTE: x_latent is not transposed so we write these out explicitly
-        xhat_latent = torch.einsum("ij,...j->...i", dmd.Vh, x_latent)
-        xhat_latent = torch.einsum("ij,...j->...i", dmd.Ahat, xhat_latent)
-        xhat_latent = torch.einsum("ji,...j->...i", torch.conj(dmd.Vh), xhat_latent)
+        # shape of the latent space
+        if self.dmd_enabled:
+            # construct DMD operator in latent space
+            X = x_latent[:, :-1, :].reshape(-1, d)
+            Y = x_latent[:, 1:, :].reshape(-1, d)
+
+            dmd = build_dmd(X, Y)
+            A_dmd = torch.conj(dmd.Vh).T @ dmd.Ahat @ dmd.Vh
+
+            # predict with DMD in latent space (single-step)
+            xhat_latent = x_latent[:, :-1, :] @ A_dmd.T
+            yhat_out = self.decoder(xhat_latent)
+        else:
+            A_dmd = torch.eye(d, d, device=x.device, dtype=x.dtype)
+            xhat_latent = x_latent
+            yhat_out = y_out
 
         return DMDAutoencoderResult(
-            y_out=self.decoder(x_latent),
+            A_dmd=A_dmd,
+            y_out=y_out,
             x_latent=x_latent,
             xhat_latent=xhat_latent,
-            yhat_out=self.decoder(xhat_latent),
+            yhat_out=yhat_out,
         )
 
 
@@ -249,10 +264,10 @@ class DMDLoss(nn.Module):
         loss_rec = self.mse(x_in, y_out)
 
         # latent space linearity loss
-        loss_lin = self.mse(x_latent, xhat_latent)
+        loss_lin = self.mse(x_latent[:, 1:, :], xhat_latent)
 
         # linear reconstruction loss
-        loss_pre = self.mse(y_out, yhat_out)
+        loss_pre = self.mse(y_out[:, 1:, :], yhat_out)
 
         total = (
             self.gamma_rec * loss_rec
@@ -274,8 +289,8 @@ class DMDLoss(nn.Module):
 # {{{ torch_train
 
 
-def torch_train(
-    model: nn.Module,
+def torch_train_impl(
+    model: DMDAutoencoder,
     criterion: DMDLoss,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
@@ -283,6 +298,7 @@ def torch_train(
     Y: torch.Tensor,
     *,
     window_size: int = 32,
+    nwindows: int = 16,
     epochs: int = 50,
     batch_size: int = 2048,
 ) -> tuple[nn.Module, torch.optim.Optimizer, torch.Tensor]:
@@ -290,13 +306,14 @@ def torch_train(
 
     timer = TicTocTimer()
 
-    device = X.device
+    # NOTE: the compiled model seems to be slower? That's annoying..
     # compiled_model = torch.compile(model)
     compiled_model = model
+    device = X.device
 
     from nneuroutil.torch_extras import SlidingWindowDataset
 
-    dataset = SlidingWindowDataset(X, Y, window_size=window_size)
+    dataset = SlidingWindowDataset(X, Y, window_size=window_size, nwindows=nwindows)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -314,7 +331,6 @@ def torch_train(
         timer.tic()
 
         for i, (batch_x, batch_y) in enumerate(loader):
-            assert i >= 0
             optimizer.zero_grad()
 
             # compute loss function
@@ -329,11 +345,26 @@ def torch_train(
 
             # compute gradient
             loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(), max_norm=float("inf")
+            )
 
             # update weights
             optimizer.step()
 
+            # update loss
             loss_epoch += loss.tensor().detach()
+
+            eigenvalues = torch.linalg.eigvals(predictions.A_dmd.cpu())
+            eigmax = eigenvalues[eigenvalues.real.argmax()]
+            log.info(
+                "  [%03d] lambda_max %.5e+%.5e loss %.5e grad %.5e",
+                i,
+                eigmax.real,
+                eigmax.imag,
+                loss.total.detach(),
+                grad_norm,
+            )
 
         losses[epoch] = loss_epoch / num_batches
         scheduler.step(losses[epoch, 0])  # ty: ignore[invalid-argument-type]
@@ -343,7 +374,59 @@ def torch_train(
             "[%03d/%03d] loss %.5e (%s)", epoch + 1, epochs, losses[epoch, 0], timer
         )
 
-    return model, optimizer, losses
+    return compiled_model, optimizer, losses
+
+
+def torch_train(
+    model: DMDAutoencoder,
+    criterion: DMDLoss,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    X: torch.Tensor,
+    Y: torch.Tensor,
+    *,
+    window_size: int = 32,
+    nwindows: int = 16,
+    epochs: int = 50,
+    batch_size: int = 2048,
+) -> tuple[nn.Module, torch.optim.Optimizer, torch.Tensor]:
+    import copy
+
+    # NOTE: we're training in two rounds:
+    #   1. doing 'n_bare_epochs' epochs is just AE
+    #   2. doing the rest with DMD
+    # Reasoning: adding DMD is slow and can make the training go in weird directions.
+    # Having a reasonable start for the AE weights already in there works nicely.
+
+    n_bare_epochs = epochs // 3
+    # model, _, _ = torch_train_impl(
+    #     model,
+    #     criterion,
+    #     optimizer,
+    #     scheduler,
+    #     X,
+    #     Y,
+    #     window_size=window_size,
+    #     nwindows=nwindows,
+    #     epochs=n_bare_epochs,
+    #     batch_size=batch_size,
+    # )
+
+    model = copy.deepcopy(model)
+    model.dmd_enabled = True
+
+    return torch_train_impl(
+        model,
+        criterion,
+        optimizer,
+        scheduler,
+        X,
+        Y,
+        window_size=window_size,
+        nwindows=nwindows,
+        epochs=epochs - n_bare_epochs,
+        batch_size=batch_size,
+    )
 
 
 # }}}
@@ -404,7 +487,7 @@ def main(
     resolution: int = 128,
     maxit: int = 128,
     epochs: int = 100,
-    batch_size: int = 2048,
+    batch_size: int = 512,
     overwrite: bool = False,
 ) -> int:
     from commonlib import determine_escape_radius
