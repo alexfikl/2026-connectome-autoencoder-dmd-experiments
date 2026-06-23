@@ -184,7 +184,7 @@ class DMDAutoencoder(nn.Module):
             A_dmd = torch.conj(dmd.Vh).T @ dmd.Ahat @ dmd.Vh
 
             # predict with DMD in latent space (single-step)
-            xhat_latent = x_latent[:, :-1, :] @ A_dmd.T
+            xhat_latent = x_latent @ A_dmd.T
             yhat_out = self.decoder(xhat_latent)
         else:
             A_dmd = torch.eye(d, d, device=x.device, dtype=x.dtype)
@@ -264,10 +264,10 @@ class DMDLoss(nn.Module):
         loss_rec = self.mse(x_in, y_out)
 
         # latent space linearity loss
-        loss_lin = self.mse(x_latent[:, 1:, :], xhat_latent)
+        loss_lin = self.mse(x_latent[:, 1:, :], xhat_latent[:, :-1, :])
 
         # linear reconstruction loss
-        loss_pre = self.mse(y_out[:, 1:, :], yhat_out)
+        loss_pre = self.mse(y_out, yhat_out)
 
         total = (
             self.gamma_rec * loss_rec
