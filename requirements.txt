@@ -14,15 +14,22 @@ kiwisolver==1.5.0
     # via matplotlib
 markdown-it-py==4.2.0
     # via rich
-matplotlib==3.10.9
+matplotlib==3.11.0
     # via
     #   fractal-dmd-autoencoder (pyproject.toml)
     #   scienceplots
 mdurl==0.1.2
     # via markdown-it-py
-nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@d5035b0e66b545889af3c4e32468b82c6a2e9176#egg=nneuroutil
+nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@488026a292c8c3c81fcfa1aa9363bb569172bdf0#egg=nneuroutil
     # via fractal-dmd-autoencoder (pyproject.toml)
-numpy==2.4.6
+numpy==2.4.6 ; python_full_version < '3.12'
+    # via
+    #   fractal-dmd-autoencoder (pyproject.toml)
+    #   contourpy
+    #   matplotlib
+    #   nneuroutil
+    #   scipy
+numpy==2.5.0 ; python_full_version >= '3.12'
     # via
     #   fractal-dmd-autoencoder (pyproject.toml)
     #   contourpy
@@ -43,9 +50,11 @@ rich==15.0.0
     # via
     #   fractal-dmd-autoencoder (pyproject.toml)
     #   nneuroutil
-scienceplots==2.2.1
+scienceplots==2.2.2
     # via fractal-dmd-autoencoder (pyproject.toml)
-scipy==1.17.1
+scipy==1.17.1 ; python_full_version < '3.12'
+    # via nneuroutil
+scipy==1.18.0 ; python_full_version >= '3.12'
     # via nneuroutil
 six==1.17.0
     # via python-dateutil
