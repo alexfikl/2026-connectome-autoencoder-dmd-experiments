@@ -395,9 +395,8 @@ def torch_train(
     nwindows: int = 16,
     epochs: int = 50,
     batch_size: int = 2048,
+    dmd_enabled: bool = True,
 ) -> tuple[DMDAutoencoder, torch.optim.Optimizer, torch.Tensor]:
-    import copy
-
     # NOTE: we're training in two rounds:
     #   1. doing 'n_bare_epochs' epochs is just AE
     #   2. doing the rest with DMD
@@ -405,7 +404,7 @@ def torch_train(
     # Having a reasonable start for the AE weights already in there works nicely.
 
     n_bare_epochs = epochs // 3
-    model, _, _ = torch_train_impl(
+    model, optimizer, losses = torch_train_impl(
         model,
         criterion,
         optimizer,
@@ -419,22 +418,28 @@ def torch_train(
         batch_size=batch_size,
     )
 
-    model = copy.deepcopy(model)
-    model.dmd_enabled = True
+    if dmd_enabled:
+        import copy
 
-    return torch_train_impl(
-        model,
-        criterion,
-        optimizer,
-        scheduler,
-        X,
-        Y,
-        max_norm=max_norm,
-        window_size=window_size,
-        nwindows=nwindows,
-        epochs=epochs - n_bare_epochs,
-        batch_size=batch_size,
-    )
+        model = copy.deepcopy(model)
+        model.dmd_enabled = True
+
+        model, optimizer, losses_dmd = torch_train_impl(
+            model,
+            criterion,
+            optimizer,
+            scheduler,
+            X,
+            Y,
+            max_norm=max_norm,
+            window_size=window_size,
+            nwindows=nwindows,
+            epochs=epochs - n_bare_epochs,
+            batch_size=batch_size,
+        )
+        losses = torch.concat([losses, losses_dmd])
+
+    return model, optimizer, losses
 
 
 # }}}
@@ -444,7 +449,7 @@ def torch_train(
 
 
 def torch_predict(
-    model: nn.Module,
+    model: DMDAutoencoder,
     *,
     bbox: tuple[float, float, float, float],
     resolution: int = 128,
@@ -454,7 +459,7 @@ def torch_predict(
     import array_api_compat
     import torch
 
-    d = int(model.input_size)  # ty: ignore[invalid-argument-type]
+    d = int(model.input_size)
     dtype = model.dtype
     assert isinstance(dtype, torch.dtype)
     assert dtype.is_floating_point
@@ -474,7 +479,7 @@ def torch_predict(
         c = c[:, :, None]
 
         for _ in range(1, maxit):
-            Az = model(z)
+            Az = model.decoder(model.encoder(z))
             z[:, :, :d] = Az[:, :, :d] + c.real
             z[:, :, d:] = Az[:, :, d:] + c.imag
 
