@@ -184,7 +184,7 @@ def generate_training_dataset(
 
     mask = xp.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, axis=-1) < escape_radius**2
     log.info("Points:")
-    log.info("    Converged: %d", xp.sum(mask))
+    log.info("    Converged: %d/%d", xp.sum(mask), mask.size().numel())
     log.info("    Max: %.5e (radius %.5e)", xp.max(xp.abs(Z)), escape_radius)
     log.info("    Mean: %.5e", xp.mean(xp.abs(Z)))
 

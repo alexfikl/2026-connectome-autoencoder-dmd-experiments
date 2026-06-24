@@ -297,17 +297,18 @@ def torch_train_impl(
     X: torch.Tensor,
     Y: torch.Tensor,
     *,
+    max_norm: float = 1.0,
     window_size: int = 32,
     nwindows: int = 16,
     epochs: int = 50,
     batch_size: int = 2048,
-) -> tuple[nn.Module, torch.optim.Optimizer, torch.Tensor]:
+) -> tuple[DMDAutoencoder, torch.optim.Optimizer, torch.Tensor]:
     import torch
 
     timer = TicTocTimer()
 
     # NOTE: the compiled model seems to be slower? That's annoying..
-    # compiled_model = torch.compile(model)
+    # compiled_model = torch.compile(model, dynamic=False)
     compiled_model = model
     device = X.device
 
@@ -327,8 +328,12 @@ def torch_train_impl(
     losses = torch.empty((epochs, criterion.dim), device=device)
 
     for epoch in range(epochs):
+        log.info("Epoch %03d/%03d", epoch + 1, epochs)
         loss_epoch = torch.zeros(criterion.dim, device=device)
+
         timer.tic()
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats()
 
         for i, (batch_x, batch_y) in enumerate(loader):
             optimizer.zero_grad()
@@ -346,7 +351,7 @@ def torch_train_impl(
             # compute gradient
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(
-                model.parameters(), max_norm=float("inf")
+                model.parameters(), max_norm=max_norm
             )
 
             # update weights
@@ -355,14 +360,16 @@ def torch_train_impl(
             # update loss
             loss_epoch += loss.tensor().detach()
 
-            eigenvalues = torch.linalg.eigvals(predictions.A_dmd.cpu())
-            eigmax = eigenvalues[eigenvalues.real.argmax()]
+            with torch.no_grad():
+                eigenvalues = torch.linalg.eigvals(predictions.A_dmd.cpu())
+                eigmax = eigenvalues[eigenvalues.real.argmax()].item()
+
             log.info(
-                "  [%03d] lambda_max %.5e+%.5e loss %.5e grad %.5e",
+                r"    \[batch %03d] lambda_max %.5e+%.5e loss %.5e grad %.5e",
                 i,
                 eigmax.real,
                 eigmax.imag,
-                loss.total.detach(),
+                loss.total.item(),
                 grad_norm,
             )
 
@@ -370,9 +377,7 @@ def torch_train_impl(
         scheduler.step(losses[epoch, 0])  # ty: ignore[invalid-argument-type]
 
         timer.toc()
-        log.info(
-            "[%03d/%03d] loss %.5e (%s)", epoch + 1, epochs, losses[epoch, 0], timer
-        )
+        log.info("    Loss %.5e (%s)", losses[epoch, 0], timer)
 
     return compiled_model, optimizer, losses
 
@@ -385,11 +390,12 @@ def torch_train(
     X: torch.Tensor,
     Y: torch.Tensor,
     *,
+    max_norm: float = 1.0,
     window_size: int = 32,
     nwindows: int = 16,
     epochs: int = 50,
     batch_size: int = 2048,
-) -> tuple[nn.Module, torch.optim.Optimizer, torch.Tensor]:
+) -> tuple[DMDAutoencoder, torch.optim.Optimizer, torch.Tensor]:
     import copy
 
     # NOTE: we're training in two rounds:
@@ -399,18 +405,19 @@ def torch_train(
     # Having a reasonable start for the AE weights already in there works nicely.
 
     n_bare_epochs = epochs // 3
-    # model, _, _ = torch_train_impl(
-    #     model,
-    #     criterion,
-    #     optimizer,
-    #     scheduler,
-    #     X,
-    #     Y,
-    #     window_size=window_size,
-    #     nwindows=nwindows,
-    #     epochs=n_bare_epochs,
-    #     batch_size=batch_size,
-    # )
+    model, _, _ = torch_train_impl(
+        model,
+        criterion,
+        optimizer,
+        scheduler,
+        X,
+        Y,
+        max_norm=float("inf"),
+        window_size=window_size,
+        nwindows=nwindows,
+        epochs=n_bare_epochs,
+        batch_size=batch_size,
+    )
 
     model = copy.deepcopy(model)
     model.dmd_enabled = True
@@ -422,6 +429,7 @@ def torch_train(
         scheduler,
         X,
         Y,
+        max_norm=max_norm,
         window_size=window_size,
         nwindows=nwindows,
         epochs=epochs - n_bare_epochs,
