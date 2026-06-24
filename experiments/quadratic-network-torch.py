@@ -12,7 +12,7 @@ import torch
 from torch import nn
 
 from nneuroutil.helpers import FuzzyChoiceAction, module_logger
-from nneuroutil.torch_extras import available_device_names
+from nneuroutil.torch_extras import available_device_names, torch_default_device
 
 log = module_logger("lib.quadratic_network")
 
@@ -372,7 +372,7 @@ if __name__ == "__main__":
     if not args.quiet:
         log.setLevel(logging.INFO)
 
-    with torch.device(args.device):
+    with torch_default_device(args.device):
         # NOTE: use TF32 for matrix multiplication (should be faster, similar precision)
         torch.set_float32_matmul_precision("high")
 
