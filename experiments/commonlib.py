@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 import pathlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
 import array_api_compat
@@ -329,6 +329,7 @@ def torch_train(
     *,
     epochs: int = 50,
     batch_size: int = 4096,
+    callback: Callable[[int, nn.Module], None] | None = None,
 ) -> tuple[nn.Module, torch.optim.Optimizer, torch.Tensor]:
     import torch
 
@@ -367,6 +368,9 @@ def torch_train(
 
         timer.toc()
         log.info("[%03d/%03d] loss %.5e (%s)", epoch + 1, epochs, loss_epoch, timer)
+
+        if callback is not None:
+            callback(epoch, compiled_model)  # ty: ignore[invalid-argument-type]
 
     return model, optimizer, losses
 

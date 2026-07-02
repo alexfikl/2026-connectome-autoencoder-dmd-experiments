@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
@@ -13,6 +13,7 @@ from torch import nn
 
 from nneuroutil.helpers import FuzzyChoiceAction, module_logger
 from nneuroutil.torch_extras import available_device_names, torch_default_device
+from nneuroutil.visualization import figure, make_colorbar_axes
 
 log = module_logger("lib.quadratic_network")
 
@@ -131,6 +132,28 @@ def main(
 
     # }}}
 
+    # {{{ plot predict
+
+    def plot_predict(epoch: int, m: nn.Module) -> None:
+        from commonlib import torch_predict
+
+        Zpredict = torch_predict(
+            model,
+            bbox=bbox,
+            resolution=2 * resolution,
+            maxit=maxit,
+        )
+        mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
+
+        with figure(
+            basename.with_stem(f"{basename.stem}-predict-{epoch:04d}"),
+            overwrite=overwrite,
+        ) as fig:
+            ax = fig.gca()
+            ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
+
+    # }}}
+
     # {{{ train
 
     from torch import optim
@@ -152,7 +175,7 @@ def main(
         losses = checkpoint["losses"]
         Zmask = checkpoint["Zmask"]
 
-        compiled_model = cast("QuadraticNetwork", torch.compile(model))
+        plot_predict(epochs, model)
     else:
         from commonlib import generate_training_dataset, torch_train
 
@@ -171,7 +194,7 @@ def main(
 
         # {{{ train
 
-        compiled_model, optimizer, losses = torch_train(
+        _, optimizer, losses = torch_train(
             model,
             criterion,
             optimizer,
@@ -180,6 +203,7 @@ def main(
             Y,
             epochs=epochs,
             batch_size=batch_size,
+            callback=plot_predict,
         )
 
         # }}}
@@ -207,9 +231,6 @@ def main(
         )
 
         # }}}
-
-    from commonlib import torch_predict
-    from nneuroutil.visualization import figure, make_colorbar_axes
 
     # }}}
 
@@ -291,24 +312,6 @@ def main(
         ax22.set_ylabel(r"$\sigma$")
         ax22.set_title("SVD")
         ax22.legend()
-
-    # }}}
-
-    # {{{ plot prediction
-
-    Zpredict = torch_predict(
-        compiled_model,
-        bbox=bbox,
-        resolution=2 * resolution,
-        maxit=maxit,
-    )
-    mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
-
-    with figure(
-        basename.with_stem(f"{basename.stem}-predict"), overwrite=overwrite
-    ) as fig:
-        ax = fig.gca()
-        ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
 
     # }}}
 
