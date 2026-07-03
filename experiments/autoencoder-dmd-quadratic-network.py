@@ -159,12 +159,10 @@ class DMDAutoencoder(nn.Module):
         # }}}
 
     def forward(self, x: torch.Tensor) -> DMDAutoencoderResult:
-        from nneuroutil.dmd import build_dmd
-
         # NOTE: x has a shape of (batch_size, window_size, 2 d) and we want to
         # do DMD on it, so we go
-        # 1. X = x[:, :-1, :].reshape(-1, d).T
-        #    Y = x[:, 1:, :].reshape(-1, d).T
+        # 1. X = x[:, :-1, :].reshape(-1, d)
+        #    Y = x[:, 1:, :].reshape(-1, d)
         # 2. build the DMD operator for this batch with (X, Y)
 
         # go to latent space
@@ -180,8 +178,7 @@ class DMDAutoencoder(nn.Module):
             X = x_latent[:, :-1, :].reshape(-1, d)
             Y = x_latent[:, 1:, :].reshape(-1, d)
 
-            dmd = build_dmd(X, Y)
-            A_dmd = torch.conj(dmd.Vh).T @ dmd.Ahat @ dmd.Vh
+            A_dmd = Y.T @ torch.linalg.pinv(X.T)
 
             # predict with DMD in latent space (single-step)
             xhat_latent = x_latent @ A_dmd.T
@@ -305,14 +302,15 @@ def torch_train_impl(
 ) -> tuple[DMDAutoencoder, torch.optim.Optimizer, torch.Tensor]:
     import torch
 
-    timer = TicTocTimer()
+    device = X.device
+    if epochs == 0:
+        return model, optimizer, torch.zeros((epochs, criterion.dim), device=device)
+
+    from nneuroutil.torch_extras import SlidingWindowDataset
 
     # NOTE: the compiled model seems to be slower? That's annoying..
     # compiled_model = torch.compile(model, dynamic=False)
     compiled_model = model
-    device = X.device
-
-    from nneuroutil.torch_extras import SlidingWindowDataset
 
     dataset = SlidingWindowDataset(X, Y, window_size=window_size, nwindows=nwindows)
     loader = DataLoader(
@@ -326,6 +324,8 @@ def torch_train_impl(
 
     num_batches = X.shape[0] // batch_size
     losses = torch.empty((epochs, criterion.dim), device=device)
+
+    timer = TicTocTimer()
 
     for epoch in range(epochs):
         log.info("Epoch %03d/%03d", epoch + 1, epochs)
@@ -404,6 +404,7 @@ def torch_train(
     # Having a reasonable start for the AE weights already in there works nicely.
 
     n_bare_epochs = epochs // 3
+    n_bare_epochs = 0
     model, optimizer, losses = torch_train_impl(
         model,
         criterion,
