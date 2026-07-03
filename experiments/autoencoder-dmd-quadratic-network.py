@@ -264,7 +264,7 @@ class DMDLoss(nn.Module):
         loss_lin = self.mse(x_latent[:, 1:, :], xhat_latent[:, :-1, :])
 
         # linear reconstruction loss
-        loss_pre = self.mse(y_out, yhat_out)
+        loss_pre = self.mse(x_in[:, 1:, :], yhat_out[:, :-1, :])
 
         total = (
             self.gamma_rec * loss_rec
@@ -292,7 +292,6 @@ def torch_train_impl(
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     X: torch.Tensor,
-    Y: torch.Tensor,
     *,
     max_norm: float = 1.0,
     window_size: int = 32,
@@ -312,7 +311,7 @@ def torch_train_impl(
     # compiled_model = torch.compile(model, dynamic=False)
     compiled_model = model
 
-    dataset = SlidingWindowDataset(X, Y, window_size=window_size, nwindows=nwindows)
+    dataset = SlidingWindowDataset(X, window_size=window_size, nwindows=nwindows)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -322,7 +321,7 @@ def torch_train_impl(
         generator=torch.Generator(device),
     )
 
-    num_batches = X.shape[0] // batch_size
+    num_per_batches = X.shape[0] * nwindows // batch_size
     losses = torch.empty((epochs, criterion.dim), device=device)
 
     timer = TicTocTimer()
@@ -335,13 +334,13 @@ def torch_train_impl(
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats()
 
-        for i, (batch_x, batch_y) in enumerate(loader):
+        for i, batch_x in enumerate(loader):
             optimizer.zero_grad()
 
             # compute loss function
             predictions = compiled_model(batch_x)
             loss = criterion(
-                batch_y,
+                batch_x,
                 y_out=predictions.y_out,
                 x_latent=predictions.x_latent,
                 xhat_latent=predictions.xhat_latent,
@@ -373,7 +372,7 @@ def torch_train_impl(
                 grad_norm,
             )
 
-        losses[epoch] = loss_epoch / num_batches
+        losses[epoch] = loss_epoch / num_per_batches
         scheduler.step(losses[epoch, 0])  # ty: ignore[invalid-argument-type]
 
         timer.toc()
@@ -388,7 +387,6 @@ def torch_train(
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     X: torch.Tensor,
-    Y: torch.Tensor,
     *,
     max_norm: float = float("inf"),
     window_size: int = 32,
@@ -411,7 +409,6 @@ def torch_train(
         optimizer,
         scheduler,
         X,
-        Y,
         max_norm=float("inf"),
         window_size=window_size,
         nwindows=nwindows,
@@ -431,7 +428,6 @@ def torch_train(
             optimizer,
             scheduler,
             X,
-            Y,
             max_norm=max_norm,
             window_size=window_size,
             nwindows=nwindows,
@@ -578,7 +574,7 @@ def main(
 
         # {{{ generate dataset
 
-        X, Y, Zlast = generate_training_dataset(
+        X, _, Zlast = generate_training_dataset(
             mat,
             bbox=bbox,
             escape_radius=escape_radius,
@@ -603,7 +599,7 @@ def main(
             cooldown=2,
         )
 
-        target_scale = torch.mean(Y.conj() * Y).real.item()
+        target_scale = torch.mean(X.conj() * X).real.item()
         criterion = DMDLoss(scale=target_scale)
 
         compiled_model, optimizer, losses = torch_train(
@@ -612,7 +608,6 @@ def main(
             optimizer,
             scheduler,
             X,
-            Y,
             epochs=epochs,
             batch_size=batch_size,
         )
