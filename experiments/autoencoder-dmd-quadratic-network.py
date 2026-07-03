@@ -440,15 +440,49 @@ def torch_train(
 # {{{ torch_predict
 
 
+def build_latent_dmd(
+    model: DMDAutoencoder,
+    Z: torch.Tensor,
+    *,
+    block_size: int = 256,
+) -> torch.Tensor:
+    """Build the DMD operator in the latent space.
+
+    This uses the encoder from *model* to squeeze Z into the latent space and then
+    performs a standard DMD reconstruction. The resulting operator is returned.
+    """
+
+    d = 2 * model.latent_size
+    n = Z.shape[0] * (Z.shape[1] - 1)
+
+    Xs = torch.empty((n, d), dtype=Z.dtype, device=Z.device)
+    Ys = torch.empty((n, d), dtype=Z.dtype, device=Z.device)
+
+    with torch.no_grad():
+        model.eval()
+
+        offset = 0
+        for start in range(0, Z.shape[0], block_size):
+            x_latent = model.encoder(Z[start : start + block_size])
+
+            size = x_latent.shape[0] * (x_latent.shape[1] - 1)
+            Xs[offset : offset + size] = x_latent[:, :-1, :].reshape(-1, d)
+            Ys[offset : offset + size] = x_latent[:, 1:, :].reshape(-1, d)
+
+            offset += n
+
+        return Ys.T @ torch.linalg.pinv(Xs.T, rtol=1.0e-6)
+
+
 def torch_predict(
     model: DMDAutoencoder,
+    A_dmd: torch.Tensor,
     *,
     bbox: tuple[float, float, float, float],
     resolution: int = 128,
     maxit: int = 128,
     device: Any = None,
 ) -> Array3D:
-    import array_api_compat
     import torch
 
     d = int(model.input_size)
@@ -456,24 +490,13 @@ def torch_predict(
     assert isinstance(dtype, torch.dtype)
     assert dtype.is_floating_point
 
-    from commonlib import generate_grid
-
     with torch.no_grad():
+        # Koopman DMD prediction: z_{k+1} = decoder(A_dmd @ encoder(z_k))
         z = torch.zeros((resolution, resolution, 2 * d), dtype=dtype, device=device)
-        c = generate_grid(
-            *bbox,
-            nx=resolution,
-            ny=resolution,
-            dtype=dtype.to_complex(),
-            xp=array_api_compat.array_namespace(z),
-            device=device,
-        )
-        c = c[:, :, None]
-
         for _ in range(1, maxit):
-            Az = model.decoder(model.encoder(z))
-            z[:, :, :d] = Az[:, :, :d] + c.real
-            z[:, :, d:] = Az[:, :, d:] + c.imag
+            g = model.encoder(z)
+            g = g @ A_dmd.T
+            z = model.decoder(g)
 
     return torch.complex(z[:, :, :d], z[:, :, d:])
 
@@ -561,6 +584,7 @@ def main(
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         losses = checkpoint["losses"]
+        A_dmd = checkpoint["A_dmd"]
         Zmask = checkpoint["Zmask"]
 
         compiled_model = cast("DMDAutoencoder", torch.compile(model))
@@ -606,6 +630,7 @@ def main(
             epochs=epochs,
             batch_size=batch_size,
         )
+        A_dmd = build_latent_dmd(model, X)
 
         # }}}
 
@@ -618,6 +643,7 @@ def main(
                 "optimizer": optimizer.state_dict(),
                 "epochs": epochs,
                 "losses": losses,
+                "A_dmd": A_dmd,
                 "Zmask": Zmask,
                 "Zlast": Zlast,
                 # parameters
@@ -668,7 +694,11 @@ def main(
     # {{{ plot prediction
 
     Zpredict = torch_predict(
-        compiled_model, bbox=bbox, resolution=2 * resolution, maxit=maxit
+        compiled_model,
+        A_dmd,
+        bbox=bbox,
+        resolution=2 * resolution,
+        maxit=maxit,
     )
     mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
 
