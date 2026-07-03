@@ -550,10 +550,10 @@ def main(
     d = mat.shape[0]
     model = DMDAutoencoder(
         d,
-        encoder_layer_sizes=(d, d),
-        decoder_layer_sizes=(d, d),
+        encoder_layer_sizes=(d, d // 2),
+        decoder_layer_sizes=(d // 2, d),
     )
-    optimizer = optim.AdamW(model.parameters(), lr=1.0e-3, weight_decay=1.0e-3)
+    optimizer = optim.AdamW(model.parameters(), lr=1.0e-4, weight_decay=1.0e-3)
 
     log.info("Network:\n%s", model)
 
