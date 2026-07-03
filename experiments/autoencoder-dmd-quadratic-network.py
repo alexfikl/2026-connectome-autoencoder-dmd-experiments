@@ -173,7 +173,7 @@ class DMDAutoencoder(nn.Module):
         assert d == 2 * self.latent_size
 
         # shape of the latent space
-        if self.dmd_enabled:
+        if self.training and self.dmd_enabled:
             # construct DMD operator in latent space
             X = x_latent[:, :-1, :].reshape(-1, d)
             Y = x_latent[:, 1:, :].reshape(-1, d)
