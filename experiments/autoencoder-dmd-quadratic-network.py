@@ -334,7 +334,7 @@ def torch_train_impl(
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats()
 
-        for i, batch_x in enumerate(loader):
+        for i, (batch_x,) in enumerate(loader):
             optimizer.zero_grad()
 
             # compute loss function
@@ -402,7 +402,6 @@ def torch_train(
     # Having a reasonable start for the AE weights already in there works nicely.
 
     n_bare_epochs = epochs // 3
-    n_bare_epochs = 0
     model, optimizer, losses = torch_train_impl(
         model,
         criterion,
@@ -417,9 +416,6 @@ def torch_train(
     )
 
     if dmd_enabled:
-        import copy
-
-        model = copy.deepcopy(model)
         model.dmd_enabled = True
 
         model, optimizer, losses_dmd = torch_train_impl(
