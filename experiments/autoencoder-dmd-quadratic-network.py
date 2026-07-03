@@ -259,21 +259,18 @@ class DMDLoss(nn.Module):
     ) -> DMDLossResult:
         # reconstruction loss
         loss_rec = self.mse(x_in, y_out)
+        loss_rec = self.gamma_rec * loss_rec
 
         # latent space linearity loss
         loss_lin = self.mse(x_latent[:, 1:, :], xhat_latent[:, :-1, :])
+        loss_lin = self.gamma_lin * loss_lin
 
         # linear reconstruction loss
         loss_pre = self.mse(x_in[:, 1:, :], yhat_out[:, :-1, :])
-
-        total = (
-            self.gamma_rec * loss_rec
-            + self.gamma_lin * loss_lin
-            + self.gamma_pre * loss_pre
-        )
+        loss_pre = self.gamma_pre * loss_pre
 
         return DMDLossResult(
-            total=total,
+            total=loss_rec + loss_lin + loss_pre,
             loss_rec=loss_rec,
             loss_lin=loss_lin,
             loss_pre=loss_pre,
