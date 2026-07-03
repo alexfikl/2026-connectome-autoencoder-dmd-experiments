@@ -657,9 +657,14 @@ def main(
     ) as fig:
         ax = fig.gca()
 
-        ax.semilogy(losses.cpu().numpy())
+        data = losses.cpu().numpy()
+        ax.semilogy(data[:, 0], label="Total")
+        ax.semilogy(data[:, 1], label="Reconstruction")
+        ax.semilogy(data[:, 2], label="Linearity")
+        ax.semilogy(data[:, 3], label="Prediction")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
+        ax.legend()
 
     # }}}
 
