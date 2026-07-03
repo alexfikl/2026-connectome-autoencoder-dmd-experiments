@@ -363,14 +363,15 @@ def torch_train_impl(
                 eigenvalues = torch.linalg.eigvals(predictions.A_dmd.cpu())
                 eigmax = eigenvalues[eigenvalues.real.argmax()].item()
 
-            log.info(
-                r"    \[batch %03d] lambda_max %.5e+%.5e loss %.5e grad %.5e",
-                i,
-                eigmax.real,
-                eigmax.imag,
-                loss.total.item(),
-                grad_norm,
-            )
+            if i in {0, len(loader) - 1}:
+                log.info(
+                    r"    \[batch %03d] lambda_max %.5e+%.5e loss %.5e grad %.5e",
+                    i,
+                    eigmax.real,
+                    eigmax.imag,
+                    loss.total.item(),
+                    grad_norm,
+                )
 
         losses[epoch] = loss_epoch / num_per_batches
         scheduler.step(losses[epoch, 0])  # ty: ignore[invalid-argument-type]
@@ -388,7 +389,7 @@ def torch_train(
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     X: torch.Tensor,
     *,
-    max_norm: float = float("inf"),
+    max_norm: float = 100.0,
     window_size: int = 32,
     nwindows: int = 16,
     epochs: int = 50,
@@ -401,7 +402,8 @@ def torch_train(
     # Reasoning: adding DMD is slow and can make the training go in weird directions.
     # Having a reasonable start for the AE weights already in there works nicely.
 
-    n_bare_epochs = epochs // 3
+    # n_bare_epochs = epochs // 3
+    n_bare_epochs = 0
     model, optimizer, losses = torch_train_impl(
         model,
         criterion,
