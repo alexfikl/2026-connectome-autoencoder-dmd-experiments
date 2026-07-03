@@ -100,7 +100,7 @@ class DMDAutoencoder(nn.Module):
         encoder_layer_sizes: int | tuple[int, ...] | None = None,
         decoder_layer_sizes: int | tuple[int, ...] | None = None,
         dmd_enabled: bool = False,
-        alpha: float = 0.1,
+        alpha: float | None = None,
         dtype: Any = None,
     ) -> None:
         if encoder_layer_sizes is None:
@@ -178,7 +178,7 @@ class DMDAutoencoder(nn.Module):
             X = x_latent[:, :-1, :].reshape(-1, d)
             Y = x_latent[:, 1:, :].reshape(-1, d)
 
-            A_dmd = Y.T @ torch.linalg.pinv(X.T)
+            A_dmd = Y.T @ torch.linalg.pinv(X.T, rtol=1.0e-6)
 
             # predict with DMD in latent space (single-step)
             xhat_latent = x_latent @ A_dmd.T
@@ -390,7 +390,7 @@ def torch_train(
     X: torch.Tensor,
     Y: torch.Tensor,
     *,
-    max_norm: float = 1.0,
+    max_norm: float = float("inf"),
     window_size: int = 32,
     nwindows: int = 16,
     epochs: int = 50,
@@ -559,7 +559,7 @@ def main(
         encoder_layer_sizes=(d, d),
         decoder_layer_sizes=(d, d),
     )
-    optimizer = optim.Adam(model.parameters(), lr=1.0e-3)
+    optimizer = optim.AdamW(model.parameters(), lr=1.0e-3, weight_decay=1.0e-3)
 
     log.info("Network:\n%s", model)
 
