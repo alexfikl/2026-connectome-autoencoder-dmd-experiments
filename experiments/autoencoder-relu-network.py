@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Alexandru Fikl <alexfikl@gmail.com>
+# SPDX-FileCopyrightText: 2026 Vlad Arambașa <vlad.arambasa98@e-uvt.ro>
 # SPDX-License-Identifier: MIT
 
 from __future__ import annotations
