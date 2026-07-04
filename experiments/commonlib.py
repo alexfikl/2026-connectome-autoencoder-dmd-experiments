@@ -388,6 +388,7 @@ def torch_train(
     target_scale: float = 1.0,
     callback: Callable[[int, nn.Module], None] | None = None,
     verbose: bool = False,
+    patience_early_stop: int = 0,
 ) -> tuple[nn.Module, torch.optim.Optimizer, torch.Tensor]:
     import torch
 
@@ -398,9 +399,14 @@ def torch_train(
 
     compiled_model = torch.compile(model)
     loader = SlicedDataLoader(x_train, y_train, batch_size=batch_size, shuffle=True)
-    losses = torch.empty((epochs, 2, 1), device=device)
+
+    best_loss = float("inf")
+    best_state = None
+    best_epoch = -1
+    num_bad_epochs = 0
 
     timer = TicTocTimer()
+    losses = torch.empty((epochs, 2, 1), device=device)
 
     for epoch in range(epochs):
         # {{{ training
@@ -455,8 +461,36 @@ def torch_train(
         losses[epoch, 0] = loss_train.item()
         losses[epoch, 1] = loss_validate.item()
 
+        # {{{ best model and early stopping
+
+        loss_v = loss_validate.item()
+        if loss_v < best_loss:
+            best_loss = loss_v
+            best_state = model.state_dict()
+            best_epoch = epoch + 1
+            num_bad_epochs = 0
+        elif patience_early_stop > 0:
+            num_bad_epochs += 1
+            if num_bad_epochs >= patience_early_stop:
+                log.info(
+                    "Early stopping at epoch %03d (best %03d, loss %.5e)",
+                    epoch + 1,
+                    best_epoch,
+                    best_loss,
+                )
+                losses = losses[: epoch + 1]
+                break
+
+        # }}}
+
         if callback is not None:
             callback(epoch, compiled_model)  # ty: ignore[invalid-argument-type]
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        log.info(
+            "Restored best model from epoch %03d (loss %.5e)", best_epoch, best_loss
+        )
 
     return model, optimizer, losses
 

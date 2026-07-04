@@ -85,6 +85,7 @@ def main(
     maxit: int = 128,
     epochs: int = 50,
     batch_size: int = 4096,
+    early_stop_patience: int = 0,
     overwrite: bool = False,
 ) -> int:
     device = torch.get_default_device()
@@ -215,6 +216,7 @@ def main(
             epochs=epochs,
             batch_size=batch_size,
             target_scale=target_scale,
+            patience_early_stop=early_stop_patience,
             callback=plot_predict,
         )
 
@@ -231,12 +233,14 @@ def main(
 
         # {{{ checkpoint
 
+        num_epochs_trained = len(losses)
         torch.save(
             {
                 # model
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "epochs": epochs,
+                "num_epochs_trained": num_epochs_trained,
                 "losses": losses,
                 "loss_test": loss_test,
                 "zmask": zmask,
@@ -247,6 +251,7 @@ def main(
                 "escape_radius": escape_radius,
                 "resolution": resolution,
                 "maxit": maxit,
+                "early_stop_patience": early_stop_patience,
             },
             weightsfile,
         )
@@ -390,6 +395,12 @@ if __name__ == "__main__":
         help="Force overwrite of existing files",
     )
     parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=0,
+        help="Stop training loss does not improve for this many epochs (0 disables)",
+    )
+    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -409,6 +420,7 @@ if __name__ == "__main__":
                 args.filename,
                 dataidx=args.dataidx,
                 resolution=args.resolution,
+                early_stop_patience=args.early_stop_patience,
                 overwrite=args.force,
             )
         )
