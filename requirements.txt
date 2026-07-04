@@ -20,7 +20,7 @@ matplotlib==3.11.0
     #   scienceplots
 mdurl==0.1.2
     # via markdown-it-py
-nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@488026a292c8c3c81fcfa1aa9363bb569172bdf0#egg=nneuroutil
+nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@973f7dff70c57a02effcece0a09054f1a54bd450#egg=nneuroutil
     # via fractal-dmd-autoencoder (pyproject.toml)
 numpy==2.4.6 ; python_full_version < '3.12'
     # via
@@ -38,7 +38,7 @@ numpy==2.5.0 ; python_full_version >= '3.12'
     #   scipy
 packaging==26.2
     # via matplotlib
-pillow==12.2.0
+pillow==12.3.0
     # via matplotlib
 pygments==2.20.0
     # via rich
@@ -58,5 +58,5 @@ scipy==1.18.0 ; python_full_version >= '3.12'
     # via nneuroutil
 six==1.17.0
     # via python-dateutil
-typing-extensions==4.15.0
+typing-extensions==4.16.0
     # via nneuroutil
