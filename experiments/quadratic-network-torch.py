@@ -173,7 +173,8 @@ def main(
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         losses = checkpoint["losses"]
-        Zmask = checkpoint["Zmask"]
+        loss_test = checkpoint.get("loss_test", 0.0)
+        zmask = checkpoint["zmask"]
 
         plot_predict(epochs, model)
     else:
@@ -233,7 +234,8 @@ def main(
                 "optimizer": optimizer.state_dict(),
                 "epochs": epochs,
                 "losses": losses,
-                "Zmask": zmask,
+                "loss_test": loss_test,
+                "zmask": zmask,
                 # parameters
                 "inputfile": str(filename),
                 "dataidx": dataidx,
@@ -255,7 +257,7 @@ def main(
         basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
     ) as fig:
         ax = fig.gca()
-        ax.imshow(Zmask.cpu().numpy(), extent=bbox, cmap="binary")
+        ax.imshow(zmask.cpu().numpy(), extent=bbox, cmap="binary")
 
     # }}}
 
@@ -269,6 +271,7 @@ def main(
         losses = losses.cpu().numpy()
         ax.semilogy(losses[:, 0, 0], label="Train")
         ax.semilogy(losses[:, 1, 0], label="Validation")
+        ax.axhline(loss_test, color="k", ls="--")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
         ax.legend()

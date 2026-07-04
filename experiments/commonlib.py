@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 import os
 import pathlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
 import array_api_compat
@@ -371,6 +371,29 @@ def dmd_predict(
 # }}}
 
 
+# {{{ iter_batches
+
+
+def iter_batches(
+    X: Array2D,
+    Y: Array2D,
+    *,
+    batch_size: int = 4096,
+    rng: np.random.Generator | None = None,
+) -> Iterator[tuple[Array2D, Array2D]]:
+    xp = array_api_compat.array_namespace(X, Y)
+    if rng is None:
+        rng = np.random.default_rng()
+
+    idx = xp.asarray(rng.permutation(len(X)), dtype=xp.int32, device=X.device)
+    for start in range(0, len(X), batch_size):
+        sl = idx[start : start + batch_size]
+        yield X[sl], Y[sl]
+
+
+# }}}
+
+
 # {{{ torch_train
 
 
@@ -388,21 +411,13 @@ def torch_train(
     callback: Callable[[int, nn.Module], None] | None = None,
 ) -> tuple[nn.Module, torch.optim.Optimizer, torch.Tensor]:
     import torch
-    from torch.utils.data import DataLoader
 
     # FIXME: not very nice to just split these?
-    x_train, _ = xy_train.tensors
+    x_train, y_train = xy_train.tensors
     x_validate, y_validate = xy_validate.tensors
     device = x_train.device
 
     compiled_model = torch.compile(model)
-    train_loader = DataLoader(
-        xy_train,
-        batch_size=batch_size,
-        shuffle=True,
-        generator=torch.Generator(device),
-    )
-
     losses = torch.empty((epochs, 2, 1), device=device)
 
     timer = TicTocTimer()
@@ -415,7 +430,7 @@ def torch_train(
 
         timer.tic()
 
-        for batch_x, batch_y in train_loader:
+        for batch_x, batch_y in iter_batches(x_train, y_train, batch_size=batch_size):
             optimizer.zero_grad()
 
             predictions = compiled_model(batch_x)
