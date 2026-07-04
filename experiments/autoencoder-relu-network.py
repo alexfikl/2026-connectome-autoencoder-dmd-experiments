@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
@@ -14,6 +14,7 @@ from torch import nn
 
 from nneuroutil.helpers import FuzzyChoiceAction, module_logger
 from nneuroutil.torch_extras import available_device_names, torch_default_device
+from nneuroutil.visualization import figure
 
 log = module_logger("lib.autoencoder_network")
 
@@ -53,32 +54,47 @@ class Autoencoder(nn.Module):
 
         # {{{ construct autoencoder
 
-        from nneuroutil.torch_extras import ComplexLinear
+        from nneuroutil.torch_extras import ComplexLinear, kaiming_uniform_
 
-        if use_complex_linear:
-            fac = 1
-            cls: type[nn.Module] = ComplexLinear
-        else:
-            fac = 2
-            cls: type[nn.Module] = nn.Linear
+        def make_linear_layer(
+            n_in: int,
+            n_out: int,
+            *,
+            nonlinearity="leaky_relu",
+            bias: bool = True,
+        ) -> nn.Module:
+            if use_complex_linear:
+                layer = ComplexLinear(
+                    n_in, n_out, bias=bias, device=device, dtype=dtype
+                )
+            else:
+                layer = nn.Linear(
+                    2 * n_in, 2 * n_out, bias=bias, device=device, dtype=dtype
+                )
+
+            kaiming_uniform_(layer.weight, nonlinearity=nonlinearity, param=alpha)
+            return layer
 
         self.encoder = nn.Sequential(
-            cls(fac * self.input_size, fac * 256, device=device, dtype=dtype),
+            make_linear_layer(self.input_size, 256),
             nn.LeakyReLU(alpha),
-            cls(fac * 256, fac * 128, device=device, dtype=dtype),
+            make_linear_layer(256, 128),
             nn.LeakyReLU(alpha),
-            cls(fac * 128, fac * 64, device=device, dtype=dtype),
+            make_linear_layer(128, 64),
             nn.LeakyReLU(alpha),
-            cls(fac * 64, fac * self.latent_size, device=device, dtype=dtype),
+            make_linear_layer(64, self.latent_size, nonlinearity="linear"),
         )
         self.decoder = nn.Sequential(
-            cls(fac * self.latent_size, fac * 64, device=device, dtype=dtype),
+            make_linear_layer(self.latent_size, 64),
             nn.LeakyReLU(alpha),
-            cls(fac * 64, fac * 128, device=device, dtype=dtype),
+            make_linear_layer(64, 128),
             nn.LeakyReLU(alpha),
-            cls(fac * 128, fac * 256, device=device, dtype=dtype),
+            make_linear_layer(128, 256),
             nn.LeakyReLU(alpha),
-            cls(fac * 256, fac * self.output_size, device=device, dtype=dtype),
+            # NOTE: setting bias=False here to stop the network from trying to
+            # ignore everything that came before it. This should allow it to
+            # learn a non-trivial solution.. hopefully
+            make_linear_layer(256, self.output_size, nonlinearity="linear", bias=False),
         )
 
         # }}}
@@ -100,8 +116,9 @@ def main(
     escape_radius: float | None = 100.0,
     resolution: int = 128,
     maxit: int = 128,
-    epochs: int = 100,
+    epochs: int = 50,
     batch_size: int = 4096,
+    early_stop_patience: int = 0,
     overwrite: bool = False,
 ) -> int:
     device = torch.get_default_device()
@@ -149,6 +166,28 @@ def main(
 
     # }}}
 
+    # {{{ plot predict
+
+    def plot_predict(epoch: int, m: nn.Module) -> None:
+        from commonlib import torch_predict
+
+        Zpredict = torch_predict(
+            m,
+            bbox=bbox,
+            resolution=2 * resolution,
+            maxit=maxit,
+        )
+        mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
+
+        with figure(
+            basename.with_stem(f"{basename.stem}-predict-{epoch:04d}"),
+            overwrite=overwrite,
+        ) as fig:
+            ax = fig.gca()
+            ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
+
+    # }}}
+
     # {{{ train
 
     from torch import optim
@@ -180,51 +219,76 @@ def main(
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         losses = checkpoint["losses"]
-        Zmask = checkpoint["Zmask"]
+        loss_test = checkpoint.get("loss_test", 0.0)
+        zmask = checkpoint["zmask"]
 
-        compiled_model = cast("Autoencoder", torch.compile(model))
+        model.eval()
+        plot_predict(epochs, model)
     else:
-        from commonlib import generate_training_dataset, torch_train
+        from commonlib import (
+            generate_timeseries_dataset,
+            make_torch_timeseries_dataset,
+            torch_train,
+        )
 
         # {{{ generate dataset
 
-        X, Y, Zlast = generate_training_dataset(
+        x, y, zmask = generate_timeseries_dataset(
             mat,
             bbox=bbox,
             resolution=resolution,
             maxit=maxit,
             escape_radius=escape_radius,
         )
-        Zmask = torch.sum(Zlast.real**2 + Zlast.imag**2, dim=-1) < escape_radius**2
+        xy_train, xy_validate, xy_test = make_torch_timeseries_dataset(
+            x, y, (0.8, 0.1, 0.1)
+        )
 
         # }}}
 
         # {{{ train
 
-        compiled_model, optimizer, losses = torch_train(
+        _, y_train = xy_train.tensors
+        target_scale = torch.mean(y_train.conj() * y_train).real.item()
+
+        _, optimizer, losses = torch_train(
             model,
             criterion,
             optimizer,
             scheduler,
-            X,
-            Y,
+            xy_train,
+            xy_validate,
             epochs=epochs,
             batch_size=batch_size,
+            target_scale=target_scale,
+            patience_early_stop=early_stop_patience,
+            callback=plot_predict,
         )
+
+        model.eval()
+        with torch.no_grad():
+            x_test, y_test = xy_test.tensors
+            predictions = model(x_test)
+            loss_test = criterion(predictions, y_test) / target_scale
+
+            loss_test = loss_test.item()
+            log.info("[%03d/%03d] test %.5e", epochs, epochs, loss_test)
 
         # }}}
 
         # {{{ checkpoint
 
+        num_epochs_trained = len(losses)
         torch.save(
             {
                 # model
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "epochs": epochs,
+                "num_epochs_trained": num_epochs_trained,
                 "losses": losses,
-                "Zmask": Zmask,
-                "Zlast": Zlast,
+                "loss_test": loss_test,
+                "zmask": zmask,
                 # parameters
                 "inputfile": str(filename),
                 "dataidx": dataidx,
@@ -232,6 +296,7 @@ def main(
                 "escape_radius": escape_radius,
                 "resolution": resolution,
                 "maxit": maxit,
+                "early_stop_patience": early_stop_patience,
             },
             weightsfile,
         )
@@ -240,16 +305,13 @@ def main(
 
     # }}}
 
-    from commonlib import torch_predict
-    from nneuroutil.visualization import figure
-
     # {{{ plot fractal
 
     with figure(
         basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
     ) as fig:
         ax = fig.gca()
-        ax.imshow(Zmask.cpu().numpy(), extent=bbox, cmap="binary")
+        ax.imshow(zmask.cpu().numpy(), extent=bbox, cmap="binary")
 
     # }}}
 
@@ -260,24 +322,13 @@ def main(
     ) as fig:
         ax = fig.gca()
 
-        ax.semilogy(losses.cpu().numpy())
+        losses = losses.cpu().numpy()
+        ax.semilogy(losses[:, 0, 0], label="Train")
+        ax.semilogy(losses[:, 1, 0], label="Validation")
+        ax.axhline(loss_test, color="k", ls="--")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
-
-    # }}}
-
-    # {{{ plot prediction
-
-    Zpredict = torch_predict(
-        compiled_model, bbox=bbox, resolution=2 * resolution, maxit=maxit
-    )
-    mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
-
-    with figure(
-        basename.with_stem(f"{basename.stem}-predict"), overwrite=overwrite
-    ) as fig:
-        ax = fig.gca()
-        ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
+        ax.legend()
 
     # }}}
 
@@ -331,6 +382,12 @@ if __name__ == "__main__":
         help="Force overwrite of existing files",
     )
     parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=0,
+        help="Stop training loss does not improve for this many epochs (0 disables)",
+    )
+    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -350,6 +407,8 @@ if __name__ == "__main__":
                 args.filename,
                 dataidx=args.dataidx,
                 resolution=args.resolution,
+                outfile=args.outfile,
+                early_stop_patience=args.early_stop_patience,
                 overwrite=args.force,
             )
         )
