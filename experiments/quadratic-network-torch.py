@@ -176,6 +176,7 @@ def main(
         loss_test = checkpoint.get("loss_test", 0.0)
         zmask = checkpoint["zmask"]
 
+        model.eval()
         plot_predict(epochs, model)
     else:
         from commonlib import (
@@ -217,6 +218,7 @@ def main(
             callback=plot_predict,
         )
 
+        model.eval()
         with torch.no_grad():
             x_test, y_test = xy_test.tensors
             predictions = model(x_test)

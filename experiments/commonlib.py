@@ -405,6 +405,7 @@ def torch_train(
     for epoch in range(epochs):
         # {{{ training
 
+        model.train()
         loss_epoch = torch.tensor(0.0, device=device)
         num_batches = 0
 
@@ -431,6 +432,7 @@ def torch_train(
 
         # {{{ validation
 
+        model.eval()
         with torch.no_grad():
             predictions = compiled_model(x_validate)
             loss_validate = criterion(predictions, y_validate) / target_scale
