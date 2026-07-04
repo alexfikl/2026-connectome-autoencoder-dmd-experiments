@@ -162,7 +162,7 @@ def main(
     d = mat.shape[0]
     model = QuadraticNetwork(d, d, device=device, dtype=mat.dtype.to_real())
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=5.0e-3)
+    optimizer = optim.AdamW(model.parameters(), lr=5.0e-3, weight_decay=1.0e-2)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
     log.info("Network:\n%s", model)
