@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
+import math
 import os
 import pathlib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import array_api_compat
@@ -18,6 +19,7 @@ from nneuroutil.typing import Array2D, Array3D, Array4D
 if TYPE_CHECKING:
     import torch
     from torch import nn
+    from torch.utils.data import Dataset, TensorDataset
 
 log = module_logger("lib")
 
@@ -74,10 +76,10 @@ def determine_escape_radius(A: Array2D) -> float:
 
 
 def generate_grid(
-    xmin: float,
-    xmax: float,
-    ymin: float,
-    ymax: float,
+    re_min: float,
+    re_max: float,
+    im_min: float,
+    im_max: float,
     *,
     nx: int = 128,
     ny: int = 128,
@@ -85,23 +87,36 @@ def generate_grid(
     xp: Any = None,
     device: Any = None,
 ) -> Array2D:
+    """Generate a 2D complex grid in ``[re_min, re_max] x [im_min, im_max]``."""
+
     if xp is None:
         xp = np
 
-    x = xp.linspace(xmin, xmax, nx, device=device)
-    y = xp.linspace(ymin, ymax, ny, device=device)
+    if nx <= 0 or ny <= 0:
+        raise ValueError(f"grid sizes (nx, ny) are not positive: ({nx}, {ny})")
 
-    result = x[None, :] + 1j * y[:, None]
-    if dtype is not None and dtype != result.dtype:
-        result = xp.astype(result, dtype)
+    if re_min >= re_max or im_min >= im_max:
+        raise ValueError(
+            f"bounding box is not valid: [{re_min}, {re_max}] x [{im_min}, {im_max}]"
+        )
 
-    return result
+    # convert to closest complex type -- should probably complain instead
+    dtype = xp.result_type(dtype, xp.complex64)
+
+    c_re = xp.linspace(re_min, re_max, nx, device=device)
+    c_im = xp.linspace(im_min, im_max, ny, device=device)
+
+    c = c_re[None, :] + 1j * c_im[:, None]
+    if dtype is not None and dtype != c.dtype:
+        c = xp.astype(c, dtype)
+
+    return c
 
 
 # }}}
 
 
-# {{{ generate dataset
+# {{{ generate_dataset
 
 
 def generate_dataset(
@@ -111,15 +126,36 @@ def generate_dataset(
     escape_radius: float = 100.0,
     resolution: int = 128,
     maxit: int = 128,
+    xp: Any = None,
 ) -> tuple[Array4D, Array2D]:
-    xp = array_api_compat.array_namespace(A)
+    r"""Generate a full dataset based on the dynamical system:
 
-    d = A.shape[0]
-    assert A.shape[0] == A.shape[1]
+    .. math::
 
-    # NOTE: allow a maximum element z[i] such that norm(z) ~ escape_radius
-    max_z = (escape_radius + 1) / d**0.5
-    escape_radius_sqr = escape_radius**2
+        z_{n + 1} = (A z_n)^2 + c
+
+    where :math:`z_0 = 0` and :math:`c \in \mathbb{C}` is generated on the grid
+    described by *bbox* at a uniform resolution *resolution* in both the real
+    and imaginary parts. The system is evolved for *maxit* iteration and all
+    values that are larger than *escape_radius* are automatically clipped
+    such that :math:`\|z_n\|_2 < R`.
+
+    :returns: a tuple ``(z, c)`` where ``z`` is a complex tensor with shape
+        ``(maxit, resolution, resolution, d)`` hat contains all the trajectories
+        and ``c`` is a complex tensor of shape ``(resolution, resolution)``
+        that contains the grid from which these trajectories were generated.
+    """
+    if escape_radius <= 0.0:
+        raise ValueError(f"'escape_radius' must be positive: {escape_radius}")
+
+    if maxit <= 0:
+        raise ValueError(f"'maxit' must be positive: {maxit}")
+
+    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+        raise ValueError(f"'A' must be a square matrix: {A.shape}")
+
+    if xp is None:
+        xp = array_api_compat.array_namespace(A)
 
     # generate grid
     c = generate_grid(
@@ -131,6 +167,11 @@ def generate_dataset(
         device=A.device,
     )
     c = c[:, :, None]
+
+    # NOTE: allow a maximum element z[i] such that norm(z) ~ escape_radius
+    d = A.shape[0]
+    max_z = (escape_radius + 1) / d**0.5
+    escape_radius_sqr = escape_radius**2
 
     # iterate
     result = [xp.zeros((resolution, resolution, d), dtype=A.dtype, device=A.device)]
@@ -149,111 +190,148 @@ def generate_dataset(
     return xp.stack(result), c.squeeze(-1)
 
 
-def generate_training_dataset(
+def post_process_dataset(
+    z: Array4D,
+    escape_radius: float,
+    *,
+    stack_real_imaginary: bool = True,
+    xp: Any = None,
+) -> tuple[Array3D, Array2D]:
+    """Post-process the dataset returned from :func:`generate_dataset`.
+
+    * Mask out all the escaped points.
+    * Permute the array so that it has shape ``(ntrajectories, maxit, d)``.
+    * Stack into a real array of shape ``(ntrajectories, maxit, 2 d)``.
+
+    :arg z: a complex tensor of shape ``(maxit, resolution, resolution, d)``.
+    :arg c: a complex tensor of shape ``(resolution, resolution)``
+    :returns: a tuple of ``(z, mask)`` of the post-processed dataset and the mask
+        that was used to compute it.
+    """
+    if xp is None:
+        xp = array_api_compat.array_namespace(z)
+
+    if escape_radius <= 0:
+        raise ValueError(f"'escape_radius' must be positive: {escape_radius}")
+
+    # 1. mask
+    mask = xp.sum(z[-1].real ** 2 + z[-1].imag ** 2, axis=-1) < escape_radius**2
+    z = z[:, mask, :]
+
+    # 2. permute
+    z = xp.permute_dims(z, (1, 0, 2))
+
+    # 3. stack
+    if stack_real_imaginary:
+        z = xp.concat([z.real, z.imag], axis=-1)
+
+    return z, mask
+
+
+# }}}
+
+
+# {{{{ generate_timeseries_dataset
+
+
+def generate_timeseries_dataset(
     mat: Array2D,
     *,
     bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
     escape_radius: float = 100.0,
     resolution: int = 128,
     maxit: int = 128,
-    in_dmd: bool = False,
     xp: Any = None,
-) -> tuple[Array2D, Array2D, Array2D]:
+) -> tuple[Array3D, Array3D, Array2D]:
+    """
+    :returns: a tuple ``(x, y, mask)``, where *x* and *y* are arrays of shape
+        ``(ntrajectories, maxit - 1, 2d)`` and the *mask* is an array of shape
+        ``(resolution, resolution)``. The two arrays represent consecutive
+        time steps ``(z_n, z_{n + 1} - c)`` and the *mask* gives the converged
+        points at the final time step over the whole *bbox*.
+    """
     if xp is None:
         xp = array_api_compat.array_namespace(mat)
 
     log.info("Generating dataset on %s", bbox)
-
     with tictoc("generate_dataset"):
-        Z, c = generate_dataset(
+        z, c = generate_dataset(
             mat,
             bbox=bbox,
-            resolution=resolution,
             escape_radius=escape_radius,
+            resolution=resolution,
             maxit=maxit,
+            xp=xp,
         )
 
-    X, Y = split_dataset(
-        Z,
-        C=c,
-        escape_radius=escape_radius,
-        in_dmd=in_dmd,
-        split_real_imaginary=True,
-    )
-    log.info("Dataset: %s", X.shape)
+    # only keep converged points
+    z, mask = post_process_dataset(z, escape_radius, stack_real_imaginary=True, xp=xp)
+    c = c[mask][:, None, None]
 
-    mask = xp.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, axis=-1) < escape_radius**2
-    log.info("Points:")
-    log.info("    Converged: %d/%d", xp.sum(mask), mask.size().numel())
-    log.info("    Max: %.5e (radius %.5e)", xp.max(xp.abs(Z)), escape_radius)
-    log.info("    Mean: %.5e", xp.mean(xp.abs(Z)))
+    # create datasets
+    d, _ = mat.shape
+    x = z[:, :-1, :]
+    y = xp.concat([z[:, 1:, :d] - c.real, z[:, 1:, d:] - c.imag], axis=-1)
+    assert x.shape == y.shape
+
+    zabs = xp.sqrt(z[:, :, :d] ** 2 + z[:, :, d:] ** 2)
+    log.info("Dataset:")
+    log.info("    Converged:    %d/%d", xp.sum(mask), mask.size().numel())
+    log.info("    Size:         %s", z.shape)
+    log.info("    Max:          %.5e (radius %.5e)", xp.max(zabs), escape_radius)
+    log.info("    Spread:       %.5e ± %.5e", xp.mean(zabs), xp.std(zabs))
 
     # NOTE: mask only returned for plotting
-    return X, Y, Z[-1].clone()
+    return x, y, mask
 
 
-# }}}
+def torch_flatten(ds: Dataset) -> TensorDataset:
+    import torch
+    from torch.utils.data import Subset, TensorDataset
+
+    if isinstance(ds, Subset):
+        idx = ds.indices
+        tensors = tuple(tensor[idx] for tensor in ds.dataset.tensors)  # ty: ignore[unresolved-attribute]
+    elif isinstance(ds, TensorDataset):
+        tensors = ds.tensors
+    else:
+        raise TypeError(f"unsupported dataset type: {type(ds)}")
+
+    tensors = tuple(torch.reshape(tensor, (-1, tensor.shape[-1])) for tensor in tensors)
+    return TensorDataset(*tensors)
 
 
-# {{{ split_dataset
-
-
-def split_dataset(
-    Z: Array4D,
+def make_torch_timeseries_dataset(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    lengths: tuple[float, float, float] | None = None,
     *,
-    C: Array4D | None = None,
-    escape_radius: float | None = None,
-    in_dmd: bool = False,
-    split_real_imaginary: bool = True,
-    xp: Any = None,
-) -> tuple[Array2D, Array2D]:
-    if xp is None:
-        xp = array_api_compat.array_namespace(Z, C)
+    seed: int = 42,
+) -> tuple[TensorDataset, TensorDataset, TensorDataset]:
+    import torch
+    from torch.utils.data import TensorDataset, random_split
 
-    # NOTE: we have an array of shape (maxit, n, n, d) and we want to
-    #   * make our input/output be (Z_n, Z_{n + 1}) so that we can learn the dynamics
-    #   * take only the converged points (based on mask)
-    #   * squish everything down to use d as the "features"
+    if lengths is None:
+        lengths = (0.8, 0.1, 0.1)
 
-    # NOTE: we reshape the array in two different ways:
-    #   1. if `in_dmd`: to a 3D array of shape (n * n, maxit, d)
-    #   2. if not `in_dmd`: to a 2D array of shape (n * n * maxit, d)
+    # NOTE: this is what random_split seems to also be using
+    if not math.isclose(sum(lengths), 1):
+        raise ValueError(f"'lengths' must sum to 1: {lengths}")
 
-    maxit, nx, ny, d = Z.shape
+    dataset = TensorDataset(x, y)
+    generator = torch.Generator(x.device).manual_seed(seed)
+    training, validation, testing = random_split(dataset, lengths, generator=generator)
 
-    # if provided, strip out points that escaped
-    if escape_radius is not None:
-        mask = xp.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, axis=-1) < escape_radius**2
-    else:
-        mask = xp.ones((nx, ny), dtype=xp.bool, device=Z.device)
+    training = torch_flatten(training)
+    validation = torch_flatten(validation)
+    testing = torch_flatten(testing)
 
-    X = Z[:-1, mask, :]
-    if in_dmd:  # noqa: SIM108
-        X = xp.permute_dims(X, (1, 0, 2))
-    else:
-        X = xp.reshape(X, (-1, d))
+    log.info("Split:")
+    log.info("    Training:     %d", len(training))
+    log.info("    Validation:   %d", len(validation))
+    log.info("    Testing:      %d", len(testing))
 
-    # if provided, strip the constant offset so we predict
-    #   Y' = X
-    #   where Y' = Z[1:] - c
-    #         X = Z[:-1]
-    if C is not None:
-        C = xp.expand_dims(xp.expand_dims(C, axis=0), axis=-1)
-        C = xp.broadcast_to(C, (maxit - 1, nx, ny, d))
-        Y = Z[1:, mask, :] - C[:, mask, :]
-    else:
-        Y = Z[1:, mask, :]
-
-    if in_dmd:  # noqa: SIM108
-        Y = xp.permute_dims(Y, (1, 0, 2))
-    else:
-        Y = xp.reshape(Y, (-1, d))
-
-    if split_real_imaginary:
-        X = xp.concat([X.real, X.imag], axis=-1)
-        Y = xp.concat([Y.real, Y.imag], axis=-1)
-
-    return X, Y
+    return training, validation, testing
 
 
 # }}}
@@ -293,29 +371,6 @@ def dmd_predict(
 # }}}
 
 
-# {{{ iter_batches
-
-
-def iter_batches(
-    X: Array2D,
-    Y: Array2D,
-    *,
-    batch_size: int = 4096,
-    rng: np.random.Generator | None = None,
-) -> Iterator[tuple[Array2D, Array2D]]:
-    xp = array_api_compat.array_namespace(X, Y)
-    if rng is None:
-        rng = np.random.default_rng()
-
-    idx = xp.asarray(rng.permutation(len(X)), dtype=xp.int32, device=X.device)
-    for start in range(0, len(X), batch_size):
-        sl = idx[start : start + batch_size]
-        yield X[sl], Y[sl]
-
-
-# }}}
-
-
 # {{{ torch_train
 
 
@@ -324,50 +379,81 @@ def torch_train(
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
-    X: torch.Tensor,
-    Y: torch.Tensor,
+    xy_train: TensorDataset,
+    xy_validate: TensorDataset,
     *,
     epochs: int = 50,
     batch_size: int = 4096,
+    target_scale: float = 1.0,
     callback: Callable[[int, nn.Module], None] | None = None,
 ) -> tuple[nn.Module, torch.optim.Optimizer, torch.Tensor]:
     import torch
+    from torch.utils.data import DataLoader
+
+    # FIXME: not very nice to just split these?
+    x_train, _ = xy_train.tensors
+    x_validate, y_validate = xy_validate.tensors
+    device = x_train.device
+
+    compiled_model = torch.compile(model)
+    train_loader = DataLoader(
+        xy_train,
+        batch_size=batch_size,
+        shuffle=True,
+        generator=torch.Generator(device),
+    )
+
+    losses = torch.empty((epochs, 2, 1), device=device)
 
     timer = TicTocTimer()
 
-    device = X.device
-    compiled_model = torch.compile(model)
-
-    num_batches = X.shape[0] // batch_size
-
-    losses = torch.empty(epochs, device=device)
-    target_scale = torch.mean(Y.conj() * Y).real
-
     for epoch in range(epochs):
+        # {{{ training
+
         loss_epoch = torch.tensor(0.0, device=device)
+        num_batches = 0
 
         timer.tic()
 
-        for batch_x, batch_y in iter_batches(X, Y, batch_size=batch_size):
+        for batch_x, batch_y in train_loader:
             optimizer.zero_grad()
 
-            # compute loss function
             predictions = compiled_model(batch_x)
             loss = criterion(predictions, batch_y) / target_scale
 
-            # compute gradient
             loss.backward()
-
-            # update weights
             optimizer.step()
 
             loss_epoch += loss.detach()
+            num_batches += 1
 
-        losses[epoch] = loss_epoch.item() / num_batches
-        scheduler.step(losses[epoch])  # ty: ignore[invalid-argument-type]
+        loss_train = loss_epoch / num_batches
+
+        # }}}
+
+        # {{{ validation
+
+        with torch.no_grad():
+            predictions = compiled_model(x_validate)
+            loss_validate = criterion(predictions, y_validate) / target_scale
+
+        # }}}
+
+        scheduler.step(loss_validate)
 
         timer.toc()
-        log.info("[%03d/%03d] loss %.5e (%s)", epoch + 1, epochs, loss_epoch, timer)
+
+        log.info(
+            "[%03d/%03d] train %.5e validate %.5e (%s)",
+            epoch + 1,
+            epochs,
+            loss_train,
+            loss_validate,
+            timer,
+        )
+
+        losses[epoch, 0] = loss_train.item()
+        losses[epoch, 1] = loss_validate.item()
 
         if callback is not None:
             callback(epoch, compiled_model)  # ty: ignore[invalid-argument-type]

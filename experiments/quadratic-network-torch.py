@@ -177,34 +177,50 @@ def main(
 
         plot_predict(epochs, model)
     else:
-        from commonlib import generate_training_dataset, torch_train
+        from commonlib import (
+            generate_timeseries_dataset,
+            make_torch_timeseries_dataset,
+            torch_train,
+        )
 
         # {{{ generate dataset
 
-        X, Y, Zlast = generate_training_dataset(
+        x, y, zmask = generate_timeseries_dataset(
             mat,
             bbox=bbox,
             resolution=resolution,
             maxit=maxit,
             escape_radius=escape_radius,
         )
-        Zmask = torch.sum(Zlast.real**2 + Zlast.imag**2, dim=-1) < escape_radius**2
+        xy_train, xy_validate, xy_test = make_torch_timeseries_dataset(
+            x, y, (0.8, 0.1, 0.1)
+        )
 
         # }}}
 
         # {{{ train
+
+        _, y_train = xy_train.tensors
+        target_scale = torch.mean(y_train.conj() * y_train).real.item()
 
         _, optimizer, losses = torch_train(
             model,
             criterion,
             optimizer,
             scheduler,
-            X,
-            Y,
+            xy_train,
+            xy_validate,
             epochs=epochs,
             batch_size=batch_size,
+            target_scale=target_scale,
             callback=plot_predict,
         )
+
+        with torch.no_grad():
+            x_test, y_test = xy_test.tensors
+            predictions = model(x_test)
+            loss_test = criterion(predictions, y_test) / target_scale
+            log.info("[%03d/%03d] test %.5e", epochs, epochs, loss_test)
 
         # }}}
 
@@ -217,8 +233,7 @@ def main(
                 "optimizer": optimizer.state_dict(),
                 "epochs": epochs,
                 "losses": losses,
-                "Zmask": Zmask,
-                "Zlast": Zlast,
+                "Zmask": zmask,
                 # parameters
                 "inputfile": str(filename),
                 "dataidx": dataidx,
@@ -251,9 +266,12 @@ def main(
     ) as fig:
         ax = fig.gca()
 
-        ax.semilogy(losses.cpu().numpy())
+        losses = losses.cpu().numpy()
+        ax.semilogy(losses[:, 0, 0], label="Train")
+        ax.semilogy(losses[:, 1, 0], label="Validation")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
+        ax.legend()
 
     # }}}
 
