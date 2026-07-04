@@ -484,7 +484,8 @@ def torch_train(
         # }}}
 
         if callback is not None:
-            callback(epoch, compiled_model)  # ty: ignore[invalid-argument-type]
+            with torch.no_grad():
+                callback(epoch, compiled_model)  # ty: ignore[invalid-argument-type]
 
     if best_state is not None:
         model.load_state_dict(best_state)
