@@ -221,6 +221,8 @@ def main(
             x_test, y_test = xy_test.tensors
             predictions = model(x_test)
             loss_test = criterion(predictions, y_test) / target_scale
+
+            loss_test = loss_test.cpu().numpy()
             log.info("[%03d/%03d] test %.5e", epochs, epochs, loss_test)
 
         # }}}

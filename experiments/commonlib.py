@@ -6,12 +6,13 @@ from __future__ import annotations
 import math
 import os
 import pathlib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import array_api_compat
 import numpy as np
 
+from nneuroutil.data import SlicedDataLoader
 from nneuroutil.dmd import DMD
 from nneuroutil.helpers import TicTocTimer, module_logger, tictoc
 from nneuroutil.typing import Array2D, Array3D, Array4D
@@ -371,29 +372,6 @@ def dmd_predict(
 # }}}
 
 
-# {{{ iter_batches
-
-
-def iter_batches(
-    X: Array2D,
-    Y: Array2D,
-    *,
-    batch_size: int = 4096,
-    rng: np.random.Generator | None = None,
-) -> Iterator[tuple[Array2D, Array2D]]:
-    xp = array_api_compat.array_namespace(X, Y)
-    if rng is None:
-        rng = np.random.default_rng()
-
-    idx = xp.asarray(rng.permutation(len(X)), dtype=xp.int32, device=X.device)
-    for start in range(0, len(X), batch_size):
-        sl = idx[start : start + batch_size]
-        yield X[sl], Y[sl]
-
-
-# }}}
-
-
 # {{{ torch_train
 
 
@@ -409,6 +387,7 @@ def torch_train(
     batch_size: int = 4096,
     target_scale: float = 1.0,
     callback: Callable[[int, nn.Module], None] | None = None,
+    verbose: bool = False,
 ) -> tuple[nn.Module, torch.optim.Optimizer, torch.Tensor]:
     import torch
 
@@ -418,6 +397,7 @@ def torch_train(
     device = x_train.device
 
     compiled_model = torch.compile(model)
+    loader = SlicedDataLoader(x_train, y_train, batch_size=batch_size, shuffle=True)
     losses = torch.empty((epochs, 2, 1), device=device)
 
     timer = TicTocTimer()
@@ -430,7 +410,7 @@ def torch_train(
 
         timer.tic()
 
-        for batch_x, batch_y in iter_batches(x_train, y_train, batch_size=batch_size):
+        for i, (batch_x, batch_y) in enumerate(loader):
             optimizer.zero_grad()
 
             predictions = compiled_model(batch_x)
@@ -441,6 +421,9 @@ def torch_train(
 
             loss_epoch += loss.detach()
             num_batches += 1
+
+            if verbose:
+                log.info(r"    \[batch %03d] loss %.5e", i, loss.item())
 
         loss_train = loss_epoch / num_batches
 
