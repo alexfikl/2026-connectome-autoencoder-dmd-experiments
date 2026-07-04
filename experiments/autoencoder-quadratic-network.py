@@ -37,7 +37,7 @@ class Autoencoder(nn.Module):
         *,
         encoder_layer_sizes: int | tuple[int, ...] | None = None,
         decoder_layer_sizes: int | tuple[int, ...] | None = None,
-        alpha: float = 0.1,
+        alpha: float = 0.5,
         device: str | torch.device | None = None,
         dtype: Any = None,
     ) -> None:
@@ -110,6 +110,8 @@ class Autoencoder(nn.Module):
         decoder_layers = []
         for n_in, n_out in pairwise(layer_sizes):
             linear = ComplexLinear(n_in, n_out, device=device, dtype=dtype)
+            kaiming_uniform_(linear.weight, nonlinearity="linear")
+
             decoder_layers.append(linear)
 
         self.encoder = nn.Sequential(*encoder_layers)
@@ -134,7 +136,7 @@ def main(
     escape_radius: float | None = 100.0,
     resolution: int = 128,
     maxit: int = 128,
-    epochs: int = 100,
+    epochs: int = 50,
     batch_size: int = 4096,
     early_stop_patience: int = 0,
     overwrite: bool = False,
@@ -289,7 +291,7 @@ def main(
             predictions = model(x_test)
             loss_test = criterion(predictions, y_test) / target_scale
 
-            loss_test = loss_test.cpu().numpy()
+            loss_test = loss_test.item()
             log.info("[%03d/%03d] test %.5e", epochs, epochs, loss_test)
 
         # }}}
@@ -426,6 +428,7 @@ if __name__ == "__main__":
                 dataidx=args.dataidx,
                 resolution=args.resolution,
                 early_stop_patience=args.early_stop_patience,
+                outfile=args.outfile,
                 overwrite=args.force,
             )
         )

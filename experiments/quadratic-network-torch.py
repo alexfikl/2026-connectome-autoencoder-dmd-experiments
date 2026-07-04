@@ -421,6 +421,7 @@ if __name__ == "__main__":
                 dataidx=args.dataidx,
                 resolution=args.resolution,
                 early_stop_patience=args.early_stop_patience,
+                outfile=args.outfile,
                 overwrite=args.force,
             )
         )
