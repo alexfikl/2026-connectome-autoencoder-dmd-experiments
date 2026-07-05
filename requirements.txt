@@ -20,7 +20,7 @@ matplotlib==3.11.0
     #   scienceplots
 mdurl==0.1.2
     # via markdown-it-py
-nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@973f7dff70c57a02effcece0a09054f1a54bd450#egg=nneuroutil
+nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@3f9664c461b963499d4a844220ca0bad37043a78#egg=nneuroutil
     # via fractal-dmd-autoencoder (pyproject.toml)
 numpy==2.4.6 ; python_full_version < '3.12'
     # via
@@ -29,7 +29,7 @@ numpy==2.4.6 ; python_full_version < '3.12'
     #   matplotlib
     #   nneuroutil
     #   scipy
-numpy==2.5.0 ; python_full_version >= '3.12'
+numpy==2.5.1 ; python_full_version >= '3.12'
     # via
     #   fractal-dmd-autoencoder (pyproject.toml)
     #   contourpy
