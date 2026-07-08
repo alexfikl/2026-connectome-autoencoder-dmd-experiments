@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+from collections.abc import Callable
 from typing import Any
 
 import jax
@@ -93,20 +94,25 @@ def flax_train(
     model: QuadraticNetwork,
     criterion: nnx.Module,
     optimizer: nnx.Optimizer,
-    X: jax.Array,
-    Y: jax.Array,
+    xy_train: tuple[jax.Array, jax.Array],
+    xy_validate: tuple[jax.Array, jax.Array],
     *,
     epochs: int = 50,
     batch_size: int = 4096,
+    target_scale: float = 1.0,
+    callback: Callable[[int, QuadraticNetwork], None] | None = None,
+    verbose: bool = False,
+    patience_early_stop: int = 0,
 ) -> tuple[QuadraticNetwork, nnx.Optimizer, jax.Array]:
+    # NOTE: an optax learning-rate schedule (e.g. reduce_on_plateau) can be
+    # chained into *optimizer* instead of passing a scheduler object here.
     from nneuroutil.helpers import TicTocTimer
 
+    x_train, y_train = xy_train
+    x_validate, y_validate = xy_validate
+    n_train = x_train.shape[0]
+
     timer = TicTocTimer()
-
-    num_batches = X.shape[0] // batch_size
-
-    losses = np.empty(epochs)
-    target_scale = jnp.mean(Y.conj() * Y).real
 
     @nnx.jit
     def train_step(
@@ -123,21 +129,96 @@ def flax_train(
 
         return loss
 
-    from commonlib import iter_batches
+    @nnx.jit
+    def validate_step(model: QuadraticNetwork) -> jax.Array:
+        return criterion(model(x_validate), y_validate) / target_scale
+
+    best_loss = float("inf")
+    best_state = None
+    best_epoch = -1
+    num_bad_epochs = 0
+
+    losses = np.empty((epochs, 2, 1))
+    key = jax.random.PRNGKey(0)
 
     for epoch in range(epochs):
-        loss_epoch = 0.0
-
         timer.tic()
 
-        for batch_x, batch_y in iter_batches(X, Y, batch_size=batch_size):
-            loss_val = train_step(model, optimizer, batch_x, batch_y)
-            loss_epoch += loss_val
+        # {{{ training
 
-        losses[epoch] = loss_epoch / num_batches
+        key, subkey = jax.random.split(key)
+        perm = jax.random.permutation(subkey, n_train)
+
+        loss_epoch = 0.0
+        num_batches = 0
+
+        for i in range(0, n_train - batch_size + 1, batch_size):
+            idx = perm[i : i + batch_size]
+            batch_x = x_train[idx]
+            batch_y = y_train[idx]
+
+            loss_val = train_step(model, optimizer, batch_x, batch_y)
+            loss_epoch += float(loss_val)
+            num_batches += 1
+
+            if verbose:
+                log.info(
+                    r"    \[batch %03d] loss %.5e", num_batches - 1, float(loss_val)
+                )
+
+        loss_train = loss_epoch / num_batches
+
+        # }}}
+
+        # {{{ validation
+
+        loss_validate = float(validate_step(model))
+
+        # }}}
 
         timer.toc()
-        log.info("[%03d/%03d] loss %.5e (%s)", epoch + 1, epochs, loss_epoch, timer)
+
+        log.info(
+            "[%03d/%03d] train %.5e validate %.5e (%s)",
+            epoch + 1,
+            epochs,
+            loss_train,
+            loss_validate,
+            timer,
+        )
+
+        losses[epoch, 0, 0] = loss_train
+        losses[epoch, 1, 0] = loss_validate
+
+        # {{{ best model and early stopping
+
+        if loss_validate < best_loss:
+            best_loss = loss_validate
+            best_state = nnx.state(model)
+            best_epoch = epoch + 1
+            num_bad_epochs = 0
+        elif patience_early_stop > 0:
+            num_bad_epochs += 1
+            if num_bad_epochs >= patience_early_stop:
+                log.info(
+                    "Early stopping at epoch %03d (best %03d, loss %.5e)",
+                    epoch + 1,
+                    best_epoch,
+                    best_loss,
+                )
+                losses = losses[: epoch + 1]
+                break
+
+        # }}}
+
+        if callback is not None:
+            callback(epoch, model)
+
+    if best_state is not None:
+        nnx.update(model, best_state)
+        log.info(
+            "Restored best model from epoch %03d (loss %.5e)", best_epoch, best_loss
+        )
 
     return model, optimizer, jnp.array(losses)
 
@@ -162,8 +243,10 @@ def flax_predict(
 
     d = model.input_size
     dtype = model.dtype
+    assert isinstance(dtype, np.dtype)
+    assert np.issubdtype(dtype, np.floating)
 
-    z = jnp.zeros((resolution, resolution, d), dtype=to_complex(dtype), device=device)
+    z = jnp.zeros((resolution, resolution, 2 * d), dtype=dtype, device=device)
     c = generate_grid(
         *bbox,
         nx=resolution,
@@ -174,10 +257,11 @@ def flax_predict(
     )[:, :, None]
 
     for _ in range(1, maxit):
-        Az = model(jnp.concat([z.real, z.imag], axis=-1))
-        z = Az[:, :, :d] + 1j * Az[:, :, d:] + c
+        Az = model(z)
+        z = z.at[:, :, :d].set(Az[:, :, :d] + c.real)
+        z = z.at[:, :, d:].set(Az[:, :, d:] + c.imag)
 
-    return z
+    return z[:, :, :d] + 1j * z[:, :, d:]
 
 
 # }}}
@@ -195,10 +279,9 @@ def main(
     maxit: int = 128,
     epochs: int = 50,
     batch_size: int = 4096,
+    early_stop_patience: int = 0,
     overwrite: bool = False,
 ) -> int:
-    from commonlib import determine_escape_radius
-
     (device,) = jax.devices(jax.default_backend())
     log.info("Device: %s", device)
 
@@ -229,6 +312,8 @@ def main(
         return 1
 
     if escape_radius is None:
+        from commonlib import determine_escape_radius
+
         escape_radius = determine_escape_radius(mat)
 
     if outfile is None:
@@ -241,18 +326,42 @@ def main(
 
     # }}}
 
-    # {{{ train
+    # {{{ plot predict
 
     import pickle
 
-    d = mat.shape[0]
-    model = QuadraticNetwork(d, d, rngs=nnx.Rngs(0))
-    criterion = MSELoss()
-    optimizer = nnx.Optimizer(model, optax.adam(5.0e-3), wrt=nnx.Param)
+    from nneuroutil.visualization import figure, make_colorbar_axes
 
-    # FIXME: need a nice way to print this
-    log.info("Network:")
-    print(model)
+    def plot_predict(epoch: int, m: QuadraticNetwork) -> None:
+        Zpredict = flax_predict(
+            m,
+            bbox=bbox,
+            resolution=2 * resolution,
+            maxit=maxit,
+        )
+        mask = jnp.sum(Zpredict.real**2 + Zpredict.imag**2, axis=-1) < escape_radius**2
+
+        with figure(
+            basename.with_stem(f"{basename.stem}-predict-{epoch:04d}"),
+            overwrite=overwrite,
+        ) as fig:
+            ax = fig.gca()
+            ax.imshow(np.array(mask), extent=bbox, cmap="binary")
+
+    # }}}
+
+    # {{{ train
+
+    d = mat.shape[0]
+    model = QuadraticNetwork(d, d, dtype=mat.real.dtype, rngs=nnx.Rngs(0))
+    criterion = MSELoss()
+    optimizer = nnx.Optimizer(
+        model,
+        optax.adamw(learning_rate=5.0e-3, weight_decay=1.0e-2),
+        wrt=nnx.Param,
+    )
+
+    log.info("Network:\n%s", model)
 
     weightsfile = outfile.with_suffix(".pkl")
     if weightsfile.exists():
@@ -267,62 +376,87 @@ def main(
             ),
         )
         losses = checkpoint["losses"]
-        Zmask = checkpoint["Zmask"]
+        loss_test = checkpoint.get("loss_test", 0.0)
+        zmask = checkpoint["zmask"]
+
+        plot_predict(epochs, model)
     else:
-        from commonlib import generate_training_dataset
+        from commonlib import (
+            generate_timeseries_dataset,
+            make_timeseries_datasets,
+        )
 
         # {{{ generate dataset
 
-        X, Y, Zlast = generate_training_dataset(
+        x, y, zmask = generate_timeseries_dataset(
             mat,
             bbox=bbox,
             resolution=resolution,
             maxit=maxit,
             escape_radius=escape_radius,
         )
-        Zmask = jnp.sum(Zlast.real**2 + Zlast.imag**2, axis=-1) < escape_radius**2
+        xy_train, xy_validate, xy_test = make_timeseries_datasets(
+            x, y, (0.8, 0.1, 0.1), rng=np.random.default_rng(42)
+        )
 
         # }}}
 
         # {{{ train
 
+        _, y_train = xy_train
+        target_scale = jnp.mean(y_train.conj() * y_train).real.item()
+
         model, _optimizer, losses = flax_train(
             model,
             criterion,
             optimizer,
-            X,
-            Y,
+            xy_train,
+            xy_validate,
             epochs=epochs,
             batch_size=batch_size,
+            target_scale=target_scale,
+            patience_early_stop=early_stop_patience,
+            callback=plot_predict,
         )
+
+        # }}}
+
+        # {{{ test loss
+
+        x_test, y_test = xy_test
+        predictions = model(x_test)
+        loss_test = float(criterion(predictions, y_test) / target_scale)
+
+        log.info("[%03d/%03d] test %.5e", epochs, epochs, loss_test)
 
         # }}}
 
         # {{{ checkpoint
 
+        num_epochs_trained = len(losses)
         with open(weightsfile, "wb") as f:
             pickle.dump(
                 {
                     # model
                     "model": nnx.state(model),
                     "epochs": epochs,
-                    "losses": losses,
-                    "Zmask": Zmask,
-                    "Zlast": Zlast,
+                    "num_epochs_trained": num_epochs_trained,
+                    "losses": np.array(losses),
+                    "loss_test": loss_test,
+                    "zmask": zmask,
                     # parameters
-                    "inputfile": filename,
+                    "inputfile": str(filename),
                     "dataidx": dataidx,
                     "bbox": bbox,
                     "escape_radius": escape_radius,
                     "resolution": resolution,
                     "maxit": maxit,
+                    "early_stop_patience": early_stop_patience,
                 },
                 f,
             )
 
         # }}}
-
-    from nneuroutil.visualization import figure, make_colorbar_axes
 
     # }}}
 
@@ -332,20 +466,25 @@ def main(
         basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
     ) as fig:
         ax = fig.gca()
-        ax.imshow(np.array(Zmask), extent=bbox, cmap="binary")
+        ax.imshow(np.array(zmask), extent=bbox, cmap="binary")
 
     # }}}
 
     # {{{ plot loss
+
+    losses = np.asarray(losses)
 
     with figure(
         basename.with_stem(f"{basename.stem}-loss"), overwrite=overwrite
     ) as fig:
         ax = fig.gca()
 
-        ax.semilogy(np.array(losses))
+        ax.semilogy(losses[:, 0, 0], label="Train")
+        ax.semilogy(losses[:, 1, 0], label="Validation")
+        ax.axhline(loss_test, color="k", ls="--")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
+        ax.legend()
 
     # }}}
 
@@ -408,24 +547,6 @@ def main(
 
     # }}}
 
-    # {{{ plot prediction
-
-    Zpredict = flax_predict(
-        model,
-        bbox=bbox,
-        resolution=2 * resolution,
-        maxit=maxit,
-    )
-    Zmask = jnp.sum(Zpredict.real**2 + Zpredict.imag**2, axis=-1) < escape_radius**2
-
-    with figure(
-        basename.with_stem(f"{basename.stem}-predict"), overwrite=overwrite
-    ) as fig:
-        ax = fig.gca()
-        ax.imshow(np.array(Zmask), extent=bbox, cmap="binary")
-
-    # }}}
-
     return 0
 
 
@@ -476,6 +597,12 @@ if __name__ == "__main__":
         help="Force overwrite of existing files",
     )
     parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=0,
+        help="Stop training loss does not improve for this many epochs (0 disables)",
+    )
+    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -490,12 +617,16 @@ if __name__ == "__main__":
 
     with jax_default_device(args.device):
         set_jax_config()
+        # NOTE: use TF32 for matrix multiplication (should be faster, similar precision)
+        jax.config.update("jax_default_matmul_precision", "high")
 
         raise SystemExit(
             main(
                 args.filename,
                 dataidx=args.dataidx,
                 resolution=args.resolution,
+                early_stop_patience=args.early_stop_patience,
+                outfile=args.outfile,
                 overwrite=args.force,
             )
         )
