@@ -312,9 +312,9 @@ def make_timeseries_datasets(
     testing = flatten(testing)
 
     log.info("Split:")
-    log.info("    Training:     %d", len(training))
-    log.info("    Validation:   %d", len(validation))
-    log.info("    Testing:      %d", len(testing))
+    log.info("    Training:     %d", len(training[0]))
+    log.info("    Validation:   %d", len(validation[0]))
+    log.info("    Testing:      %d", len(testing[0]))
 
     return training, validation, testing
 
