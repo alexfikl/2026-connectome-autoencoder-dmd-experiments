@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import torch
 from torch import nn
+from torch.utils.data import TensorDataset
 
 from nneuroutil.helpers import FuzzyChoiceAction, module_logger
 from nneuroutil.torch_extras import available_device_names, torch_default_device
@@ -182,7 +183,7 @@ def main(
     else:
         from commonlib import (
             generate_timeseries_dataset,
-            make_torch_timeseries_dataset,
+            make_timeseries_datasets,
             torch_train,
         )
 
@@ -195,15 +196,13 @@ def main(
             maxit=maxit,
             escape_radius=escape_radius,
         )
-        xy_train, xy_validate, xy_test = make_torch_timeseries_dataset(
-            x, y, (0.8, 0.1, 0.1)
-        )
+        xy_train, xy_validate, xy_test = make_timeseries_datasets(x, y, (0.8, 0.1, 0.1))
 
         # }}}
 
         # {{{ train
 
-        _, y_train = xy_train.tensors
+        _, y_train = xy_train
         target_scale = torch.mean(y_train.conj() * y_train).real.item()
 
         _, optimizer, losses = torch_train(
@@ -211,8 +210,8 @@ def main(
             criterion,
             optimizer,
             scheduler,
-            xy_train,
-            xy_validate,
+            TensorDataset(*xy_train),
+            TensorDataset(*xy_validate),
             epochs=epochs,
             batch_size=batch_size,
             target_scale=target_scale,
@@ -222,7 +221,7 @@ def main(
 
         model.eval()
         with torch.no_grad():
-            x_test, y_test = xy_test.tensors
+            x_test, y_test = xy_test
             predictions = model(x_test)
             loss_test = criterion(predictions, y_test) / target_scale
 
