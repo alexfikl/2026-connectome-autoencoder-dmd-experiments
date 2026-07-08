@@ -20,7 +20,7 @@ from nneuroutil.typing import Array2D, Array3D, Array4D
 if TYPE_CHECKING:
     import torch
     from torch import nn
-    from torch.utils.data import Dataset, TensorDataset
+    from torch.utils.data import TensorDataset
 
 log = module_logger("lib")
 
@@ -277,7 +277,7 @@ def generate_timeseries_dataset(
 
     zabs = xp.sqrt(z[:, :, :d] ** 2 + z[:, :, d:] ** 2)
     log.info("Dataset:")
-    log.info("    Converged:    %d/%d", xp.sum(mask), mask.size().numel())
+    log.info("    Converged:    %d/%d", xp.sum(mask), math.prod(mask.shape))
     log.info("    Size:         %s", z.shape)
     log.info("    Max:          %.5e (radius %.5e)", xp.max(zabs), escape_radius)
     log.info("    Spread:       %.5e ± %.5e", xp.mean(zabs), xp.std(zabs))
@@ -286,46 +286,30 @@ def generate_timeseries_dataset(
     return x, y, mask
 
 
-def torch_flatten(ds: Dataset) -> TensorDataset:
-    import torch
-    from torch.utils.data import Subset, TensorDataset
-
-    if isinstance(ds, Subset):
-        idx = ds.indices
-        tensors = tuple(tensor[idx] for tensor in ds.dataset.tensors)  # ty: ignore[unresolved-attribute]
-    elif isinstance(ds, TensorDataset):
-        tensors = ds.tensors
-    else:
-        raise TypeError(f"unsupported dataset type: {type(ds)}")
-
-    tensors = tuple(torch.reshape(tensor, (-1, tensor.shape[-1])) for tensor in tensors)
-    return TensorDataset(*tensors)
-
-
-def make_torch_timeseries_dataset(
-    x: torch.Tensor,
-    y: torch.Tensor,
+def make_timeseries_datasets(
+    x: Array3D,
+    y: Array3D,
     lengths: tuple[float, float, float] | None = None,
     *,
-    seed: int = 42,
-) -> tuple[TensorDataset, TensorDataset, TensorDataset]:
-    import torch
-    from torch.utils.data import TensorDataset, random_split
+    rng: np.random.Generator | None = None,
+    xp: Any = None,
+) -> tuple[tuple[Array2D, Array2D], tuple[Array2D, Array2D], tuple[Array2D, Array2D]]:
+    from nneuroutil.data import random_split
 
     if lengths is None:
         lengths = (0.8, 0.1, 0.1)
 
-    # NOTE: this is what random_split seems to also be using
-    if not math.isclose(sum(lengths), 1):
-        raise ValueError(f"'lengths' must sum to 1: {lengths}")
+    if xp is None:
+        xp = array_api_compat.array_namespace(x, y)
 
-    dataset = TensorDataset(x, y)
-    generator = torch.Generator(x.device).manual_seed(seed)
-    training, validation, testing = random_split(dataset, lengths, generator=generator)
+    def flatten(ds: tuple[Array3D, ...]) -> tuple[Array2D, ...]:
+        return tuple(xp.reshape(d, (-1, d.shape[-1])) for d in ds)
 
-    training = torch_flatten(training)
-    validation = torch_flatten(validation)
-    testing = torch_flatten(testing)
+    training, validation, testing = random_split((x, y), lengths, rng=rng, xp=xp)
+
+    training = flatten(training)
+    validation = flatten(validation)
+    testing = flatten(testing)
 
     log.info("Split:")
     log.info("    Training:     %d", len(training))
