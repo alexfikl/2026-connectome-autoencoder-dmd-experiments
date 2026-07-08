@@ -361,7 +361,7 @@ def main(
         wrt=nnx.Param,
     )
 
-    log.info("Network:\n%s", model)
+    log.info("Network:\n%r", model, extra={"highlighter": None})
 
     weightsfile = outfile.with_suffix(".pkl")
     if weightsfile.exists():
