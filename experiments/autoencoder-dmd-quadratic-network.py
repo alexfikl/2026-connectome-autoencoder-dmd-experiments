@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Any, NamedTuple, cast
+from collections.abc import Callable
+from typing import Any, NamedTuple
 
 import numpy as np
 import torch
@@ -15,16 +16,17 @@ from torch.utils.data import DataLoader
 from nneuroutil.helpers import FuzzyChoiceAction, TicTocTimer, module_logger
 from nneuroutil.torch_extras import available_device_names, torch_default_device
 from nneuroutil.typing import Array3D
+from nneuroutil.visualization import figure
 
 log = module_logger("lib.autoencoder_network")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
-Trains a standard Autoencoder neural network.
+Trains a DMD Autoencoder neural network with quadratic activation functions.
 
 Example:
 
-    > {SCRIPT_PATH.name} dataset.npz
+    > {SCRIPT_PATH.name} --device cuda dataset.npz
 """
 
 
@@ -84,10 +86,13 @@ class DMDAutoencoderResult(NamedTuple):
 
     y_out: torch.Tensor
     """Output of the autoencoder."""
+
     x_latent: torch.Tensor
     """Output of the encoder."""
+
     xhat_latent: torch.Tensor
     """DMD reconstructed latent vector :attr:`x_latent`."""
+
     yhat_out: torch.Tensor
     """Output of the decoder applied to :atr:`xhat_latent`."""
 
@@ -101,6 +106,7 @@ class DMDAutoencoder(nn.Module):
         decoder_layer_sizes: int | tuple[int, ...] | None = None,
         dmd_enabled: bool = False,
         alpha: float | None = None,
+        device: str | torch.device | None = None,
         dtype: Any = None,
     ) -> None:
         if encoder_layer_sizes is None:
@@ -142,6 +148,7 @@ class DMDAutoencoder(nn.Module):
             (self.input_size, *encoder_layer_sizes),
             (*(("blended_quadratic",) * (nlayers - 1)), "quadratic"),
             alpha=alpha,
+            device=device,
             dtype=dtype,
         )
         self.encoder = nn.Sequential(*encoder_layers)
@@ -152,6 +159,7 @@ class DMDAutoencoder(nn.Module):
             (self.latent_size, *decoder_layer_sizes),
             ("quadratic", *(("blended_quadratic",) * (nlayers - 1))),
             alpha=alpha,
+            device=device,
             dtype=dtype,
         )
         self.decoder = nn.Sequential(*decoder_layers)
@@ -206,10 +214,13 @@ class DMDAutoencoder(nn.Module):
 class DMDLossResult(NamedTuple):
     total: torch.Tensor
     """Total value of the loss function. The gradient will be applied to this."""
+
     loss_rec: torch.Tensor
     """Reconstruction loss."""
+
     loss_lin: torch.Tensor
     """Linear approximation loss."""
+
     loss_pre: torch.Tensor
     """Linear prediction loss."""
 
@@ -283,49 +294,66 @@ class DMDLoss(nn.Module):
 # {{{ torch_train
 
 
-def torch_train_impl(
+def torch_train(
     model: DMDAutoencoder,
     criterion: DMDLoss,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
-    X: torch.Tensor,
+    X_train: torch.Tensor,
+    X_validate: torch.Tensor,
     *,
-    max_norm: float = 1.0,
+    max_norm: float = 100.0,
     window_size: int = 32,
     nwindows: int = 16,
     epochs: int = 50,
     batch_size: int = 2048,
+    dmd_warmup_epochs: int = 0,
+    patience_early_stop: int = 0,
+    callback: Callable[[int, DMDAutoencoder], None] | None = None,
 ) -> tuple[DMDAutoencoder, torch.optim.Optimizer, torch.Tensor]:
-    import torch
+    from nneuroutil.data import SlidingWindowDataset
 
-    device = X.device
-    if epochs == 0:
-        return model, optimizer, torch.zeros((epochs, criterion.dim), device=device)
+    device = X_train.device
+    compiled_model = torch.compile(model)
 
-    from nneuroutil.torch_extras import SlidingWindowDataset
+    train_dataset = SlidingWindowDataset(
+        X_train, window_size=window_size, nwindows=nwindows
+    )
+    validate_dataset = SlidingWindowDataset(
+        X_validate, window_size=window_size, nwindows=nwindows
+    )
 
-    # NOTE: the compiled model seems to be slower? That's annoying..
-    # compiled_model = torch.compile(model, dynamic=False)
-    compiled_model = model
-
-    dataset = SlidingWindowDataset(X, window_size=window_size, nwindows=nwindows)
     loader = DataLoader(
-        dataset,
+        train_dataset,  # ty: ignore[invalid-argument-type]
         batch_size=batch_size,
         shuffle=True,
         # NOTE: this is needed otherwise the DataLoader seems to want to use the
         # 'cpu' device even when there is another default device..
         generator=torch.Generator(device),
     )
+    validate_loader = DataLoader(
+        validate_dataset,  # ty: ignore[invalid-argument-type]
+        batch_size=batch_size,
+    )
 
-    num_per_batches = X.shape[0] * nwindows // batch_size
-    losses = torch.empty((epochs, criterion.dim), device=device)
+    best_loss = float("inf")
+    best_state: dict[str, Any] | None = None
+    best_epoch = -1
+    num_bad_epochs = 0
 
     timer = TicTocTimer()
+    losses = torch.empty((epochs, 2, criterion.dim), device=device)
 
     for epoch in range(epochs):
-        log.info("Epoch %03d/%03d", epoch + 1, epochs)
+        # {{{ training
+
+        model.train()
+        model.dmd_enabled = epoch >= dmd_warmup_epochs
+        if epoch == dmd_warmup_epochs and dmd_warmup_epochs > 0:
+            log.info("Enabling DMD at epoch %03d", epoch + 1)
+
         loss_epoch = torch.zeros(criterion.dim, device=device)
+        num_batches = 0
 
         timer.tic()
         if device.type == "cuda":
@@ -334,7 +362,6 @@ def torch_train_impl(
         for i, (batch_x,) in enumerate(loader):
             optimizer.zero_grad()
 
-            # compute loss function
             predictions = compiled_model(batch_x)
             loss = criterion(
                 batch_x,
@@ -344,23 +371,21 @@ def torch_train_impl(
                 yhat_out=predictions.yhat_out,
             )
 
-            # compute gradient
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 model.parameters(), max_norm=max_norm
             )
 
-            # update weights
             optimizer.step()
 
-            # update loss
             loss_epoch += loss.tensor().detach()
-
-            with torch.no_grad():
-                eigenvalues = torch.linalg.eigvals(predictions.A_dmd.cpu())
-                eigmax = eigenvalues[eigenvalues.real.argmax()].item()
+            num_batches += 1
 
             if i in {0, len(loader) - 1}:
+                with torch.no_grad():
+                    eigenvalues = torch.linalg.eigvals(predictions.A_dmd.cpu())
+                    eigmax = eigenvalues[eigenvalues.real.argmax()].item()
+
                 log.info(
                     r"    \[batch %03d] lambda_max %.5e+%.5e loss %.5e grad %.5e",
                     i,
@@ -370,66 +395,83 @@ def torch_train_impl(
                     grad_norm,
                 )
 
-        losses[epoch] = loss_epoch / num_per_batches
-        scheduler.step(losses[epoch, 0])  # ty: ignore[invalid-argument-type]
+        loss_train = loss_epoch / num_batches
+
+        # }}}
+
+        # {{{ validation
+
+        # NOTE: keep the model in training mode so that DMD is computed, but
+        # do not track gradients.
+        model.train()
+        with torch.no_grad():
+            loss_val_epoch = torch.zeros(criterion.dim, device=device)
+            num_val_batches = 0
+
+            for (batch_x,) in validate_loader:
+                predictions = compiled_model(batch_x)
+                loss = criterion(
+                    batch_x,
+                    y_out=predictions.y_out,
+                    x_latent=predictions.x_latent,
+                    xhat_latent=predictions.xhat_latent,
+                    yhat_out=predictions.yhat_out,
+                )
+
+                loss_val_epoch += loss.tensor()
+                num_val_batches += 1
+
+            loss_validate = loss_val_epoch / num_val_batches
+
+        # }}}
+
+        scheduler.step(loss_validate[0])  # ty: ignore[invalid-argument-type]
 
         timer.toc()
-        log.info("    Loss %.5e (%s)", losses[epoch, 0], timer)
 
-    return compiled_model, optimizer, losses
+        losses[epoch, 0] = loss_train
+        losses[epoch, 1] = loss_validate
 
-
-def torch_train(
-    model: DMDAutoencoder,
-    criterion: DMDLoss,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
-    X: torch.Tensor,
-    *,
-    max_norm: float = 100.0,
-    window_size: int = 32,
-    nwindows: int = 16,
-    epochs: int = 50,
-    batch_size: int = 2048,
-    dmd_enabled: bool = True,
-) -> tuple[DMDAutoencoder, torch.optim.Optimizer, torch.Tensor]:
-    # NOTE: we're training in two rounds:
-    #   1. doing 'n_bare_epochs' epochs is just AE
-    #   2. doing the rest with DMD
-    # Reasoning: adding DMD is slow and can make the training go in weird directions.
-    # Having a reasonable start for the AE weights already in there works nicely.
-
-    # n_bare_epochs = epochs // 3
-    n_bare_epochs = 0
-    model, optimizer, losses = torch_train_impl(
-        model,
-        criterion,
-        optimizer,
-        scheduler,
-        X,
-        max_norm=float("inf"),
-        window_size=window_size,
-        nwindows=nwindows,
-        epochs=n_bare_epochs,
-        batch_size=batch_size,
-    )
-
-    if dmd_enabled:
-        model.dmd_enabled = True
-
-        model, optimizer, losses_dmd = torch_train_impl(
-            model,
-            criterion,
-            optimizer,
-            scheduler,
-            X,
-            max_norm=max_norm,
-            window_size=window_size,
-            nwindows=nwindows,
-            epochs=epochs - n_bare_epochs,
-            batch_size=batch_size,
+        log.info(
+            "[%03d/%03d] train %.5e validate %.5e (%s)",
+            epoch + 1,
+            epochs,
+            loss_train[0],
+            loss_validate[0],
+            timer,
         )
-        losses = torch.concat([losses, losses_dmd])
+
+        # {{{ best model and early stopping
+
+        loss_v = loss_validate[0].item()
+        if loss_v < best_loss:
+            best_loss = loss_v
+            best_state = model.state_dict()
+            best_epoch = epoch + 1
+            num_bad_epochs = 0
+        elif patience_early_stop > 0:
+            num_bad_epochs += 1
+            if num_bad_epochs >= patience_early_stop:
+                log.info(
+                    "Early stopping at epoch %03d (best %03d, loss %.5e)",
+                    epoch + 1,
+                    best_epoch,
+                    best_loss,
+                )
+                losses = losses[: epoch + 1]
+                break
+
+        # }}}
+
+        if callback is not None:
+            with torch.no_grad():
+                callback(epoch, compiled_model)  # ty: ignore[invalid-argument-type]
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        log.info(
+            "Restored best model from epoch %03d (loss %.5e)", best_epoch, best_loss
+        )
 
     return model, optimizer, losses
 
@@ -469,7 +511,7 @@ def build_latent_dmd(
             Xs[offset : offset + size] = x_latent[:, :-1, :].reshape(-1, d)
             Ys[offset : offset + size] = x_latent[:, 1:, :].reshape(-1, d)
 
-            offset += n
+            offset += size
 
         return Ys.T @ torch.linalg.pinv(Xs.T, rtol=1.0e-6)
 
@@ -516,6 +558,10 @@ def main(
     maxit: int = 128,
     epochs: int = 100,
     batch_size: int = 512,
+    window_size: int = 32,
+    nwindows: int = 16,
+    dmd_warmup_epochs: int = 0,
+    early_stop_patience: int = 0,
     overwrite: bool = False,
 ) -> int:
     from commonlib import determine_escape_radius
@@ -563,6 +609,28 @@ def main(
 
     # }}}
 
+    # {{{ plot predict
+
+    def plot_predict(epoch: int, m: DMDAutoencoder) -> None:
+        A_dmd = build_latent_dmd(m, x_train)
+        Zpredict = torch_predict(
+            m,
+            A_dmd,
+            bbox=bbox,
+            resolution=2 * resolution,
+            maxit=maxit,
+        )
+        mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
+
+        with figure(
+            basename.with_stem(f"{basename.stem}-predict-{epoch:04d}"),
+            overwrite=overwrite,
+        ) as fig:
+            ax = fig.gca()
+            ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
+
+    # }}}
+
     # {{{ train
 
     from torch import optim
@@ -572,8 +640,17 @@ def main(
         d,
         encoder_layer_sizes=(d, d // 2),
         decoder_layer_sizes=(d // 2, d),
+        device=device,
+        dtype=mat.dtype.to_real(),
     )
     optimizer = optim.AdamW(model.parameters(), lr=1.0e-4, weight_decay=1.0e-3)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        patience=3,
+        factor=0.3,
+        min_lr=1.0e-5,
+        cooldown=2,
+    )
 
     log.info("Network:\n%s", model)
 
@@ -584,24 +661,25 @@ def main(
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         losses = checkpoint["losses"]
-        A_dmd = checkpoint["A_dmd"]
-        Zmask = checkpoint["Zmask"]
+        loss_test = checkpoint.get("loss_test", 0.0)
+        zmask = checkpoint["zmask"]
+        A_dmd = checkpoint["a_dmd"]
 
-        compiled_model = cast("DMDAutoencoder", torch.compile(model))
+        model.eval()
     else:
-        from commonlib import generate_training_dataset
+        from commonlib import generate_timeseries_dataset
+        from nneuroutil.data import SlidingWindowDataset, random_split
 
         # {{{ generate dataset
 
-        X, _, Zlast = generate_training_dataset(
+        x, _, zmask = generate_timeseries_dataset(
             mat,
             bbox=bbox,
-            escape_radius=escape_radius,
             resolution=resolution,
             maxit=maxit,
-            in_dmd=True,
+            escape_radius=escape_radius,
         )
-        Zmask = torch.sum(Zlast.real**2 + Zlast.imag**2, dim=-1) < escape_radius**2
+        (x_train,), (x_validate,), (x_test,) = random_split((x,), (0.8, 0.1, 0.1))
 
         if device.type == "cuda":
             torch.cuda.empty_cache()
@@ -610,42 +688,71 @@ def main(
 
         # {{{ train
 
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            patience=3,
-            factor=0.3,
-            min_lr=1.0e-5,
-            cooldown=2,
-        )
-
-        target_scale = torch.mean(X.conj() * X).real.item()
+        target_scale = torch.mean(x_train.conj() * x_train).real.item()
         criterion = DMDLoss(scale=target_scale)
 
-        compiled_model, optimizer, losses = torch_train(
+        _, optimizer, losses = torch_train(
             model,
             criterion,
             optimizer,
             scheduler,
-            X,
+            x_train,
+            x_validate,
             epochs=epochs,
             batch_size=batch_size,
+            window_size=window_size,
+            nwindows=nwindows,
+            dmd_warmup_epochs=dmd_warmup_epochs,
+            patience_early_stop=early_stop_patience,
+            callback=plot_predict,
         )
-        A_dmd = build_latent_dmd(model, X)
+        A_dmd = build_latent_dmd(model, x_train)
+
+        model.train()
+        with torch.no_grad():
+            test_dataset = SlidingWindowDataset(
+                x_test, window_size=window_size, nwindows=nwindows
+            )
+            test_loader = DataLoader(
+                test_dataset,  # ty: ignore[invalid-argument-type]
+                batch_size=batch_size,
+            )
+
+            loss_test_epoch = torch.zeros(criterion.dim, device=device)
+            num_test_batches = 0
+
+            for (batch_x,) in test_loader:
+                predictions = model(batch_x)
+                loss = criterion(
+                    batch_x,
+                    y_out=predictions.y_out,
+                    x_latent=predictions.x_latent,
+                    xhat_latent=predictions.xhat_latent,
+                    yhat_out=predictions.yhat_out,
+                )
+
+                loss_test_epoch += loss.tensor()
+                num_test_batches += 1
+
+            loss_test = (loss_test_epoch / num_test_batches)[0].item()
+            log.info("[%03d/%03d] test %.5e", epochs, epochs, loss_test)
 
         # }}}
 
         # {{{ checkpoint
 
+        num_epochs_trained = len(losses)
         torch.save(
             {
                 # model
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "epochs": epochs,
+                "num_epochs_trained": num_epochs_trained,
                 "losses": losses,
-                "A_dmd": A_dmd,
-                "Zmask": Zmask,
-                "Zlast": Zlast,
+                "loss_test": loss_test,
+                "zmask": zmask,
+                "a_dmd": A_dmd,
                 # parameters
                 "inputfile": str(filename),
                 "dataidx": dataidx,
@@ -653,6 +760,8 @@ def main(
                 "escape_radius": escape_radius,
                 "resolution": resolution,
                 "maxit": maxit,
+                "dmd_warmup_epochs": dmd_warmup_epochs,
+                "early_stop_patience": early_stop_patience,
             },
             weightsfile,
         )
@@ -661,15 +770,13 @@ def main(
 
     # }}}
 
-    from nneuroutil.visualization import figure
-
     # {{{ plot fractal
 
     with figure(
         basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
     ) as fig:
         ax = fig.gca()
-        ax.imshow(Zmask.cpu().numpy(), extent=bbox, cmap="binary")
+        ax.imshow(zmask.cpu().numpy(), extent=bbox, cmap="binary")
 
     # }}}
 
@@ -680,11 +787,10 @@ def main(
     ) as fig:
         ax = fig.gca()
 
-        data = losses.cpu().numpy()
-        ax.semilogy(data[:, 0], label="Total")
-        ax.semilogy(data[:, 1], label="Reconstruction")
-        ax.semilogy(data[:, 2], label="Linearity")
-        ax.semilogy(data[:, 3], label="Prediction")
+        losses = losses.cpu().numpy()
+        ax.semilogy(losses[:, 0, 0], label="Train")
+        ax.semilogy(losses[:, 1, 0], label="Validation")
+        ax.axhline(loss_test, color="k", ls="--")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
         ax.legend()
@@ -694,7 +800,7 @@ def main(
     # {{{ plot prediction
 
     Zpredict = torch_predict(
-        compiled_model,
+        model,
         A_dmd,
         bbox=bbox,
         resolution=2 * resolution,
@@ -760,6 +866,18 @@ if __name__ == "__main__":
         help="Force overwrite of existing files",
     )
     parser.add_argument(
+        "--dmd-warmup-epochs",
+        type=int,
+        default=0,
+        help="Train this many epochs without DMD before enabling it (0 disables)",
+    )
+    parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=0,
+        help="Stop training loss does not improve for this many epochs (0 disables)",
+    )
+    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -779,6 +897,9 @@ if __name__ == "__main__":
                 args.filename,
                 dataidx=args.dataidx,
                 resolution=args.resolution,
+                dmd_warmup_epochs=args.dmd_warmup_epochs,
+                early_stop_patience=args.early_stop_patience,
+                outfile=args.outfile,
                 overwrite=args.force,
             )
         )
