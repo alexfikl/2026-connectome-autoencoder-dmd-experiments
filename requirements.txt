@@ -20,7 +20,9 @@ matplotlib==3.11.0
     #   scienceplots
 mdurl==0.1.2
     # via markdown-it-py
-nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@3f9664c461b963499d4a844220ca0bad37043a78#egg=nneuroutil
+networkx==3.6.1
+    # via fractal-dmd-autoencoder (pyproject.toml)
+nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@0def87765ef51a329f49ea45febca2f3bbe187de#egg=nneuroutil
     # via fractal-dmd-autoencoder (pyproject.toml)
 numpy==2.4.6 ; python_full_version < '3.12'
     # via
