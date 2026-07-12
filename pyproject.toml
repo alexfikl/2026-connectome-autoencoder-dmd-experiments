@@ -35,6 +35,7 @@ classifiers = [
 dependencies = [
     "array-api-compat",
     "matplotlib>=3.10",
+    "networkx>=3.5",
     "nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git#egg=nneuroutil",
     "numpy>=2",
     "rich",

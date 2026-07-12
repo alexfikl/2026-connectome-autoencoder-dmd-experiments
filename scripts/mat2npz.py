@@ -197,7 +197,7 @@ if __name__ == "__main__":
         "--outfile",
         type=pathlib.Path,
         default=None,
-        help="Basename for output files (named '{basename}-XX')",
+        help="Output file name",
     )
     parser.add_argument(
         "--force",
