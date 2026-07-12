@@ -89,6 +89,14 @@ def main(
     early_stop_patience: int = 0,
     overwrite: bool = False,
 ) -> int:
+    from commonlib import (
+        determine_escape_radius,
+        generate_timeseries_dataset,
+        make_timeseries_datasets,
+        torch_predict,
+        torch_train,
+    )
+
     device = torch.get_default_device()
     log.info("Device: %s", device)
 
@@ -120,8 +128,6 @@ def main(
         return 1
 
     if escape_radius is None:
-        from commonlib import determine_escape_radius
-
         escape_radius = determine_escape_radius(mat)
 
     if outfile is None:
@@ -137,8 +143,6 @@ def main(
     # {{{ plot predict
 
     def plot_predict(epoch: int, m: nn.Module) -> None:
-        from commonlib import torch_predict
-
         Zpredict = torch_predict(
             model,
             bbox=bbox,
@@ -181,12 +185,6 @@ def main(
         model.eval()
         plot_predict(epochs, model)
     else:
-        from commonlib import (
-            generate_timeseries_dataset,
-            make_timeseries_datasets,
-            torch_train,
-        )
-
         # {{{ generate dataset
 
         x, y, zmask = generate_timeseries_dataset(

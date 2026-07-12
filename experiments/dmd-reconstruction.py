@@ -7,8 +7,11 @@ import logging
 import pathlib
 
 import numpy as np
+import torch
 
-from nneuroutil.helpers import module_logger, tictoc
+from nneuroutil.helpers import FuzzyChoiceAction, module_logger, tictoc
+from nneuroutil.torch_extras import available_device_names, torch_default_device
+from nneuroutil.visualization import figure, make_colorbar_axes
 
 log = module_logger("lib.dmd")
 
@@ -30,14 +33,16 @@ def main(
     outfile: pathlib.Path | None = None,
     datakey: str = "matrices",
     dataidx: int = 5,
+    bbox: tuple[float, float, float, float] = (-0.04, 0.04, -0.04, 0.04),
     escape_radius: float | None = 100.0,
     resolution: int = 128,
     maxit: int = 192,
     overwrite: bool = False,
 ) -> int:
-    import torch
+    from commonlib import determine_escape_radius, dmd_predict, generate_dataset
 
-    from commonlib import determine_escape_radius, generate_dataset
+    device = torch.get_default_device()
+    log.info("Device: %s", device)
 
     # {{{ vallidate inputs
 
@@ -60,7 +65,7 @@ def main(
         log.error("Expected a 3 dimensional array: %s.", matrices.shape)
         return 1
 
-    mat = torch.from_numpy(matrices[dataidx])
+    mat = torch.from_numpy(matrices[dataidx]).to(torch.complex64).to(device)
     if mat.shape[0] != mat.shape[1]:
         log.error("Expected a square matrix: %s.", mat.shape)
         return 1
@@ -82,8 +87,6 @@ def main(
     # {{{ generate dataset
 
     d = mat.shape[0]
-    bbox = (-0.04, 0.04, -0.04, 0.04)
-
     with tictoc(f"Generated dataset on {bbox}"):
         Z, c = generate_dataset(
             mat,
@@ -99,8 +102,6 @@ def main(
     log.info("Max: %.5e (radius %.5e)", torch.max(torch.abs(Z)), escape_radius)
     log.info("Mean: %.5e", torch.mean(torch.abs(Z)))
 
-    from nneuroutil.visualization import figure, make_colorbar_axes
-
     with figure(basename.with_stem(f"{basename.stem}-dataset")) as fig:
         ax = fig.gca()
         ax.imshow(mask, extent=bbox, cmap="binary")
@@ -115,7 +116,7 @@ def main(
     #   3. Reshape and get the `X1, X2` blocks for DMD
 
     C = torch.tile(c[None, :, :, None], (maxit, 1, 1, 1))
-    X = torch.concatenate([Z, C], axis=3)  # ty: ignore[no-matching-overload]
+    X = torch.concatenate([Z, C], dim=3)
     X = X[:, mask, :]
     X = X.reshape(maxit, -1)
 
@@ -148,8 +149,6 @@ def main(
     #   - Why is the "prediction" a lot slower than "generate_dataset"?
     #   - What's a good tolerance for the escaped points based on the error?
     #   - bumping the resolution to 128x128 seems to fail (everybody escapes?)
-
-    from commonlib import dmd_predict
 
     with tictoc("Predicting"):
         Zpredict = dmd_predict(model, Z, bbox=bbox)
@@ -214,6 +213,13 @@ if __name__ == "__main__":
         help="Basename for output files (named '{basename}-XX')",
     )
     parser.add_argument(
+        "--device",
+        action=FuzzyChoiceAction,
+        choices=sorted(available_device_names()),
+        default="cpu",
+        help="The default deviced used by the framework",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Force overwrite of existing files",
@@ -229,11 +235,15 @@ if __name__ == "__main__":
     if not args.quiet:
         log.setLevel(logging.INFO)
 
-    raise SystemExit(
-        main(
-            args.filename,
-            dataidx=args.dataidx,
-            resolution=args.resolution,
-            overwrite=args.force,
+    with torch_default_device(args.device):
+        # NOTE: use TF32 for matrix multiplication (should be faster, similar precision)
+        torch.set_float32_matmul_precision("high")
+
+        raise SystemExit(
+            main(
+                args.filename,
+                dataidx=args.dataidx,
+                resolution=args.resolution,
+                overwrite=args.force,
+            )
         )
-    )
