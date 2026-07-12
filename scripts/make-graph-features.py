@@ -89,7 +89,7 @@ def compute_graph_measures(mat: Array2D[np.floating]) -> Array1D[np.floating]:
     nfeatures = len(MEASURE_INDEX)
     result = np.zeros(nfeatures, dtype=mat.dtype)
 
-    # {{{ signed measures (G_all — absolute weights)
+    # {{{ signed measures (G_all - absolute weights)
 
     # Strength: average weighted degree
     strengths = np.array([d for _, d in G_all.degree(weight="weight")])
@@ -106,13 +106,26 @@ def compute_graph_measures(mat: Array2D[np.floating]) -> Array1D[np.floating]:
         G_all, communities, weight="weight"
     )
 
+    # Participation Coefficient - not implemented
+    result[MEASURE_INDEX["Participation Coefficient"]] = 0.0
+
+    # Gateway Coefficient - not implemented
+    result[MEASURE_INDEX["Gateway Coefficient"]] = 0.0
+
     result[MEASURE_INDEX["Local Assortativity"]] = nx.degree_assortativity_coefficient(
         G_all, weight="weight"
     )
 
+    # Diversity Coefficient - not implemented
+    result[MEASURE_INDEX["Diversity Coefficient"]] = 0.0
+
     # Eigenvector Centrality
     ec = nx.eigenvector_centrality(G_all, weight="weight", max_iter=1000)
     result[MEASURE_INDEX["Eigenvector Centrality"]] = np.mean(list(ec.values()))
+
+    # Rich-club Coefficient (mean across degrees)
+    rc = nx.rich_club_coefficient(G_all, normalized=True, seed=42)
+    result[MEASURE_INDEX["Rich-club Coefficient"]] = np.mean(list(rc.values()))
 
     # Transitivity (unweighted)
     result[MEASURE_INDEX["Transitivity"]] = nx.transitivity(G_all)
