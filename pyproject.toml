@@ -115,3 +115,4 @@ lint.isort.required-imports = [
 
 [tool.typos]
 default.extend-words.yhat = "yhat"
+default.extend-words.ND = "ND"

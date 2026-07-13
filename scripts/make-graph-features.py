@@ -167,6 +167,8 @@ def compute_graph_measures(
         result[MEASURE_INDEX["Small-worldness (P)"]] = nx.sigma(
             G_pos, niter=100, nrand=10, seed=42
         )
+    else:
+        log.error("Graph has no positive edges")
 
     # }}}
 
@@ -190,6 +192,8 @@ def compute_graph_measures(
         result[MEASURE_INDEX["Small-worldness (N)"]] = nx.sigma(
             G_neg, niter=100, nrand=10, seed=42
         )
+    else:
+        log.error("Graph has no negative edges")
 
     # }}}
 
