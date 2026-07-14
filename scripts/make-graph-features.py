@@ -71,6 +71,7 @@ def compute_graph_measures(mat: Array2D[np.floating]) -> Array1D[np.floating]:
     for u, v, d in G.edges(data=True):
         if d["weight"] > 0:
             G[u][v]["distance"] = 1.0 / d["weight"]
+    log.info("        Nodes %d Edges %d", len(G.nodes()), len(G.edges()))
 
     nfeatures = len(MEASURE_INDEX)
     result = np.zeros(nfeatures, dtype=mat.dtype)
@@ -184,6 +185,7 @@ def make_graph_features(
 
     datasets = np.zeros((3, nsamples, nfeatures), dtype=np.float64)
     for i, mat in enumerate(matrices):
+        log.info("[%02d/%0d] Computing graph features.", i + 1, nsamples)
         # ensure no self-connections
         mat_i = mat.copy()
         np.fill_diagonal(mat_i, 0.0)
@@ -192,6 +194,7 @@ def make_graph_features(
         amat_i = np.abs(mat_i)
         if density is not None:
             cutoff = np.quantile(amat_i[amat_i > eps], 1 - density)
+            log.info("        Cutoff %.5e Under %d", cutoff, np.sum(amat_i < cutoff))
             mat_i = np.where(amat_i > cutoff, mat_i, 0.0)
 
         # absolute value
@@ -244,7 +247,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--density",
         type=float,
-        default=None,
+        default=0.95,
         help="Proportional threshold: keep top fraction of surviving edges (e.g. 0.20)",
     )
     parser.add_argument(
