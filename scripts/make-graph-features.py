@@ -38,7 +38,6 @@ Array2D = TypeAliasType(
 
 
 MEASURE_INDEX = {
-    # signed
     "Strength": 0,
     "Clustering Coefficient": 1,
     "Modularity": 2,
@@ -49,18 +48,11 @@ MEASURE_INDEX = {
     "Eigenvector Centrality": 7,
     "Rich-club Coefficient": 8,
     "Transitivity": 9,
-    # unsigned - positive
-    "Characteristic Path Length (P)": 10,
-    "Global Efficiency (P)": 11,
-    "Local Efficiency (P)": 12,
-    "Betweenness Centrality (P)": 13,
-    "Small-worldness (P)": 14,
-    # unsigned - negative
-    "Characteristic Path Length (N)": 15,
-    "Global Efficiency (N)": 16,
-    "Local Efficiency (N)": 17,
-    "Betweenness Centrality (N)": 18,
-    "Small-worldness (N)": 19,
+    "Characteristic Path Length": 10,
+    "Global Efficiency": 11,
+    "Local Efficiency": 12,
+    "Betweenness Centrality": 13,
+    "Small-worldness": 14,
 }
 assert len(set(MEASURE_INDEX.keys())) - len(set(MEASURE_INDEX.values())) == 0, (
     "Indices do not match"
@@ -70,55 +62,32 @@ assert len(set(MEASURE_INDEX.keys())) - len(set(MEASURE_INDEX.values())) == 0, (
 # {{{ compute_graph_measures
 
 
-def compute_graph_measures(
-    mat: Array2D[np.floating],
-    *,
-    percentile: float = 0.95,
-    eps: float | None = None,
-) -> Array1D[np.floating]:
+def compute_graph_measures(mat: Array2D[np.floating]) -> Array1D[np.floating]:
     import networkx as nx
 
-    if eps is None:
-        eps = 10.0 * np.finfo(mat.dtype).eps
-
-    # ensure there are no self-connections
-    mat = mat.copy()
-    np.fill_diagonal(mat, 0.0)
-
-    # remove noise
-    amat = np.abs(mat)
-    cutoff = np.quantile(amat[amat > eps], percentile)
-    mat = np.where(amat > cutoff, mat, 0.0)
-
     # construct graphs
-    G_all = nx.from_numpy_array(np.abs(mat))
-    G_pos = nx.from_numpy_array(np.where(mat > 0, mat, 0.0))
-    G_neg = nx.from_numpy_array(np.where(mat < 0, -mat, 0.0))
-
-    # distance = 1/weight for some measures (shortest path on cost)
-    for G in [G_all, G_pos, G_neg]:
-        for u, v, d in G.edges(data=True):
-            if d["weight"] > 0:
-                G[u][v]["distance"] = 1.0 / d["weight"]
+    # NOTE: distance = 1/weight for some measures (shortest path on cost)
+    G = nx.from_numpy_array(np.abs(mat))
+    for u, v, d in G.edges(data=True):
+        if d["weight"] > 0:
+            G[u][v]["distance"] = 1.0 / d["weight"]
 
     nfeatures = len(MEASURE_INDEX)
     result = np.zeros(nfeatures, dtype=mat.dtype)
 
-    # {{{ signed measures (G_all - absolute weights)
-
     # Strength: average weighted degree
-    strengths = np.array([d for _, d in G_all.degree(weight="weight")])
+    strengths = np.array([d for _, d in G.degree(weight="weight")])
     result[MEASURE_INDEX["Strength"]] = np.mean(strengths)
 
     # Clustering Coefficient
     result[MEASURE_INDEX["Clustering Coefficient"]] = nx.average_clustering(
-        G_all, weight="weight"
+        G, weight="weight"
     )
 
     # Modularity
-    communities = nx.community.greedy_modularity_communities(G_all, weight="weight")
+    communities = nx.community.louvain_communities(G, weight="weight", seed=42)
     result[MEASURE_INDEX["Modularity"]] = nx.community.modularity(
-        G_all, communities, weight="weight"
+        G, communities, weight="weight"
     )
 
     # Participation Coefficient - not implemented
@@ -128,74 +97,40 @@ def compute_graph_measures(
     result[MEASURE_INDEX["Gateway Coefficient"]] = 0.0
 
     result[MEASURE_INDEX["Assortativity"]] = nx.degree_assortativity_coefficient(
-        G_all, weight="weight"
+        G, weight="weight"
     )
 
     # Diversity Coefficient - not implemented
     result[MEASURE_INDEX["Diversity Coefficient"]] = 0.0
 
     # Eigenvector Centrality
-    ec = nx.eigenvector_centrality(G_all, weight="weight", max_iter=1000)
+    ec = nx.eigenvector_centrality(G, weight="weight", max_iter=1000)
     result[MEASURE_INDEX["Eigenvector Centrality"]] = np.mean(list(ec.values()))
 
     # Rich-club Coefficient (mean across degrees)
-    rc = nx.rich_club_coefficient(G_all, normalized=True, seed=42, weight="weight")
+    rc = nx.rich_club_coefficient(G, normalized=False)
     result[MEASURE_INDEX["Rich-club Coefficient"]] = np.mean(list(rc.values()))
 
     # Transitivity (unweighted)
-    result[MEASURE_INDEX["Transitivity"]] = nx.transitivity(G_all)
+    result[MEASURE_INDEX["Transitivity"]] = nx.transitivity(G)
 
-    # }}}
+    # Characteristic Path Length
+    result[MEASURE_INDEX["Characteristic Path Length"]] = (
+        nx.average_shortest_path_length(G, weight="distance")
+    )
 
-    # {{{ unsigned positive measures (G_pos)
+    # Global Efficiency
+    result[MEASURE_INDEX["Global Efficiency"]] = nx.global_efficiency(G)
 
-    if G_pos.number_of_edges() > 0:
-        result[MEASURE_INDEX["Characteristic Path Length (P)"]] = (
-            nx.average_shortest_path_length(G_pos, weight="distance")
-        )
+    # Local Efficiency
+    result[MEASURE_INDEX["Local Efficiency"]] = nx.local_efficiency(G)
 
-        result[MEASURE_INDEX["Global Efficiency (P)"]] = nx.global_efficiency(
-            G_pos, weight="distance"
-        )
-        result[MEASURE_INDEX["Local Efficiency (P)"]] = nx.local_efficiency(
-            G_pos, weight="distance"
-        )
+    # Betweenness Centrality (mean across nodes)
+    bc = nx.betweenness_centrality(G, weight="distance", normalized=True)
+    result[MEASURE_INDEX["Betweenness Centrality"]] = np.mean(list(bc.values()))
 
-        bc = nx.betweenness_centrality(G_pos, weight="distance", normalized=True)
-        result[MEASURE_INDEX["Betweenness Centrality (P)"]] = np.mean(list(bc.values()))
-
-        result[MEASURE_INDEX["Small-worldness (P)"]] = nx.sigma(
-            G_pos, niter=100, nrand=10, seed=42
-        )
-    else:
-        log.error("Graph has no positive edges")
-
-    # }}}
-
-    # {{{ unsigned negative measures (G_neg)
-
-    if G_neg.number_of_edges() > 0:
-        result[MEASURE_INDEX["Characteristic Path Length (N)"]] = (
-            nx.average_shortest_path_length(G_neg, weight="distance")
-        )
-
-        result[MEASURE_INDEX["Global Efficiency (N)"]] = nx.global_efficiency(
-            G_neg, weight="distance"
-        )
-        result[MEASURE_INDEX["Local Efficiency (N)"]] = nx.local_efficiency(
-            G_neg, weight="distance"
-        )
-
-        bc = nx.betweenness_centrality(G_neg, weight="distance", normalized=True)
-        result[MEASURE_INDEX["Betweenness Centrality (N)"]] = np.mean(list(bc.values()))
-
-        result[MEASURE_INDEX["Small-worldness (N)"]] = nx.sigma(
-            G_neg, niter=100, nrand=10, seed=42
-        )
-    else:
-        log.error("Graph has no negative edges")
-
-    # }}}
+    # Small-worldness (requires connected graph)
+    result[MEASURE_INDEX["Small-worldness"]] = nx.sigma(G, niter=1, nrand=1, seed=42)
 
     return result
 
@@ -211,7 +146,8 @@ def make_graph_features(
     *,
     outfile: pathlib.Path | None = None,
     key: str = "matrices",
-    percentile: float = 0.95,
+    eps: float | None = None,
+    density: float | None = None,
     overwrite: bool = False,
 ) -> int:
     if not filename.exists():
@@ -240,12 +176,34 @@ def make_graph_features(
         log.error("Expected a 3 dimensional array: %s.", matrices.shape)
         return 1
 
+    if eps is None:
+        eps = 10.0 * np.finfo(matrices.dtype).eps
+
     nsamples = matrices.shape[0]
     nfeatures = len(MEASURE_INDEX)
 
-    datasets = np.zeros((nsamples, nfeatures), dtype=np.float64)
+    datasets = np.zeros((3, nsamples, nfeatures), dtype=np.float64)
     for i, mat in enumerate(matrices):
-        datasets[i] = compute_graph_measures(mat)
+        # ensure no self-connections
+        mat_i = mat.copy()
+        np.fill_diagonal(mat_i, 0.0)
+
+        # thresholding
+        amat_i = np.abs(mat_i)
+        if density is not None:
+            cutoff = np.quantile(amat_i[amat_i > eps], 1 - density)
+            mat_i = np.where(amat_i > cutoff, mat_i, 0.0)
+
+        # absolute value
+        datasets[0, i] = compute_graph_measures(amat_i)
+
+        # positive only
+        amat_i = np.where(mat_i > 0.0, mat_i, 0.0)
+        datasets[1, i] = compute_graph_measures(amat_i)
+
+        # negative only
+        amat_i = np.where(mat_i < 0.0, -mat_i, 0.0)
+        datasets[2, i] = compute_graph_measures(amat_i)
 
     np.savez(outfile, datasets=datasets, descr=MEASURE_INDEX)
     log.info("Written graph measures to file: '%s'.", outfile)
@@ -284,10 +242,10 @@ if __name__ == "__main__":
         help="Name of the variable in the file to use",
     )
     parser.add_argument(
-        "--percentile",
+        "--density",
         type=float,
-        default=0.95,
-        help="Remove values that are in the percentile",
+        default=None,
+        help="Proportional threshold: keep top fraction of surviving edges (e.g. 0.20)",
     )
     parser.add_argument(
         "--force",
@@ -309,7 +267,7 @@ if __name__ == "__main__":
         make_graph_features(
             args.filename,
             key=args.key,
-            percentile=args.percentile,
+            density=args.density,
             outfile=args.outfile,
             overwrite=args.force,
         )
