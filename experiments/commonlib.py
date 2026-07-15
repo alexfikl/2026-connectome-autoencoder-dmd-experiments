@@ -7,7 +7,7 @@ import math
 import os
 import pathlib
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import array_api_compat
 import numpy as np
@@ -293,7 +293,11 @@ def make_timeseries_datasets(
     *,
     rng: np.random.Generator | None = None,
     xp: Any = None,
-) -> tuple[tuple[Array2D, Array2D], tuple[Array2D, Array2D], tuple[Array2D, Array2D]]:
+) -> tuple[
+    tuple[Array2D, Array2D],
+    tuple[Array2D, Array2D],
+    tuple[Array2D, Array2D],
+]:
     from nneuroutil.data import random_split
 
     if lengths is None:
@@ -316,7 +320,12 @@ def make_timeseries_datasets(
     log.info("    Validation:   %d", len(validation[0]))
     log.info("    Testing:      %d", len(testing[0]))
 
-    return training, validation, testing
+    return cast(
+        tuple[
+            tuple[Array2D, Array2D], tuple[Array2D, Array2D], tuple[Array2D, Array2D]
+        ],
+        (training, validation, testing),
+    )
 
 
 # }}}
@@ -493,7 +502,7 @@ def torch_predict(
     resolution: int = 128,
     maxit: int = 128,
     device: Any = None,
-) -> Array3D:
+) -> torch.Tensor:
     import array_api_compat
     import torch
 

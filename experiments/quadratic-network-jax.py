@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -395,8 +395,15 @@ def main(
             maxit=maxit,
             escape_radius=escape_radius,
         )
-        xy_train, xy_validate, xy_test = make_timeseries_datasets(
-            x, y, (0.8, 0.1, 0.1), rng=np.random.default_rng(42)
+        xy_train, xy_validate, xy_test = cast(
+            tuple[
+                tuple[jax.Array, jax.Array],
+                tuple[jax.Array, jax.Array],
+                tuple[jax.Array, jax.Array],
+            ],
+            make_timeseries_datasets(
+                x, y, (0.8, 0.1, 0.1), rng=np.random.default_rng(42)
+            ),
         )
 
         # }}}

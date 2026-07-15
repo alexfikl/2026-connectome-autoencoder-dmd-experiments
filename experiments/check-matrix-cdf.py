@@ -5,11 +5,11 @@ from __future__ import annotations
 
 import logging
 import pathlib
+from typing import Any, TypeAlias
 
 import numpy as np
 
 from nneuroutil.helpers import module_logger
-from nneuroutil.typing import Array1D, ArrayND
 
 log = module_logger("lib.check_matrix_cdf")
 
@@ -23,6 +23,9 @@ Example:
 """
 
 DEFAULT_PERCENTILES = (0.80, 0.85, 0.90, 0.95, 0.99)
+
+Array1D: TypeAlias = np.ndarray[tuple[int], np.dtype[np.floating[Any]]]
+ArrayND: TypeAlias = np.ndarray[tuple[int, ...], np.dtype[np.floating[Any]]]
 
 
 def compute_cdf(matrices: ArrayND) -> tuple[Array1D, Array1D]:

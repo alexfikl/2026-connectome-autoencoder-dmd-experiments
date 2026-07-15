@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections.abc import Callable
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import torch
@@ -15,7 +15,6 @@ from torch.utils.data import DataLoader
 
 from nneuroutil.helpers import FuzzyChoiceAction, TicTocTimer, module_logger
 from nneuroutil.torch_extras import available_device_names, torch_default_device
-from nneuroutil.typing import Array3D
 from nneuroutil.visualization import figure
 
 log = module_logger("lib.autoencoder_network")
@@ -524,7 +523,7 @@ def torch_predict(
     resolution: int = 128,
     maxit: int = 128,
     device: Any = None,
-) -> Array3D:
+) -> torch.Tensor:
     import torch
 
     d = int(model.input_size)
@@ -672,12 +671,15 @@ def main(
 
         # {{{ generate dataset
 
-        x, _, zmask = generate_timeseries_dataset(
-            mat,
-            bbox=bbox,
-            resolution=resolution,
-            maxit=maxit,
-            escape_radius=escape_radius,
+        x, _, zmask = cast(
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+            generate_timeseries_dataset(
+                mat,
+                bbox=bbox,
+                resolution=resolution,
+                maxit=maxit,
+                escape_radius=escape_radius,
+            ),
         )
         (x_train,), (x_validate,), (x_test,) = random_split((x,), (0.8, 0.1, 0.1))
 

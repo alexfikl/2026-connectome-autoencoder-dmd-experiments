@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -234,14 +234,24 @@ def main(
 
         # {{{ generate dataset
 
-        x, y, zmask = generate_timeseries_dataset(
-            mat,
-            bbox=bbox,
-            resolution=resolution,
-            maxit=maxit,
-            escape_radius=escape_radius,
+        x, y, zmask = cast(
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+            generate_timeseries_dataset(
+                mat,
+                bbox=bbox,
+                resolution=resolution,
+                maxit=maxit,
+                escape_radius=escape_radius,
+            ),
         )
-        xy_train, xy_validate, xy_test = make_timeseries_datasets(x, y, (0.8, 0.1, 0.1))
+        xy_train, xy_validate, xy_test = cast(
+            tuple[
+                tuple[torch.Tensor, torch.Tensor],
+                tuple[torch.Tensor, torch.Tensor],
+                tuple[torch.Tensor, torch.Tensor],
+            ],
+            make_timeseries_datasets(x, y, (0.8, 0.1, 0.1)),
+        )
 
         # }}}
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+from typing import cast
 
 import numpy as np
 import torch
@@ -88,18 +89,25 @@ def main(
 
     d = mat.shape[0]
     with tictoc(f"Generated dataset on {bbox}"):
-        Z, c = generate_dataset(
-            mat,
-            bbox=bbox,
-            resolution=resolution,
-            escape_radius=escape_radius,
-            maxit=maxit,
+        Z, c = cast(
+            tuple[torch.Tensor, torch.Tensor],
+            generate_dataset(
+                mat,
+                bbox=bbox,
+                resolution=resolution,
+                escape_radius=escape_radius,
+                maxit=maxit,
+            ),
         )
 
     mask = torch.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, dim=-1) < escape_radius**2
     log.info("Points:")
     log.info("Converged: %d", torch.sum(mask))
-    log.info("Max: %.5e (radius %.5e)", torch.max(torch.abs(Z)), escape_radius)
+    log.info(
+        "Max: %.5e (radius %.5e)",
+        torch.max(torch.abs(Z)),
+        escape_radius,
+    )
     log.info("Mean: %.5e", torch.mean(torch.abs(Z)))
 
     with figure(basename.with_stem(f"{basename.stem}-dataset")) as fig:
@@ -151,7 +159,7 @@ def main(
     #   - bumping the resolution to 128x128 seems to fail (everybody escapes?)
 
     with tictoc("Predicting"):
-        Zpredict = dmd_predict(model, Z, bbox=bbox)
+        Zpredict = cast(torch.Tensor, dmd_predict(model, Z, bbox=bbox))
 
     # NOTE: this is a linear operator, so we expect everybody to converge
     escaped = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=0) < escape_radius**2
