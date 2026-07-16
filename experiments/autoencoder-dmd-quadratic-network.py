@@ -691,7 +691,8 @@ def main(
                 mat,
                 bbox=bbox,
                 resolution=resolution,
-                maxit=maxit,
+                # NOTE: we add 1 so that x.shape == (n, maxit, 2d)
+                maxit=maxit + 1,
                 escape_radius=escape_radius,
             ),
         )
