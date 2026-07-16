@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 import array_api_compat
 import numpy as np
 
+from nneuroutil.array_api_extras import interleave
 from nneuroutil.data import SlicedDataLoader
 from nneuroutil.dmd import DMD
 from nneuroutil.helpers import TicTocTimer, module_logger, tictoc
@@ -195,14 +196,14 @@ def post_process_dataset(
     z: Array4D,
     escape_radius: float,
     *,
-    stack_real_imaginary: bool = True,
+    interleaved: bool = True,
     xp: Any = None,
 ) -> tuple[Array3D, Array2D]:
     """Post-process the dataset returned from :func:`generate_dataset`.
 
     * Mask out all the escaped points.
     * Permute the array so that it has shape ``(ntrajectories, maxit, d)``.
-    * Stack into a real array of shape ``(ntrajectories, maxit, 2 d)``.
+    * Stack/Interleave into a real array of shape ``(ntrajectories, maxit, 2 d)``.
 
     :arg z: a complex tensor of shape ``(maxit, resolution, resolution, d)``.
     :arg c: a complex tensor of shape ``(resolution, resolution)``
@@ -222,8 +223,10 @@ def post_process_dataset(
     # 2. permute
     z = xp.permute_dims(z, (1, 0, 2))
 
-    # 3. stack
-    if stack_real_imaginary:
+    # 3. interleave
+    if interleaved:
+        z = interleave(z.real, z.imag, axis=-1)
+    else:
         z = xp.concat([z.real, z.imag], axis=-1)
 
     return z, mask
@@ -266,16 +269,15 @@ def generate_timeseries_dataset(
         )
 
     # only keep converged points
-    z, mask = post_process_dataset(z, escape_radius, stack_real_imaginary=True, xp=xp)
+    z, mask = post_process_dataset(z, escape_radius, interleaved=True, xp=xp)
     c = c[mask][:, None, None]
 
     # create datasets
-    d, _ = mat.shape
     x = z[:, :-1, :]
-    y = xp.concat([z[:, 1:, :d] - c.real, z[:, 1:, d:] - c.imag], axis=-1)
+    y = xp.concat([z[:, 1:, ::2] - c.real, z[:, 1:, 1::2] - c.imag], axis=-1)
     assert x.shape == y.shape
 
-    zabs = xp.sqrt(z[:, :, :d] ** 2 + z[:, :, d:] ** 2)
+    zabs = xp.sqrt(z[:, :, ::2] ** 2 + z[:, :, 1::2] ** 2)
     log.info("Dataset:")
     log.info("    Converged:    %d/%d", xp.sum(mask), math.prod(mask.shape))
     log.info("    Size:         %s", z.shape)
@@ -525,10 +527,10 @@ def torch_predict(
 
         for _ in range(1, maxit):
             Az = model(z)
-            z[:, :, :d] = Az[:, :, :d] + c.real
-            z[:, :, d:] = Az[:, :, d:] + c.imag
+            z[:, :, ::2] = Az[:, :, ::2] + c.real
+            z[:, :, 1::2] = Az[:, :, 1::2] + c.imag
 
-    return torch.complex(z[:, :, :d], z[:, :, d:])
+    return torch.view_as_complex(z.reshape(*z.shape[:-1], -1, 2))
 
 
 # }}}

@@ -60,10 +60,11 @@ class QuadraticNetwork(nn.Module):
                 input_size,
                 output_size,
                 bias=False,
+                interleaved=True,
                 device=device,
                 dtype=dtype,
             ),
-            ComplexQuadratic(),
+            ComplexQuadratic(interleaved=True),
             Bias(2 * output_size, device=device, dtype=dtype),
         )
 
