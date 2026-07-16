@@ -66,7 +66,7 @@ class Autoencoder(nn.Module):
         ) -> nn.Module:
             if use_complex_linear:
                 layer = ComplexLinear(
-                    n_in, n_out, bias=bias, device=device, dtype=dtype
+                    n_in, n_out, bias=bias, interleaved=True, device=device, dtype=dtype
                 )
             else:
                 layer = nn.Linear(
