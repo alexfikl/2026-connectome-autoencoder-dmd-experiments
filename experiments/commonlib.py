@@ -274,7 +274,7 @@ def generate_timeseries_dataset(
 
     # create datasets
     x = z[:, :-1, :]
-    y = xp.concat([z[:, 1:, ::2] - c.real, z[:, 1:, 1::2] - c.imag], axis=-1)
+    y = interleave(z[:, 1:, ::2] - c.real, z[:, 1:, 1::2] - c.imag, axis=-1)
     assert x.shape == y.shape
 
     zabs = xp.sqrt(z[:, :, ::2] ** 2 + z[:, :, 1::2] ** 2)
