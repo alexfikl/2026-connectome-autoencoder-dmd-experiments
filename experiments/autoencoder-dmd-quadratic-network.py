@@ -672,6 +672,7 @@ def main(
             maxit=maxit,
         )
         mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
+        log.info("    Converged:    %d/%d", torch.sum(mask), mask.numel())
 
         with figure(
             basename.with_stem(f"{basename.stem}-predict-{epoch:04d}"),
