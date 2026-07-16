@@ -72,11 +72,12 @@ class QuadraticNetwork(nnx.Module):
                 input_size,
                 output_size,
                 use_bias=False,
+                interleaved=True,
                 kernel_init=quadratic_uniform(),
                 dtype=dtype,
                 rngs=rngs,
             ),
-            ComplexQuadratic(),
+            ComplexQuadratic(interleaved=True),
             Bias(2 * output_size, dtype=dtype, rngs=rngs),
         )
 
@@ -258,10 +259,10 @@ def flax_predict(
 
     for _ in range(1, maxit):
         Az = model(z)
-        z = z.at[:, :, :d].set(Az[:, :, :d] + c.real)
-        z = z.at[:, :, d:].set(Az[:, :, d:] + c.imag)
+        z = z.at[:, :, ::2].set(Az[:, :, ::2] + c.real)
+        z = z.at[:, :, 1::2].set(Az[:, :, 1::2] + c.imag)
 
-    return z[:, :, :d] + 1j * z[:, :, d:]
+    return z[:, :, ::2] + 1j * z[:, :, 1::2]
 
 
 # }}}
