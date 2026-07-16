@@ -114,7 +114,7 @@ class DMDAutoencoder(nn.Module):
         encoder_layer_sizes: int | tuple[int, ...] | None = None,
         decoder_layer_sizes: int | tuple[int, ...] | None = None,
         dmd_enabled: bool = False,
-        eps: float = 1.0e-3,
+        eps: float = 1.0e-4,
         alpha: float | None = None,
         device: str | torch.device | None = None,
         dtype: Any = None,
@@ -420,10 +420,11 @@ def torch_train(
 
                 log.info(
                     r"    \[batch %03d] "
-                    r"lam (%.3e, %.3e) rec %.3e lin %.3e pre %.3e grad %.3e",
+                    r"lam (%.3e, %.3e) total %.3e rec %.3e lin %.3e pre %.3e grad %.3e",
                     i,
                     eigmax.real,
                     eigmax.imag,
+                    loss.total.item(),
                     loss.loss_rec.item(),
                     loss.loss_lin.item(),
                     loss.loss_pre.item(),
@@ -468,17 +469,13 @@ def torch_train(
         losses[epoch, 1] = loss_validate
 
         log.info(
-            "[%03d/%03d] "
-            "t_rec %.3e t_lin %.3e t_pre %.3e "
-            "v_rec %.3e v_lin %.3e v_pre %.3e (%s)",
+            "[%03d/%03d] total %.5e rec %.3e lin %.3e pre %.3e (%s)",
             epoch + 1,
             epochs,
+            loss_train[0],
             loss_train[1],
             loss_train[2],
             loss_train[3],
-            loss_validate[1],
-            loss_validate[2],
-            loss_validate[3],
             timer.short(),
         )
 
