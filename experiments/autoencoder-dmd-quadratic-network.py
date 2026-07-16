@@ -775,7 +775,7 @@ def main(
             patience_early_stop=early_stop_patience,
             callback=plot_predict,
         )
-        A_dmd = build_latent_dmd(model, x_train)
+        A_dmd = build_latent_dmd(model, x_train[:, :, :-2])
 
         model.train()
         with torch.no_grad():
