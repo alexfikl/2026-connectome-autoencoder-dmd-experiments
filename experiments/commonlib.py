@@ -450,7 +450,7 @@ def torch_train(
             epochs,
             loss_train,
             loss_validate,
-            timer,
+            timer.short(),
         )
 
         losses[epoch, 0] = loss_train.item()

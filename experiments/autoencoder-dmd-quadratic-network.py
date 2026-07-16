@@ -420,7 +420,7 @@ def torch_train(
 
                 log.info(
                     r"    \[batch %03d] "
-                    r"lam %.5e+%.5e rec %.5e lin %.5e pre %.5e grad %.5e",
+                    r"lam (%.3e, %.3e) rec %.3e lin %.3e pre %.3e grad %.3e",
                     i,
                     eigmax.real,
                     eigmax.imag,
@@ -469,8 +469,8 @@ def torch_train(
 
         log.info(
             "[%03d/%03d] "
-            "t_rec %.5e t_lin %.5e t_pre %.5e "
-            "v_rec %.5e v_lin %.5e v_pre %.5e (%s)",
+            "t_rec %.3e t_lin %.3e t_pre %.3e "
+            "v_rec %.3e v_lin %.3e v_pre %.3e (%s)",
             epoch + 1,
             epochs,
             loss_train[1],
@@ -479,7 +479,7 @@ def torch_train(
             loss_validate[1],
             loss_validate[2],
             loss_validate[3],
-            timer,
+            timer.short(),
         )
 
         # {{{ best model and early stopping
