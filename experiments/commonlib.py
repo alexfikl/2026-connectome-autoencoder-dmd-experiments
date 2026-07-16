@@ -197,15 +197,18 @@ def post_process_dataset(
     escape_radius: float,
     *,
     interleaved: bool = True,
+    min_escape_iters: int | None = None,
     xp: Any = None,
 ) -> tuple[Array3D, Array2D]:
     """Post-process the dataset returned from :func:`generate_dataset`.
 
-    * Mask out all the escaped points.
+    * Mask out points that escape before *min_escape_iters*.
     * Permute the array so that it has shape ``(ntrajectories, maxit, d)``.
     * Stack/Interleave into a real array of shape ``(ntrajectories, maxit, 2 d)``.
 
     :arg z: a complex tensor of shape ``(maxit, resolution, resolution, d)``.
+    :arg min_escape_iters: Minimum iterations before escape.  ``None`` keeps
+        only fully converged points (escaped at the final timestep).
     :arg c: a complex tensor of shape ``(resolution, resolution)``
     :returns: a tuple of ``(z, mask)`` of the post-processed dataset and the mask
         that was used to compute it.
@@ -216,8 +219,19 @@ def post_process_dataset(
     if escape_radius <= 0:
         raise ValueError(f"'escape_radius' must be positive: {escape_radius}")
 
+    maxit = z.shape[0]
+
+    if min_escape_iters is None:
+        min_escape_iters = maxit
+
     # 1. mask
-    mask = xp.sum(z[-1].real ** 2 + z[-1].imag ** 2, axis=-1) < escape_radius**2
+    sqr_norm = xp.sum(xp.real(z) ** 2 + xp.imag(z) ** 2, axis=-1)
+    escaped = sqr_norm > escape_radius**2
+    never_escaped = xp.all(~escaped, axis=0)
+    first_escaped = xp.argmax(escaped.astype(xp.int32), axis=0)
+    escape_time = xp.where(never_escaped, maxit, first_escaped)
+
+    mask = escape_time >= min_escape_iters
     z = z[:, mask, :]
 
     # 2. permute
@@ -245,9 +259,13 @@ def generate_timeseries_dataset(
     escape_radius: float = 100.0,
     resolution: int = 128,
     maxit: int = 128,
+    min_escape_iters: int | None = None,
     xp: Any = None,
 ) -> tuple[Array3D, Array3D, Array2D]:
     """
+    :arg min_escape_iters: Minimum iterations before a trajectory is allowed
+        to escape.  Points escaping earlier are excluded.  ``None`` keeps
+        only fully converged points (escaped at the final timestep).
     :returns: a tuple ``(x, y, mask)``, where *x* and *y* are arrays of shape
         ``(ntrajectories, maxit - 1, 2d)`` and the *mask* is an array of shape
         ``(resolution, resolution)``. The two arrays represent consecutive
@@ -268,8 +286,10 @@ def generate_timeseries_dataset(
             xp=xp,
         )
 
-    # only keep converged points
-    z, mask = post_process_dataset(z, escape_radius, interleaved=True, xp=xp)
+    # only keep points that survive long enough
+    z, mask = post_process_dataset(
+        z, escape_radius, interleaved=True, min_escape_iters=min_escape_iters, xp=xp
+    )
     c = c[mask][:, None, None]
 
     # create datasets

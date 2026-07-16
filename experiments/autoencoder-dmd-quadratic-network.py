@@ -742,6 +742,8 @@ def main(
 
         # {{{ generate dataset
 
+        min_escape_iters = 3 * (maxit + 1) // 4
+
         x, _, zmask = cast(
             tuple[torch.Tensor, torch.Tensor, torch.Tensor],
             generate_timeseries_dataset(
@@ -751,6 +753,7 @@ def main(
                 # NOTE: we add 1 so that x.shape == (n, maxit, 2d)
                 maxit=maxit + 1,
                 escape_radius=escape_radius,
+                min_escape_iters=min_escape_iters,
             ),
         )
 
