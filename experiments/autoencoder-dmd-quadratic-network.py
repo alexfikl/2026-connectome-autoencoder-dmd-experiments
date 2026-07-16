@@ -8,6 +8,7 @@ import pathlib
 from collections.abc import Callable
 from typing import Any, NamedTuple, cast
 
+import array_api_compat
 import numpy as np
 import torch
 from torch import nn
@@ -83,17 +84,17 @@ class DMDAutoencoderResult(NamedTuple):
     A_dmd: torch.Tensor
     """DMD approximated linear operator in the latent space."""
 
-    y_out: torch.Tensor
+    x_out: torch.Tensor
     """Output of the autoencoder."""
 
-    x_latent: torch.Tensor
+    y_latent: torch.Tensor
     """Output of the encoder."""
 
-    xhat_latent: torch.Tensor
+    yhat_latent: torch.Tensor
     """DMD reconstructed latent vector :attr:`x_latent`."""
 
     yhat_out: torch.Tensor
-    """Output of the decoder applied to :atr:`xhat_latent`."""
+    """Output of the decoder applied to :atr:`yhat_latent`."""
 
 
 class DMDAutoencoder(nn.Module):
@@ -167,48 +168,69 @@ class DMDAutoencoder(nn.Module):
 
         # }}}
 
-    def forward(self, x: torch.Tensor) -> DMDAutoencoderResult:
-        # NOTE: x has a shape of (batch_size, window_size, 2 d) and we want to
+    def forward(self, x_in: torch.Tensor) -> DMDAutoencoderResult:
+        # NOTE: x has a shape of (batch_size, window_size, 2 r) and we want to
         # do DMD on it, so we go
-        # 1. X = x[:, :-1, :].reshape(-1, 2 * d)
-        #    Y = x[:, 1:, :].reshape(-1, 2 * d)
+        # 1. X = x[:, :-1, :].reshape(-1, 2 * r)
+        #    Y = x[:, 1:, :].reshape(-1, 2 * r)
         # 2. build the DMD operator for this batch with (X, Y)
+
+        r = self.latent_size
+        batch_size, window_size, d = x_in.shape
+        d = (d - 2) // 2
+
+        x = x_in[:, :, :-2]
+        c = x_in[:, :, -2:]
+        c = torch.concat(
+            [
+                c[:, :, 0:1].expand(*c.shape[:-1], d),
+                c[:, :, 1:2].expand(*c.shape[:-1], d),
+            ],
+            dim=-1,
+        )
+        assert c.shape == (batch_size, window_size, 2 * d)
 
         # go to latent space
         x_latent = self.encoder(x)
-        y_out = self.decoder(x_latent)
+        y_latent = self.encoder(x - c)
+        assert x_latent.shape == (batch_size, window_size, 2 * r)
+        assert y_latent.shape == (batch_size, window_size, 2 * r)
 
-        d = x_latent.shape[-1] // 2
-        assert d == self.latent_size
+        x_out = self.decoder(x_latent)
+        assert x_out.shape == (batch_size, window_size, 2 * d)
 
         # shape of the latent space
         if self.training and self.dmd_enabled:
             # separate data for DMD
             # NOTE: perform DMD on the complex variables to maintain the complex
             # dynamics (the rest of the autoencoder is also complex-friendly)
-            z_latent = torch.complex(x_latent[:, :, :d], x_latent[:, :, d:])
-            X = z_latent[:, :-1, :].reshape(-1, d)
-            Y = z_latent[:, 1:, :].reshape(-1, d)
+            cx_latent = torch.complex(x_latent[:, :, :r], x_latent[:, :, r:])
+            cy_latent = torch.complex(y_latent[:, :, :r], y_latent[:, :, r:])
+            X = cx_latent[:, :-1, :].reshape(-1, r)
+            Y = cy_latent[:, 1:, :].reshape(-1, r)
 
             # construct DMD operator in latent space
             A_dmd = Y.T @ torch.linalg.pinv(X.T, rtol=self.eps)
+            assert A_dmd.shape == (r, r)
 
             # predict with DMD in latent space (single-step)
-            zhat_latent = z_latent @ A_dmd.T
-            xhat_latent = torch.concat([zhat_latent.real, zhat_latent.imag], dim=-1)
+            yhat_latent = cx_latent @ A_dmd.T
+            yhat_latent = torch.concat([yhat_latent.real, yhat_latent.imag], dim=-1)
+            assert yhat_latent.shape == (batch_size, window_size, 2 * r)
 
-            yhat_out = self.decoder(xhat_latent)
+            yhat_out = self.decoder(yhat_latent) + c
+            assert yhat_out.shape == (batch_size, window_size, 2 * d)
         else:
-            A_dmd = torch.eye(d, d, device=x.device, dtype=x.dtype)
-            xhat_latent = x_latent
-            yhat_out = y_out
+            A_dmd = torch.eye(r, r, device=x.device, dtype=x.dtype)
+            yhat_latent = x_latent
+            yhat_out = x_out
 
         return DMDAutoencoderResult(
             A_dmd=A_dmd,
-            y_out=y_out,
-            x_latent=x_latent,
-            xhat_latent=xhat_latent,
-            yhat_out=yhat_out,
+            x_out=torch.concat([x_out, x_in[:, :, -2:]], dim=-1),
+            y_latent=y_latent,
+            yhat_latent=yhat_latent,
+            yhat_out=torch.concat([yhat_out, x_in[:, :, -2:]], dim=-1),
         )
 
 
@@ -269,18 +291,18 @@ class DMDLoss(nn.Module):
     def forward(
         self,
         x_in: torch.Tensor,
-        y_out: torch.Tensor,
+        x_out: torch.Tensor,
         *,
-        x_latent: torch.Tensor,
-        xhat_latent: torch.Tensor,
+        y_latent: torch.Tensor,
+        yhat_latent: torch.Tensor,
         yhat_out: torch.Tensor,
     ) -> DMDLossResult:
         # reconstruction loss
-        loss_rec = self.mse(x_in, y_out)
+        loss_rec = self.mse(x_in, x_out)
         loss_rec = self.gamma_rec * loss_rec
 
         # latent space linearity loss
-        loss_lin = self.mse(x_latent[:, 1:, :], xhat_latent[:, :-1, :])
+        loss_lin = self.mse(y_latent[:, 1:, :], yhat_latent[:, :-1, :])
         loss_lin = self.gamma_lin * loss_lin
 
         # linear reconstruction loss
@@ -372,9 +394,9 @@ def torch_train(
             predictions = compiled_model(batch_x)
             loss = criterion(
                 batch_x,
-                y_out=predictions.y_out,
-                x_latent=predictions.x_latent,
-                xhat_latent=predictions.xhat_latent,
+                x_out=predictions.x_out,
+                y_latent=predictions.y_latent,
+                yhat_latent=predictions.yhat_latent,
                 yhat_out=predictions.yhat_out,
             )
 
@@ -419,9 +441,9 @@ def torch_train(
                 predictions = compiled_model(batch_x)
                 loss = criterion(
                     batch_x,
-                    y_out=predictions.y_out,
-                    x_latent=predictions.x_latent,
-                    xhat_latent=predictions.xhat_latent,
+                    x_out=predictions.x_out,
+                    y_latent=predictions.y_latent,
+                    yhat_latent=predictions.yhat_latent,
                     yhat_out=predictions.yhat_out,
                 )
 
@@ -536,6 +558,9 @@ def torch_predict(
     maxit: int = 128,
     device: Any = None,
 ) -> torch.Tensor:
+    import array_api_compat
+
+    from commonlib import generate_grid
 
     d = int(model.input_size)
     r = model.latent_size
@@ -546,12 +571,22 @@ def torch_predict(
 
     with torch.no_grad():
         z = torch.zeros((resolution, resolution, 2 * d), dtype=dtype, device=device)
+        c = generate_grid(
+            *bbox,
+            nx=resolution,
+            ny=resolution,
+            dtype=dtype.to_complex(),
+            xp=array_api_compat.array_namespace(A_dmd),
+            device=device,
+        )
+        c = c[:, :, None]
+
         for _ in range(1, maxit):
             g = model.encoder(z)
             g_complex = torch.complex(g[:, :, :r], g[:, :, r:])
             g_complex = g_complex @ A_dmd.T
             g = torch.cat([g_complex.real, g_complex.imag], dim=-1)
-            z = model.decoder(g)
+            z = model.decoder(g) + c
 
     return torch.complex(z[:, :, :d], z[:, :, d:])
 
@@ -577,7 +612,7 @@ def main(
     early_stop_patience: int = 0,
     overwrite: bool = False,
 ) -> int:
-    from commonlib import determine_escape_radius
+    from commonlib import determine_escape_radius, generate_grid
 
     device = torch.get_default_device()
     log.info("Device: %s", device)
@@ -696,6 +731,20 @@ def main(
                 escape_radius=escape_radius,
             ),
         )
+
+        c = generate_grid(
+            *bbox,
+            nx=resolution,
+            ny=resolution,
+            dtype=mat.dtype,
+            xp=array_api_compat.array_namespace(mat),
+            device=device,
+        )
+        c = c[zmask]
+        c = torch.stack([c.real, c.imag], dim=-1)
+        c = c.unsqueeze(1).expand(-1, x.shape[1], -1)
+
+        x = torch.concat([x, c], dim=-1)
         (x_train,), (x_validate,), (x_test,) = random_split((x,), (0.8, 0.1, 0.1))
 
         if device.type == "cuda":
@@ -742,9 +791,9 @@ def main(
                 predictions = model(batch_x)
                 loss = criterion(
                     batch_x,
-                    y_out=predictions.y_out,
-                    x_latent=predictions.x_latent,
-                    xhat_latent=predictions.xhat_latent,
+                    x_out=predictions.x_out,
+                    y_latent=predictions.y_latent,
+                    yhat_latent=predictions.yhat_latent,
                     yhat_out=predictions.yhat_out,
                 )
 
