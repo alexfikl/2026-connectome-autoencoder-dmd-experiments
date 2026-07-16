@@ -34,6 +34,10 @@ Example:
 # {{{ model
 
 
+def view_as_complex(x: torch.Tensor):
+    return torch.view_as_complex(x.reshape(*x.shape[:-1], -1, 2))
+
+
 def make_layers(
     sizes: tuple[int, ...],
     nonlinearities: tuple[str, ...],
@@ -186,7 +190,7 @@ class DMDAutoencoder(nn.Module):
 
         x = x_in[:, :, :-2]
         c = x_in[:, :, -2:]
-        c = c.repeat(*(1,) * (c.ndim - 1) + (d,))
+        c = c.repeat(1, 1, d)
         assert c.shape == (batch_size, window_size, 2 * d)
 
         # go to latent space
@@ -203,8 +207,8 @@ class DMDAutoencoder(nn.Module):
             # separate data for DMD
             # NOTE: perform DMD on the complex variables to maintain the complex
             # dynamics (the rest of the autoencoder is also complex-friendly)
-            cx_latent = torch.complex(x_latent[:, :, ::2], x_latent[:, :, 1::2])
-            cy_latent = torch.complex(y_latent[:, :, ::2], y_latent[:, :, 1::2])
+            cx_latent = view_as_complex(x_latent)
+            cy_latent = view_as_complex(y_latent)
             X = cx_latent[:, :-1, :].reshape(-1, r)
             Y = cy_latent[:, 1:, :].reshape(-1, r)
 
@@ -538,7 +542,7 @@ def build_latent_dmd(
         for start in range(0, Z.shape[0], block_size):
             x_latent = model.encoder(Z[start : start + block_size])
             # x_latent shape: (batch, window, 2*r) interleaved
-            z_latent = torch.complex(x_latent[:, :, ::2], x_latent[:, :, 1::2])
+            z_latent = view_as_complex(x_latent)
 
             size = x_latent.shape[0] * (x_latent.shape[1] - 1)
             Xs[offset : offset + size] = z_latent[:, :-1, :].reshape(-1, r)
@@ -578,17 +582,16 @@ def torch_predict(
             xp=array_api_compat.array_namespace(A_dmd),
             device=device,
         )
-        c = torch.stack([c.real, c.imag], dim=-1)
-        c = c.repeat(*(1,) * (c.ndim - 1) + (d,))
+        c = torch.view_as_real(cast("torch.Tensor", c))
+        c = c.repeat(1, 1, d)
 
         for _ in range(1, maxit):
             g = model.encoder(z)
-            g_complex = torch.complex(g[:, :, ::2], g[:, :, 1::2])
-            g_complex = g_complex @ A_dmd.T
+            g_complex = view_as_complex(g) @ A_dmd.T
             g = interleave(g_complex.real, g_complex.imag, axis=-1)
             z = model.decoder(g) + c
 
-    return torch.complex(z[:, :, ::2], z[:, :, 1::2])
+    return view_as_complex(z)
 
 
 # }}}
@@ -660,7 +663,7 @@ def main(
     # {{{ plot predict
 
     def plot_predict(epoch: int, m: DMDAutoencoder) -> None:
-        A_dmd = build_latent_dmd(m, x_train)
+        A_dmd = build_latent_dmd(m, x_train[:, :, :-2])
         Zpredict = torch_predict(
             m,
             A_dmd,
@@ -741,7 +744,7 @@ def main(
             device=device,
         )
         c = c[zmask]
-        c = torch.stack([c.real, c.imag], dim=-1)
+        c = torch.view_as_real(c)
         c = c.unsqueeze(1).expand(-1, x.shape[1], -1)
 
         x = torch.concat([x, c], dim=-1)
