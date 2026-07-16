@@ -524,13 +524,13 @@ def build_latent_dmd(
     complex operator is returned.
     """
 
-    d = model.latent_size
+    r = model.latent_size
     n = Z.shape[0] * (Z.shape[1] - 1)
 
     complex_dtype = torch.complex64 if Z.dtype == torch.float32 else torch.complex128
 
-    Xs = torch.empty((n, d), dtype=complex_dtype, device=Z.device)
-    Ys = torch.empty((n, d), dtype=complex_dtype, device=Z.device)
+    Xs = torch.empty((n, r), dtype=complex_dtype, device=Z.device)
+    Ys = torch.empty((n, r), dtype=complex_dtype, device=Z.device)
 
     with torch.no_grad():
         model.eval()
@@ -538,11 +538,11 @@ def build_latent_dmd(
         offset = 0
         for start in range(0, Z.shape[0], block_size):
             x_latent = model.encoder(Z[start : start + block_size])
-            z_latent = torch.complex(x_latent[:, :, :d], x_latent[:, :, d:])
+            z_latent = torch.complex(x_latent[:, :, :r], x_latent[:, :, r:])
 
             size = x_latent.shape[0] * (x_latent.shape[1] - 1)
-            Xs[offset : offset + size] = z_latent[:, :-1, :].reshape(-1, d)
-            Ys[offset : offset + size] = z_latent[:, 1:, :].reshape(-1, d)
+            Xs[offset : offset + size] = z_latent[:, :-1, :].reshape(-1, r)
+            Ys[offset : offset + size] = z_latent[:, 1:, :].reshape(-1, r)
 
             offset += size
 
@@ -579,7 +579,14 @@ def torch_predict(
             xp=array_api_compat.array_namespace(A_dmd),
             device=device,
         )
-        c = c[:, :, None]
+        c = torch.stack([c.real, c.imag], dim=-1)
+        c = torch.concat(
+            [
+                c[:, :, 0:1].expand(*c.shape[:-1], d),
+                c[:, :, 1:2].expand(*c.shape[:-1], d),
+            ],
+            dim=-1,
+        )
 
         for _ in range(1, maxit):
             g = model.encoder(z)
