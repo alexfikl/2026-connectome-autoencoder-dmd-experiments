@@ -89,13 +89,15 @@ class Autoencoder(nn.Module):
             param = None if is_last else alpha
 
             activation = (
-                ComplexBlendedQuadratic(alpha)
+                ComplexBlendedQuadratic(alpha, interleaved=True)
                 if i != len(encoder_layer_sizes) - 1
-                else ComplexQuadratic()
+                else ComplexQuadratic(interleaved=True)
             )
 
             # build linear layer
-            linear = ComplexLinear(n_in, n_out, bias=False, device=device, dtype=dtype)
+            linear = ComplexLinear(
+                n_in, n_out, bias=False, interleaved=True, device=device, dtype=dtype
+            )
             kaiming_uniform_(
                 linear.weight,
                 nonlinearity=layer_nonlinearity,
@@ -110,7 +112,9 @@ class Autoencoder(nn.Module):
         layer_sizes = (self.latent_size, *decoder_layer_sizes)
         decoder_layers = []
         for n_in, n_out in pairwise(layer_sizes):
-            linear = ComplexLinear(n_in, n_out, device=device, dtype=dtype)
+            linear = ComplexLinear(
+                n_in, n_out, interleaved=True, device=device, dtype=dtype
+            )
             kaiming_uniform_(linear.weight, nonlinearity="linear")
 
             decoder_layers.append(linear)
