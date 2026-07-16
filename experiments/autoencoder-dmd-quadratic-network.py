@@ -419,11 +419,14 @@ def torch_train(
                     eigmax = eigenvalues[eigenvalues.real.argmax()].item()
 
                 log.info(
-                    r"    \[batch %03d] lambda_max %.5e+%.5e loss %.5e grad %.5e",
+                    r"    \[batch %03d] "
+                    r"lam %.5e+%.5e rec %.5e lin %.5e pre %.5e grad %.5e",
                     i,
                     eigmax.real,
                     eigmax.imag,
-                    loss.total.item(),
+                    loss.loss_rec.item(),
+                    loss.loss_lin.item(),
+                    loss.loss_pre.item(),
                     grad_norm,
                 )
 
@@ -465,11 +468,17 @@ def torch_train(
         losses[epoch, 1] = loss_validate
 
         log.info(
-            "[%03d/%03d] train %.5e validate %.5e (%s)",
+            "[%03d/%03d] "
+            "t_rec %.5e t_lin %.5e t_pre %.5e "
+            "v_rec %.5e v_lin %.5e v_pre %.5e (%s)",
             epoch + 1,
             epochs,
-            loss_train[0],
-            loss_validate[0],
+            loss_train[1],
+            loss_train[2],
+            loss_train[3],
+            loss_validate[1],
+            loss_validate[2],
+            loss_validate[3],
             timer,
         )
 
@@ -816,8 +825,15 @@ def main(
                 loss_test_epoch += loss.tensor()
                 num_test_batches += 1
 
-            loss_test = (loss_test_epoch / num_test_batches)[0].item()
-            log.info("[%03d/%03d] test %.5e", epochs, epochs, loss_test)
+            loss_test = loss_test_epoch / num_test_batches
+            log.info(
+                "[%03d/%03d] test_rec %.5e test_lin %.5e test_pre %.5e",
+                epochs,
+                epochs,
+                loss_test[1].item(),
+                loss_test[2].item(),
+                loss_test[3].item(),
+            )
 
         # }}}
 
@@ -869,13 +885,21 @@ def main(
     ) as fig:
         ax = fig.gca()
 
-        losses = losses.cpu().numpy()
-        ax.semilogy(losses[:, 0, 0], label="Train")
-        ax.semilogy(losses[:, 1, 0], label="Validation")
-        ax.axhline(loss_test, color="k", ls="--")
+        losses_np = losses.cpu().numpy()
+        labels = ("Rec", "Lin", "Pre")
+
+        for k, label in enumerate(labels):
+            (line,) = ax.semilogy(losses_np[:, 0, 1 + k], label=f"Train {label}")
+            ax.semilogy(
+                losses_np[:, 1, 1 + k],
+                label=f"Val {label}",
+                color=line.get_color(),
+                ls="--",
+            )
+
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
-        ax.legend()
+        ax.legend(fontsize="x-small", ncols=2)
 
     # }}}
 
