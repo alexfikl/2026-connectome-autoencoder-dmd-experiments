@@ -14,6 +14,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
+from nneuroutil.array_api_extras import interleave
 from nneuroutil.helpers import FuzzyChoiceAction, TicTocTimer, module_logger
 from nneuroutil.torch_extras import available_device_names, torch_default_device
 from nneuroutil.visualization import figure
@@ -58,14 +59,18 @@ def make_layers(
     ):
         # build nonlinearity
         if nonlinearity == "quadratic":
-            activation = ComplexQuadratic()
+            activation = ComplexQuadratic(interleaved=True)
         elif nonlinearity == "blended_quadratic":
-            activation = ComplexBlendedQuadratic(0.5 if alpha is None else alpha)
+            activation = ComplexBlendedQuadratic(
+                0.5 if alpha is None else alpha, interleaved=True
+            )
         else:
             raise ValueError(f"unsupported nonlinearity: {nonlinearity!r}")
 
         # build linear layer
-        linear = ComplexLinear(n_in, n_out, bias=False, device=device, dtype=dtype)
+        linear = ComplexLinear(
+            n_in, n_out, bias=False, interleaved=True, device=device, dtype=dtype
+        )
         kaiming_uniform_(
             linear.weight,
             nonlinearity=nonlinearity,
@@ -181,13 +186,7 @@ class DMDAutoencoder(nn.Module):
 
         x = x_in[:, :, :-2]
         c = x_in[:, :, -2:]
-        c = torch.concat(
-            [
-                c[:, :, 0:1].expand(*c.shape[:-1], d),
-                c[:, :, 1:2].expand(*c.shape[:-1], d),
-            ],
-            dim=-1,
-        )
+        c = c.repeat(*(1,) * (c.ndim - 1) + (d,))
         assert c.shape == (batch_size, window_size, 2 * d)
 
         # go to latent space
@@ -204,8 +203,8 @@ class DMDAutoencoder(nn.Module):
             # separate data for DMD
             # NOTE: perform DMD on the complex variables to maintain the complex
             # dynamics (the rest of the autoencoder is also complex-friendly)
-            cx_latent = torch.complex(x_latent[:, :, :r], x_latent[:, :, r:])
-            cy_latent = torch.complex(y_latent[:, :, :r], y_latent[:, :, r:])
+            cx_latent = torch.complex(x_latent[:, :, ::2], x_latent[:, :, 1::2])
+            cy_latent = torch.complex(y_latent[:, :, ::2], y_latent[:, :, 1::2])
             X = cx_latent[:, :-1, :].reshape(-1, r)
             Y = cy_latent[:, 1:, :].reshape(-1, r)
 
@@ -215,7 +214,7 @@ class DMDAutoencoder(nn.Module):
 
             # predict with DMD in latent space (single-step)
             yhat_latent = cx_latent @ A_dmd.T
-            yhat_latent = torch.concat([yhat_latent.real, yhat_latent.imag], dim=-1)
+            yhat_latent = interleave(yhat_latent.real, yhat_latent.imag, axis=-1)
             assert yhat_latent.shape == (batch_size, window_size, 2 * r)
 
             yhat_out = self.decoder(yhat_latent) + c
@@ -538,7 +537,8 @@ def build_latent_dmd(
         offset = 0
         for start in range(0, Z.shape[0], block_size):
             x_latent = model.encoder(Z[start : start + block_size])
-            z_latent = torch.complex(x_latent[:, :, :r], x_latent[:, :, r:])
+            # x_latent shape: (batch, window, 2*r) interleaved
+            z_latent = torch.complex(x_latent[:, :, ::2], x_latent[:, :, 1::2])
 
             size = x_latent.shape[0] * (x_latent.shape[1] - 1)
             Xs[offset : offset + size] = z_latent[:, :-1, :].reshape(-1, r)
@@ -563,7 +563,6 @@ def torch_predict(
     from commonlib import generate_grid
 
     d = int(model.input_size)
-    r = model.latent_size
 
     dtype = model.dtype
     assert isinstance(dtype, torch.dtype)
@@ -580,22 +579,16 @@ def torch_predict(
             device=device,
         )
         c = torch.stack([c.real, c.imag], dim=-1)
-        c = torch.concat(
-            [
-                c[:, :, 0:1].expand(*c.shape[:-1], d),
-                c[:, :, 1:2].expand(*c.shape[:-1], d),
-            ],
-            dim=-1,
-        )
+        c = c.repeat(*(1,) * (c.ndim - 1) + (d,))
 
         for _ in range(1, maxit):
             g = model.encoder(z)
-            g_complex = torch.complex(g[:, :, :r], g[:, :, r:])
+            g_complex = torch.complex(g[:, :, ::2], g[:, :, 1::2])
             g_complex = g_complex @ A_dmd.T
-            g = torch.cat([g_complex.real, g_complex.imag], dim=-1)
+            g = interleave(g_complex.real, g_complex.imag, axis=-1)
             z = model.decoder(g) + c
 
-    return torch.complex(z[:, :, :d], z[:, :, d:])
+    return torch.complex(z[:, :, ::2], z[:, :, 1::2])
 
 
 # }}}
