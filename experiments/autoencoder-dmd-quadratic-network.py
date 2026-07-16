@@ -522,31 +522,43 @@ def build_latent_dmd(
 ) -> torch.Tensor:
     """Build the DMD operator in the latent space.
 
-    This uses the encoder from *model* to squeeze Z into the latent space and then
-    performs a DMD reconstruction on complex-valued latent variables. The resulting
-    complex operator is returned.
+    Z is expected to have shape ``(ntraj, maxit, 2d + 2)`` with the trailing two
+    channels encoding the forcing term ``c``. The returned operator maps
+
+        encoder(z_n) -> encoder(z_{n+1} - c)
+
+    matching the convention used in model.forward.
     """
 
     r = model.latent_size
-    n = Z.shape[0] * (Z.shape[1] - 1)
 
+    # separate trajectory and forcing
+    z = Z[:, :, :-2]  # (ntraj, maxit, 2d)
+    c = Z[:, :, -2:]  # (ntraj, maxit, 2)
+    c = c.repeat(1, 1, z.shape[-1] // 2)  # (ntraj, maxit, 2d)
+
+    n = z.shape[0] * (z.shape[1] - 1)
     complex_dtype = torch.complex64 if Z.dtype == torch.float32 else torch.complex128
 
-    Xs = torch.empty((n, r), dtype=complex_dtype, device=Z.device)
-    Ys = torch.empty((n, r), dtype=complex_dtype, device=Z.device)
+    Xs = torch.empty((n, r), dtype=complex_dtype, device=z.device)
+    Ys = torch.empty((n, r), dtype=complex_dtype, device=z.device)
 
     with torch.no_grad():
         model.eval()
 
         offset = 0
-        for start in range(0, Z.shape[0], block_size):
-            x_latent = model.encoder(Z[start : start + block_size])
-            # x_latent shape: (batch, window, 2*r) interleaved
-            z_latent = view_as_complex(x_latent)
+        for start in range(0, z.shape[0], block_size):
+            z_block = z[start : start + block_size]
+            c_block = c[start : start + block_size]
+
+            x_latent = model.encoder(z_block)
+            y_latent = model.encoder(z_block - c_block)
+            cx_latent = view_as_complex(x_latent)
+            cy_latent = view_as_complex(y_latent)
 
             size = x_latent.shape[0] * (x_latent.shape[1] - 1)
-            Xs[offset : offset + size] = z_latent[:, :-1, :].reshape(-1, r)
-            Ys[offset : offset + size] = z_latent[:, 1:, :].reshape(-1, r)
+            Xs[offset : offset + size] = cx_latent[:, :-1, :].reshape(-1, r)
+            Ys[offset : offset + size] = cy_latent[:, 1:, :].reshape(-1, r)
 
             offset += size
 
@@ -663,7 +675,7 @@ def main(
     # {{{ plot predict
 
     def plot_predict(epoch: int, m: DMDAutoencoder) -> None:
-        A_dmd = build_latent_dmd(m, x_train[:, :, :-2])
+        A_dmd = build_latent_dmd(m, x_train)
         Zpredict = torch_predict(
             m,
             A_dmd,
@@ -776,7 +788,7 @@ def main(
             patience_early_stop=early_stop_patience,
             callback=plot_predict,
         )
-        A_dmd = build_latent_dmd(model, x_train[:, :, :-2])
+        A_dmd = build_latent_dmd(model, x_train)
 
         model.train()
         with torch.no_grad():
