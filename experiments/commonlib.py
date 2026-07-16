@@ -228,7 +228,7 @@ def post_process_dataset(
     sqr_norm = xp.sum(xp.real(z) ** 2 + xp.imag(z) ** 2, axis=-1)
     escaped = sqr_norm > escape_radius**2
     never_escaped = xp.all(~escaped, axis=0)
-    first_escaped = xp.argmax(escaped.astype(xp.int32), axis=0)
+    first_escaped = xp.argmax(xp.astype(escaped, xp.int32), axis=0)
     escape_time = xp.where(never_escaped, maxit, first_escaped)
 
     mask = escape_time >= min_escape_iters
