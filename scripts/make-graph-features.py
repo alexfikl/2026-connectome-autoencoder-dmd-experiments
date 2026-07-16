@@ -208,7 +208,7 @@ def make_graph_features(
         amat_i = np.where(mat_i < 0.0, -mat_i, 0.0)
         datasets[2, i] = compute_graph_measures(amat_i)
 
-    np.savez(outfile, datasets=datasets, descr=MEASURE_INDEX)  # ty: ignore[invalid-argument-type]
+    np.savez(outfile, datasets=datasets, descr=MEASURE_INDEX)
     log.info("Written graph measures to file: '%s'.", outfile)
 
     return 0

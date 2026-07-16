@@ -104,6 +104,7 @@ class DMDAutoencoder(nn.Module):
         encoder_layer_sizes: int | tuple[int, ...] | None = None,
         decoder_layer_sizes: int | tuple[int, ...] | None = None,
         dmd_enabled: bool = False,
+        eps: float = 1.0e-6,
         alpha: float | None = None,
         device: str | torch.device | None = None,
         dtype: Any = None,
@@ -138,6 +139,7 @@ class DMDAutoencoder(nn.Module):
         self.decoder_layer_sizes = decoder_layer_sizes
         self.dtype = dtype
         self.dmd_enabled = dmd_enabled
+        self.eps = eps
 
         # {{{ construct autoencoder
 
@@ -168,27 +170,33 @@ class DMDAutoencoder(nn.Module):
     def forward(self, x: torch.Tensor) -> DMDAutoencoderResult:
         # NOTE: x has a shape of (batch_size, window_size, 2 d) and we want to
         # do DMD on it, so we go
-        # 1. X = x[:, :-1, :].reshape(-1, d)
-        #    Y = x[:, 1:, :].reshape(-1, d)
+        # 1. X = x[:, :-1, :].reshape(-1, 2 * d)
+        #    Y = x[:, 1:, :].reshape(-1, 2 * d)
         # 2. build the DMD operator for this batch with (X, Y)
 
         # go to latent space
         x_latent = self.encoder(x)
         y_out = self.decoder(x_latent)
 
-        d = x_latent.shape[-1]
-        assert d == 2 * self.latent_size
+        d = x_latent.shape[-1] // 2
+        assert d == self.latent_size
 
         # shape of the latent space
         if self.training and self.dmd_enabled:
-            # construct DMD operator in latent space
-            X = x_latent[:, :-1, :].reshape(-1, d)
-            Y = x_latent[:, 1:, :].reshape(-1, d)
+            # separate data for DMD
+            # NOTE: perform DMD on the complex variables to maintain the complex
+            # dynamics (the rest of the autoencoder is also complex-friendly)
+            z_latent = torch.complex(x_latent[:, :, :d], x_latent[:, :, d:])
+            X = z_latent[:, :-1, :].reshape(-1, d)
+            Y = z_latent[:, 1:, :].reshape(-1, d)
 
-            A_dmd = Y.T @ torch.linalg.pinv(X.T, rtol=1.0e-6)
+            # construct DMD operator in latent space
+            A_dmd = Y.T @ torch.linalg.pinv(X.T, rtol=self.eps)
 
             # predict with DMD in latent space (single-step)
-            xhat_latent = x_latent @ A_dmd.T
+            zhat_latent = z_latent @ A_dmd.T
+            xhat_latent = torch.concat([zhat_latent.real, zhat_latent.imag], dim=-1)
+
             yhat_out = self.decoder(xhat_latent)
         else:
             A_dmd = torch.eye(d, d, device=x.device, dtype=x.dtype)
@@ -490,14 +498,17 @@ def build_latent_dmd(
     """Build the DMD operator in the latent space.
 
     This uses the encoder from *model* to squeeze Z into the latent space and then
-    performs a standard DMD reconstruction. The resulting operator is returned.
+    performs a DMD reconstruction on complex-valued latent variables. The resulting
+    complex operator is returned.
     """
 
-    d = 2 * model.latent_size
+    d = model.latent_size
     n = Z.shape[0] * (Z.shape[1] - 1)
 
-    Xs = torch.empty((n, d), dtype=Z.dtype, device=Z.device)
-    Ys = torch.empty((n, d), dtype=Z.dtype, device=Z.device)
+    complex_dtype = torch.complex64 if Z.dtype == torch.float32 else torch.complex128
+
+    Xs = torch.empty((n, d), dtype=complex_dtype, device=Z.device)
+    Ys = torch.empty((n, d), dtype=complex_dtype, device=Z.device)
 
     with torch.no_grad():
         model.eval()
@@ -505,14 +516,15 @@ def build_latent_dmd(
         offset = 0
         for start in range(0, Z.shape[0], block_size):
             x_latent = model.encoder(Z[start : start + block_size])
+            z_latent = torch.complex(x_latent[:, :, :d], x_latent[:, :, d:])
 
             size = x_latent.shape[0] * (x_latent.shape[1] - 1)
-            Xs[offset : offset + size] = x_latent[:, :-1, :].reshape(-1, d)
-            Ys[offset : offset + size] = x_latent[:, 1:, :].reshape(-1, d)
+            Xs[offset : offset + size] = z_latent[:, :-1, :].reshape(-1, d)
+            Ys[offset : offset + size] = z_latent[:, 1:, :].reshape(-1, d)
 
             offset += size
 
-        return Ys.T @ torch.linalg.pinv(Xs.T, rtol=1.0e-6)
+        return Ys.T @ torch.linalg.pinv(Xs.T, rtol=model.eps)
 
 
 def torch_predict(
@@ -524,19 +536,21 @@ def torch_predict(
     maxit: int = 128,
     device: Any = None,
 ) -> torch.Tensor:
-    import torch
 
     d = int(model.input_size)
+    r = model.latent_size
+
     dtype = model.dtype
     assert isinstance(dtype, torch.dtype)
     assert dtype.is_floating_point
 
     with torch.no_grad():
-        # Koopman DMD prediction: z_{k+1} = decoder(A_dmd @ encoder(z_k))
         z = torch.zeros((resolution, resolution, 2 * d), dtype=dtype, device=device)
         for _ in range(1, maxit):
             g = model.encoder(z)
-            g = g @ A_dmd.T
+            g_complex = torch.complex(g[:, :, :r], g[:, :, r:])
+            g_complex = g_complex @ A_dmd.T
+            g = torch.cat([g_complex.real, g_complex.imag], dim=-1)
             z = model.decoder(g)
 
     return torch.complex(z[:, :, :d], z[:, :, d:])
