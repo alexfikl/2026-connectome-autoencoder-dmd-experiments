@@ -284,7 +284,7 @@ class DMDLoss(nn.Module):
 
         self.mse = nn.MSELoss()
         self.gamma_rec = gamma_rec / scale
-        self.gamma_lin = gamma_lin / scale
+        self.gamma_lin = gamma_lin
         self.gamma_pre = gamma_pre / scale
 
     @property
@@ -578,6 +578,7 @@ def torch_predict(
     bbox: tuple[float, float, float, float],
     resolution: int = 128,
     maxit: int = 128,
+    norm_factor: float = 1.0,
     device: Any = None,
 ) -> torch.Tensor:
     import array_api_compat
@@ -602,12 +603,15 @@ def torch_predict(
         )
         c = torch.view_as_real(cast("torch.Tensor", c))
         c = c.repeat(1, 1, d)
+        c = c / norm_factor
 
         for _ in range(1, maxit):
             g = model.encoder(z)
             g_complex = view_as_complex(g) @ A_dmd.T
             g = interleave(g_complex.real, g_complex.imag, axis=-1)
             z = model.decoder(g) + c
+
+        z = z * norm_factor
 
     return view_as_complex(z)
 
@@ -688,6 +692,7 @@ def main(
             bbox=bbox,
             resolution=2 * resolution,
             maxit=maxit,
+            norm_factor=norm_factor,
         )
         mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
         log.info("    Converged:    %d/%d", torch.sum(mask), mask.numel())
@@ -734,6 +739,7 @@ def main(
         loss_test = checkpoint.get("loss_test", 0.0)
         zmask = checkpoint["zmask"]
         A_dmd = checkpoint["a_dmd"]
+        norm_factor = checkpoint["norm_factor"]
 
         model.eval()
     else:
@@ -770,6 +776,9 @@ def main(
         c = c.unsqueeze(1).expand(-1, x.shape[1], -1)
 
         x = torch.concat([x, c], dim=-1)
+
+        norm_factor = x.abs().max().item()
+        x = x / norm_factor
         (x_train,), (x_validate,), (x_test,) = random_split((x,), (0.8, 0.1, 0.1))
 
         if device.type == "cuda":
@@ -860,6 +869,7 @@ def main(
                 "maxit": maxit,
                 "dmd_warmup_epochs": dmd_warmup_epochs,
                 "early_stop_patience": early_stop_patience,
+                "norm_factor": norm_factor,
             },
             weightsfile,
         )
