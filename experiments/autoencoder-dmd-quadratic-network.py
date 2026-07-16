@@ -114,7 +114,7 @@ class DMDAutoencoder(nn.Module):
         encoder_layer_sizes: int | tuple[int, ...] | None = None,
         decoder_layer_sizes: int | tuple[int, ...] | None = None,
         dmd_enabled: bool = False,
-        eps: float = 1.0e-6,
+        eps: float = 1.0e-3,
         alpha: float | None = None,
         device: str | torch.device | None = None,
         dtype: Any = None,
@@ -974,7 +974,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dmd-warmup-epochs",
         type=int,
-        default=0,
+        default=10,
         help="Train this many epochs without DMD before enabling it (0 disables)",
     )
     parser.add_argument(
