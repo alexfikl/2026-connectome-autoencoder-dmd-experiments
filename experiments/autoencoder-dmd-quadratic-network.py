@@ -787,7 +787,9 @@ def main(
 
         x = torch.concat([x, c], dim=-1)
 
-        norm_factor = x.square().mean().sqrt().item()
+        norm_factor = 10.0 * x.square().mean().sqrt().item()
+        norm_factor = 1.0
+
         x = x / norm_factor
         (x_train,), (x_validate,), (x_test,) = random_split((x,), (0.8, 0.1, 0.1))
 
