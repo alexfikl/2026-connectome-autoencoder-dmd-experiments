@@ -426,7 +426,7 @@ def torch_train(
             if i in {0, len(loader) - 1}:
                 with torch.no_grad():
                     eigenvalues = torch.linalg.eigvals(predictions.A_dmd.cpu())
-                    eigmax = eigenvalues[eigenvalues.real.argmax()].item()
+                    eigmax = eigenvalues[torch.abs(eigenvalues).argmax()].item()
 
                 log.info(
                     r"    \[batch %03d] "
