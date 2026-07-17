@@ -96,13 +96,13 @@ class DMDAutoencoderResult(NamedTuple):
     x_out: torch.Tensor
     """Output of the autoencoder."""
 
-    y_latent: torch.Tensor
+    y_latent: torch.Tensor | None
     """Output of the encoder."""
 
-    yhat_latent: torch.Tensor
+    yhat_latent: torch.Tensor | None
     """DMD reconstructed latent vector :attr:`x_latent`."""
 
-    yhat_out: torch.Tensor
+    yhat_out: torch.Tensor | None
     """Output of the decoder applied to :atr:`yhat_latent`."""
 
 
@@ -195,15 +195,13 @@ class DMDAutoencoder(nn.Module):
 
         # go to latent space
         x_latent = self.encoder(x)
-        y_latent = self.encoder(x - c)
         assert x_latent.shape == (batch_size, window_size, 2 * r)
-        assert y_latent.shape == (batch_size, window_size, 2 * r)
-
-        x_out = self.decoder(x_latent)
-        assert x_out.shape == (batch_size, window_size, 2 * d)
 
         # shape of the latent space
         if self.training and self.dmd_enabled:
+            y_latent = self.encoder(x - c)
+            assert y_latent.shape == (batch_size, window_size, 2 * r)
+
             # separate data for DMD
             # NOTE: perform DMD on the complex variables to maintain the complex
             # dynamics (the rest of the autoencoder is also complex-friendly)
@@ -222,18 +220,24 @@ class DMDAutoencoder(nn.Module):
             assert yhat_latent.shape == (batch_size, window_size, 2 * r)
 
             yhat_out = self.decoder(yhat_latent) + c
-            assert yhat_out.shape == (batch_size, window_size, 2 * d)
+            yhat_out = torch.concat([yhat_out, x_in[:, :, -2:]], dim=-1)
+            assert yhat_out.shape == (batch_size, window_size, 2 * (d + 1))
         else:
             A_dmd = torch.eye(r, r, device=x.device, dtype=x.dtype)
-            yhat_latent = x_latent
-            yhat_out = x_out
+            y_latent = None
+            yhat_latent = None
+            yhat_out = None
+
+        x_out = self.decoder(x_latent)
+        x_out = torch.concat([x_out, x_in[:, :, -2:]], dim=-1)
+        assert x_out.shape == (batch_size, window_size, 2 * (d + 1))
 
         return DMDAutoencoderResult(
             A_dmd=A_dmd,
-            x_out=torch.concat([x_out, x_in[:, :, -2:]], dim=-1),
+            x_out=x_out,
             y_latent=y_latent,
             yhat_latent=yhat_latent,
-            yhat_out=torch.concat([yhat_out, x_in[:, :, -2:]], dim=-1),
+            yhat_out=yhat_out,
         )
 
 
@@ -296,21 +300,27 @@ class DMDLoss(nn.Module):
         x_in: torch.Tensor,
         x_out: torch.Tensor,
         *,
-        y_latent: torch.Tensor,
-        yhat_latent: torch.Tensor,
-        yhat_out: torch.Tensor,
+        y_latent: torch.Tensor | None = None,
+        yhat_latent: torch.Tensor | None = None,
+        yhat_out: torch.Tensor | None = None,
     ) -> DMDLossResult:
         # reconstruction loss
         loss_rec = self.mse(x_in, x_out)
         loss_rec = self.gamma_rec * loss_rec
 
         # latent space linearity loss
-        loss_lin = self.mse(y_latent[:, 1:, :], yhat_latent[:, :-1, :])
-        loss_lin = self.gamma_lin * loss_lin
+        if y_latent is not None and yhat_latent is not None:
+            loss_lin = self.mse(y_latent[:, 1:, :], yhat_latent[:, :-1, :])
+            loss_lin = self.gamma_lin * loss_lin
+        else:
+            loss_lin = torch.zeros_like(loss_rec)
 
         # linear reconstruction loss
-        loss_pre = self.mse(x_in[:, 1:, :], yhat_out[:, :-1, :])
-        loss_pre = self.gamma_pre * loss_pre
+        if yhat_out is not None:
+            loss_pre = self.mse(x_in[:, 1:, :], yhat_out[:, :-1, :])
+            loss_pre = self.gamma_pre * loss_pre
+        else:
+            loss_lin = torch.zeros_like(loss_rec)
 
         return DMDLossResult(
             total=loss_rec + loss_lin + loss_pre,
