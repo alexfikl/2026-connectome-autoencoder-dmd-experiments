@@ -760,7 +760,7 @@ def main(
             xp=array_api_compat.array_namespace(mat),
             device=device,
         )
-        c = view_as_real(c[zmask])
+        c = torch.view_as_real(c[zmask])
         c = c.unsqueeze(1).expand(-1, x.shape[1], -1)
 
         x = torch.concat([x, c], dim=-1)
