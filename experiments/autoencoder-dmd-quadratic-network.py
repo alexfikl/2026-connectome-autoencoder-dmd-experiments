@@ -91,19 +91,19 @@ def make_layers(
 
 class DMDAutoencoderResult(NamedTuple):
     A_dmd: torch.Tensor
-    """DMD approximated linear operator in the latent space."""
+    """Same-space DMD linear operator on the augmented state ``[z; c]``."""
 
     x_out: torch.Tensor
-    """Output of the autoencoder."""
+    """Output of the autoencoder (decoded augmented state)."""
 
     y_latent: torch.Tensor | None
-    """Output of the encoder."""
+    """Encoded augmented trajectory (same as encoder input, for loss_lin)."""
 
     yhat_latent: torch.Tensor | None
-    """DMD reconstructed latent vector :attr:`x_latent`."""
+    """DMD multi-step prediction of the latent augmented trajectory."""
 
     yhat_out: torch.Tensor | None
-    """Output of the decoder applied to :atr:`yhat_latent`."""
+    """Decoded DMD multi-step prediction (back in physical augmented space)."""
 
 
 class DMDAutoencoder(nn.Module):
@@ -114,6 +114,7 @@ class DMDAutoencoder(nn.Module):
         encoder_layer_sizes: int | tuple[int, ...] | None = None,
         decoder_layer_sizes: int | tuple[int, ...] | None = None,
         dmd_enabled: bool = False,
+        dmd_multistep: bool = True,
         eps: float = 1.0e-4,
         alpha: float | None = None,
         device: str | torch.device | None = None,
@@ -148,6 +149,8 @@ class DMDAutoencoder(nn.Module):
         self.encoder_layer_sizes = encoder_layer_sizes
         self.decoder_layer_sizes = decoder_layer_sizes
         self.dtype = dtype
+
+        self.dmd_multistep = dmd_multistep
         self.dmd_enabled = dmd_enabled
         self.eps = eps
 
@@ -178,64 +181,46 @@ class DMDAutoencoder(nn.Module):
         # }}}
 
     def forward(self, x_in: torch.Tensor) -> DMDAutoencoderResult:
-        # NOTE: x has a shape of (batch_size, window_size, 2 r) and we want to
-        # do DMD on it, so we go
-        # 1. X = x[:, :-1, :].reshape(-1, 2 * r)
-        #    Y = x[:, 1:, :].reshape(-1, 2 * r)
-        # 2. build the DMD operator for this batch with (X, Y)
-
         r = self.latent_size
-        batch_size, window_size, d = x_in.shape
-        d = (d - 2) // 2
+        batch_size, window_size = x_in.shape[:2]
 
-        x = x_in[:, :, :-2]
-        c = x_in[:, :, -2:]
-        c = c.repeat(1, 1, d)
-        assert c.shape == (batch_size, window_size, 2 * d)
-
-        # go to latent space
-        x_latent = self.encoder(x)
+        # encode the full augmented state [z_n; c]
+        x_latent = self.encoder(x_in)
         assert x_latent.shape == (batch_size, window_size, 2 * r)
 
-        # shape of the latent space
         if self.training and self.dmd_enabled:
-            y_latent = self.encoder(x - c)
-            assert y_latent.shape == (batch_size, window_size, 2 * r)
-
-            # separate data for DMD
-            # NOTE: perform DMD on the complex variables to maintain the complex
-            # dynamics (the rest of the autoencoder is also complex-friendly)
+            # same-space DMD on the encoded augmented trajectory
             cx_latent = view_as_complex(x_latent)
-            cy_latent = view_as_complex(y_latent)
             X = cx_latent[:, :-1, :].reshape(-1, r)
-            Y = cy_latent[:, 1:, :].reshape(-1, r)
-
-            # construct DMD operator in latent space
+            Y = cx_latent[:, 1:, :].reshape(-1, r)
             A_dmd = Y.T @ torch.linalg.pinv(X.T, rtol=self.eps)
             assert A_dmd.shape == (r, r)
 
-            # predict with DMD in latent space (single-step)
-            yhat_latent = cx_latent @ A_dmd.T
-            yhat_latent = interleave(yhat_latent.real, yhat_latent.imag, axis=-1)
+            if self.dmd_multistep:
+                yhat_cx = torch.empty_like(cx_latent)
+                yhat_cx[:, 0, :] = cx_latent[:, 0, :]
+                for t in range(1, window_size):
+                    yhat_cx[:, t, :] = yhat_cx[:, t - 1, :] @ A_dmd.T
+            else:
+                yhat_cx = cx_latent @ A_dmd.T
+
+            yhat_latent = interleave(yhat_cx.real, yhat_cx.imag, axis=-1)
             assert yhat_latent.shape == (batch_size, window_size, 2 * r)
 
-            yhat_out = self.decoder(yhat_latent) + c
-            yhat_out = torch.concat([yhat_out, x_in[:, :, -2:]], dim=-1)
-            assert yhat_out.shape == (batch_size, window_size, 2 * (d + 1))
+            yhat_out = self.decoder(yhat_latent)
+            assert yhat_out.shape == x_in.shape
         else:
-            A_dmd = torch.eye(r, r, device=x.device, dtype=x.dtype)
-            y_latent = None
+            A_dmd = torch.eye(r, r, device=x_in.device, dtype=x_in.dtype)
             yhat_latent = None
             yhat_out = None
 
         x_out = self.decoder(x_latent)
-        x_out = torch.concat([x_out, x_in[:, :, -2:]], dim=-1)
-        assert x_out.shape == (batch_size, window_size, 2 * (d + 1))
+        assert x_out.shape == x_in.shape
 
         return DMDAutoencoderResult(
             A_dmd=A_dmd,
             x_out=x_out,
-            y_latent=y_latent,
+            y_latent=x_latent if self.training and self.dmd_enabled else None,
             yhat_latent=yhat_latent,
             yhat_out=yhat_out,
         )
@@ -536,45 +521,30 @@ def build_latent_dmd(
     *,
     block_size: int = 256,
 ) -> torch.Tensor:
-    """Build the DMD operator in the latent space.
+    r"""Build the DMD operator in the latent space from the full dataset.
 
-    Z is expected to have shape ``(ntraj, maxit, 2d + 2)`` with the trailing two
-    channels encoding the forcing term ``c``. The returned operator maps
-
-        encoder(z_n) -> encoder(z_{n+1} - c)
-
-    matching the convention used in model.forward.
+    ``Z`` has shape ``(ntraj, maxit, 2(d + 1))`` — the augmented state
+    ``[z_n; c]`` in interleaved real format.
     """
-
     r = model.latent_size
 
-    # separate trajectory and forcing
-    z = Z[:, :, :-2]  # (ntraj, maxit, 2d)
-    c = Z[:, :, -2:]  # (ntraj, maxit, 2)
-    c = c.repeat(1, 1, z.shape[-1] // 2)  # (ntraj, maxit, 2d)
-
-    n = z.shape[0] * (z.shape[1] - 1)
+    n = Z.shape[0] * (Z.shape[1] - 1)
     complex_dtype = torch.complex64 if Z.dtype == torch.float32 else torch.complex128
 
-    Xs = torch.empty((n, r), dtype=complex_dtype, device=z.device)
-    Ys = torch.empty((n, r), dtype=complex_dtype, device=z.device)
+    Xs = torch.empty((n, r), dtype=complex_dtype, device=Z.device)
+    Ys = torch.empty((n, r), dtype=complex_dtype, device=Z.device)
 
     with torch.no_grad():
         model.eval()
 
         offset = 0
-        for start in range(0, z.shape[0], block_size):
-            z_block = z[start : start + block_size]
-            c_block = c[start : start + block_size]
+        for start in range(0, Z.shape[0], block_size):
+            z_block = Z[start : start + block_size]
+            cx = view_as_complex(model.encoder(z_block))
 
-            x_latent = model.encoder(z_block)
-            y_latent = model.encoder(z_block - c_block)
-            cx_latent = view_as_complex(x_latent)
-            cy_latent = view_as_complex(y_latent)
-
-            size = x_latent.shape[0] * (x_latent.shape[1] - 1)
-            Xs[offset : offset + size] = cx_latent[:, :-1, :].reshape(-1, r)
-            Ys[offset : offset + size] = cy_latent[:, 1:, :].reshape(-1, r)
+            size = z_block.shape[0] * (z_block.shape[1] - 1)
+            Xs[offset : offset + size] = cx[:, :-1, :].reshape(-1, r)
+            Ys[offset : offset + size] = cx[:, 1:, :].reshape(-1, r)
 
             offset += size
 
@@ -595,14 +565,15 @@ def torch_predict(
 
     from commonlib import generate_grid
 
-    d = int(model.input_size)
-
+    d = int(model.input_size) - 1  # original state dim (not counting c)
     dtype = model.dtype
     assert isinstance(dtype, torch.dtype)
     assert dtype.is_floating_point
 
     with torch.no_grad():
-        z = torch.zeros((resolution, resolution, 2 * d), dtype=dtype, device=device)
+        z = torch.zeros(
+            (resolution, resolution, 2 * (d + 1)), dtype=dtype, device=device
+        )
         c = generate_grid(
             *bbox,
             nx=resolution,
@@ -612,18 +583,19 @@ def torch_predict(
             device=device,
         )
         c = torch.view_as_real(cast("torch.Tensor", c))
-        c = c.repeat(1, 1, d)
         c = c / norm_factor
+        z[:, :, -2:] = c
 
         for _ in range(1, maxit):
             g = model.encoder(z)
-            g_complex = view_as_complex(g) @ A_dmd.T
-            g = interleave(g_complex.real, g_complex.imag, axis=-1)
-            z = model.decoder(g) + c
+            g_next = view_as_complex(g) @ A_dmd.T
+            g_next = interleave(g_next.real, g_next.imag, axis=-1)
+            z = model.decoder(g_next)
 
-        z = z * norm_factor
+        z[:, :, -2:] = z[:, :, -2:] * norm_factor
+        z2 = z[:, :, :-2]
 
-    return view_as_complex(z)
+    return view_as_complex(z2.reshape(*z2.shape[:-1], -1, 2))
 
 
 # }}}
@@ -722,9 +694,9 @@ def main(
 
     d = mat.shape[0]
     model = DMDAutoencoder(
-        d,
-        encoder_layer_sizes=(d, d // 2),
-        decoder_layer_sizes=(d // 2, d),
+        d + 1,
+        encoder_layer_sizes=(d + 1, (d + 1) // 2),
+        decoder_layer_sizes=((d + 1) // 2, d + 1),
         device=device,
         dtype=mat.dtype.to_real(),
     )
@@ -787,7 +759,6 @@ def main(
 
         x = torch.concat([x, c], dim=-1)
 
-        norm_factor = 10.0 * x.square().mean().sqrt().item()
         norm_factor = 1.0
 
         x = x / norm_factor
