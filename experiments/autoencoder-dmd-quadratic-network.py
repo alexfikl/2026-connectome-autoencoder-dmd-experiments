@@ -193,18 +193,20 @@ class DMDAutoencoder(nn.Module):
             cx_latent = view_as_complex(x_latent)
             X = cx_latent[:, :-1, :].reshape(-1, r)
             Y = cx_latent[:, 1:, :].reshape(-1, r)
+
             A_dmd = Y.T @ torch.linalg.pinv(X.T, rtol=self.eps)
             assert A_dmd.shape == (r, r)
 
+            # evolve with the DMD operator
             if self.dmd_multistep:
-                yhat_cx = torch.empty_like(cx_latent)
-                yhat_cx[:, 0, :] = cx_latent[:, 0, :]
-                for t in range(1, window_size):
-                    yhat_cx[:, t, :] = yhat_cx[:, t - 1, :] @ A_dmd.T
+                yhat_latent = [cx_latent[:, 0, :]]
+                for _ in range(1, window_size):
+                    yhat_latent.append(yhat_latent[-1] @ A_dmd.T)
+                yhat_latent = torch.stack(yhat_latent, dim=1)
             else:
-                yhat_cx = cx_latent @ A_dmd.T
+                yhat_latent = cx_latent @ A_dmd.T
 
-            yhat_latent = interleave(yhat_cx.real, yhat_cx.imag, axis=-1)
+            yhat_latent = interleave(yhat_latent.real, yhat_latent.imag, axis=-1)
             assert yhat_latent.shape == (batch_size, window_size, 2 * r)
 
             yhat_out = self.decoder(yhat_latent)
