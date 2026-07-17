@@ -592,10 +592,9 @@ def torch_predict(
             g_next = interleave(g_next.real, g_next.imag, axis=-1)
             z = model.decoder(g_next)
 
-        z = z * norm_factor
-        z2 = z[:, :, :-2]
+        z = z[:, :, :-2] * norm_factor
 
-    return view_as_complex(z2.reshape(*z2.shape[:-1], -1, 2))
+    return view_as_complex(z)
 
 
 # }}}
