@@ -117,7 +117,8 @@ class DMDAutoencoder(nn.Module):
         encoder_layer_sizes: int | tuple[int, ...] | None = None,
         decoder_layer_sizes: int | tuple[int, ...] | None = None,
         dmd_enabled: bool = False,
-        dmd_multistep: bool = True,
+        dmd_multistep: bool = False,
+        dmd_multistep_length: int = 4,
         eps: float = 1.0e-4,
         alpha: float | None = None,
         device: str | torch.device | None = None,
@@ -154,6 +155,7 @@ class DMDAutoencoder(nn.Module):
         self.dtype = dtype
 
         self.dmd_multistep = dmd_multistep
+        self.dmd_multistep_length = dmd_multistep_length
         self.dmd_enabled = dmd_enabled
         self.eps = eps
 
@@ -202,10 +204,14 @@ class DMDAutoencoder(nn.Module):
 
             # evolve with the DMD operator
             if self.dmd_multistep:
-                yhat_latent = [cx_latent[:, 0, :]]
-                for _ in range(1, window_size):
-                    yhat_latent.append(yhat_latent[-1] @ A_dmd.T)
-                yhat_latent = torch.stack(yhat_latent, dim=1)
+                n_steps = min(self.dmd_multistep_length, window_size - 1)
+                yhat_steps = [cx_latent[:, 0, :]]
+                for _ in range(n_steps):
+                    yhat_steps.append(yhat_steps[-1] @ A_dmd.T)
+                yhat_latent = torch.cat(
+                    [torch.stack(yhat_steps, dim=1), cx_latent[:, n_steps + 1 :, :]],
+                    dim=1,
+                )
             else:
                 yhat_latent = cx_latent @ A_dmd.T
 
@@ -340,6 +346,7 @@ def torch_train(
     epochs: int = 50,
     batch_size: int = 2048,
     dmd_warmup_epochs: int = 0,
+    dmd_multistep_warmup_epochs: int = 0,
     patience_early_stop: int = 0,
     callback: Callable[[int, DMDAutoencoder], None] | None = None,
 ) -> tuple[DMDAutoencoder, torch.optim.Optimizer, torch.Tensor]:
@@ -381,8 +388,14 @@ def torch_train(
 
         model.train()
         model.dmd_enabled = epoch >= dmd_warmup_epochs
+        model.dmd_multistep = epoch >= dmd_warmup_epochs + dmd_multistep_warmup_epochs
         if epoch == dmd_warmup_epochs and dmd_warmup_epochs > 0:
             log.info("Enabling DMD at epoch %03d", epoch + 1)
+        if (
+            epoch == dmd_warmup_epochs + dmd_multistep_warmup_epochs
+            and model.dmd_multistep
+        ):
+            log.info("Enabling DMD multi-step at epoch %03d", epoch + 1)
 
         loss_epoch = torch.zeros(criterion.dim, device=device)
         num_batches = 0
@@ -622,6 +635,7 @@ def main(
     window_size: int = 32,
     nwindows: int = 16,
     dmd_warmup_epochs: int = 0,
+    dmd_multistep_warmup_epochs: int = 0,
     early_stop_patience: int = 0,
     overwrite: bool = False,
 ) -> int:
@@ -792,6 +806,7 @@ def main(
             window_size=window_size,
             nwindows=nwindows,
             dmd_warmup_epochs=dmd_warmup_epochs,
+            dmd_multistep_warmup_epochs=dmd_multistep_warmup_epochs,
             patience_early_stop=early_stop_patience,
             callback=plot_predict,
         )
@@ -978,6 +993,12 @@ if __name__ == "__main__":
         help="Train this many epochs without DMD before enabling it (0 disables)",
     )
     parser.add_argument(
+        "--dmd-multistep-warmup-epochs",
+        type=int,
+        default=0,
+        help="Extra epochs with single-step DMD before enabling multi-step",
+    )
+    parser.add_argument(
         "--early-stop-patience",
         type=int,
         default=0,
@@ -1004,6 +1025,7 @@ if __name__ == "__main__":
                 dataidx=args.dataidx,
                 resolution=args.resolution,
                 dmd_warmup_epochs=args.dmd_warmup_epochs,
+                dmd_multistep_warmup_epochs=args.dmd_multistep_warmup_epochs,
                 early_stop_patience=args.early_stop_patience,
                 outfile=args.outfile,
                 overwrite=args.force,
