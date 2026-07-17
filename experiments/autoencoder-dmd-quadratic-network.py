@@ -118,7 +118,7 @@ class DMDAutoencoder(nn.Module):
         decoder_layer_sizes: int | tuple[int, ...] | None = None,
         dmd_enabled: bool = False,
         dmd_multistep: bool = False,
-        dmd_multistep_length: int = 4,
+        dmd_multistep_length: int = 16,
         eps: float = 1.0e-4,
         alpha: float | None = None,
         device: str | torch.device | None = None,
@@ -204,10 +204,15 @@ class DMDAutoencoder(nn.Module):
 
             # evolve with the DMD operator
             if self.dmd_multistep:
-                n_steps = min(self.dmd_multistep_length, window_size - 1)
+                if self.dmd_multistep_length is None:
+                    n_steps = window_size - 1
+                else:
+                    n_steps = min(self.dmd_multistep_length, window_size - 1)
+
                 yhat_steps = [cx_latent[:, 0, :] @ A_dmd.T]
                 for _ in range(n_steps - 1):
                     yhat_steps.append(yhat_steps[-1] @ A_dmd.T)
+
                 yhat_multi = torch.stack(yhat_steps, dim=1)
                 yhat_single = cx_latent[:, n_steps:, :] @ A_dmd.T
                 yhat_latent = torch.cat([yhat_multi, yhat_single], dim=1)
