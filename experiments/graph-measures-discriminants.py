@@ -351,7 +351,7 @@ def main(
 
     # {{{ mutual information bar plot
 
-    from commonlib import set_matplotlib_style  # noqa: F401
+    from commonlib import set_matplotlib_style  # ruff:ignore[unused-import]
     from nneuroutil.visualization import figure, make_colorbar_axes
 
     pretty_names = [NAME_TO_LABEL[name] for name in measure_names]

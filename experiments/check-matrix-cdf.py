@@ -72,7 +72,7 @@ def main(
 
     amat_sorted, cdf = compute_cdf(matrices)
 
-    from commonlib import set_matplotlib_style  # noqa: F401
+    from commonlib import set_matplotlib_style  # ruff:ignore[unused-import]
     from nneuroutil.visualization import figure
 
     with figure(outfile) as fig:
