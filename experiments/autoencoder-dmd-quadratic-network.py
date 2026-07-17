@@ -14,7 +14,6 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from nneuroutil.array_api_extras import interleave
 from nneuroutil.helpers import FuzzyChoiceAction, TicTocTimer, module_logger
 from nneuroutil.torch_extras import available_device_names, torch_default_device
 from nneuroutil.visualization import figure
@@ -34,8 +33,12 @@ Example:
 # {{{ model
 
 
-def view_as_complex(x: torch.Tensor):
+def view_as_complex(x: torch.Tensor) -> torch.Tensor:
     return torch.view_as_complex(x.reshape(*x.shape[:-1], -1, 2).contiguous())
+
+
+def view_as_real(x: torch.Tensor) -> torch.Tensor:
+    return torch.view_as_real(x).reshape(*x.shape[:-1], -1)
 
 
 def make_layers(
@@ -206,7 +209,7 @@ class DMDAutoencoder(nn.Module):
             else:
                 yhat_latent = cx_latent @ A_dmd.T
 
-            yhat_latent = interleave(yhat_latent.real, yhat_latent.imag, axis=-1)
+            yhat_latent = view_as_real(yhat_latent)
             assert yhat_latent.shape == (batch_size, window_size, 2 * r)
 
             yhat_out = self.decoder(yhat_latent)
@@ -576,23 +579,25 @@ def torch_predict(
         z = torch.zeros(
             (resolution, resolution, 2 * (d + 1)), dtype=dtype, device=device
         )
-        c = generate_grid(
-            *bbox,
-            nx=resolution,
-            ny=resolution,
-            dtype=dtype.to_complex(),
-            xp=array_api_compat.array_namespace(A_dmd),
-            device=device,
+        c = cast(
+            "torch.Tensor",
+            generate_grid(
+                *bbox,
+                nx=resolution,
+                ny=resolution,
+                dtype=dtype.to_complex(),
+                xp=array_api_compat.array_namespace(A_dmd),
+                device=device,
+            ),
         )
-        c = torch.view_as_real(cast("torch.Tensor", c))
+        c = view_as_real(c)
         c = c / norm_factor
         z[:, :, -2:] = c
 
         for _ in range(1, maxit):
             g = model.encoder(z)
             g_next = view_as_complex(g) @ A_dmd.T
-            g_next = interleave(g_next.real, g_next.imag, axis=-1)
-            z = model.decoder(g_next)
+            z = model.decoder(view_as_real(g_next))
 
         z = z[:, :, :-2] * norm_factor
 
@@ -755,8 +760,7 @@ def main(
             xp=array_api_compat.array_namespace(mat),
             device=device,
         )
-        c = c[zmask]
-        c = torch.view_as_real(c)
+        c = view_as_real(c[zmask])
         c = c.unsqueeze(1).expand(-1, x.shape[1], -1)
 
         x = torch.concat([x, c], dim=-1)
