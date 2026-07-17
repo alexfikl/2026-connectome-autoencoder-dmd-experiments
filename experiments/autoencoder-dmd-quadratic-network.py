@@ -590,7 +590,7 @@ def torch_predict(
                 device=device,
             ),
         )
-        c = view_as_real(c)
+        c = torch.view_as_real(c)
         c = c / norm_factor
         z[:, :, -2:] = c
 
