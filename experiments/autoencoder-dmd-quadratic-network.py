@@ -273,7 +273,7 @@ class DMDLoss(nn.Module):
 
         self.mse = nn.MSELoss()
         self.gamma_rec = gamma_rec / scale
-        self.gamma_lin = gamma_lin
+        self.gamma_lin = gamma_lin / scale
         self.gamma_pre = gamma_pre / scale
 
     @property
@@ -608,7 +608,7 @@ def main(
     datakey: str = "matrices",
     dataidx: int = 5,
     bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
-    escape_radius: float | None = 100.0,
+    escape_radius: float | None = 10.0,
     resolution: int = 128,
     maxit: int = 128,
     epochs: int = 100,
@@ -730,7 +730,8 @@ def main(
 
         # {{{ generate dataset
 
-        min_escape_iters = 3 * (maxit + 1) // 4
+        min_escape_iters = 1 * (maxit + 1) // 4
+        # min_escape_iters = None
 
         x, _, zmask = cast(
             tuple[torch.Tensor, torch.Tensor, torch.Tensor],
