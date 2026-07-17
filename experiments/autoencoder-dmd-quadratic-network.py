@@ -35,7 +35,7 @@ Example:
 
 
 def view_as_complex(x: torch.Tensor):
-    return torch.view_as_complex(x.reshape(*x.shape[:-1], -1, 2))
+    return torch.view_as_complex(x.reshape(*x.shape[:-1], -1, 2).contiguous())
 
 
 def make_layers(
@@ -931,6 +931,7 @@ def main(
         bbox=bbox,
         resolution=2 * resolution,
         maxit=maxit,
+        norm_factor=norm_factor,
     )
     mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
 
