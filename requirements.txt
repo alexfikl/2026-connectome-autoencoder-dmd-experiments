@@ -22,7 +22,7 @@ mdurl==0.1.2
     # via markdown-it-py
 networkx==3.6.1
     # via fractal-dmd-autoencoder (pyproject.toml)
-nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@9211a53396a1bfe469cafa3c2699cfc2d7af4863#egg=nneuroutil
+nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@57aaf0a5833bc7e8494cd35bf7ac30cfd1154761#egg=nneuroutil
     # via fractal-dmd-autoencoder (pyproject.toml)
 numpy==2.4.6 ; python_full_version < '3.12'
     # via
