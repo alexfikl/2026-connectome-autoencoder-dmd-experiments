@@ -205,13 +205,12 @@ class DMDAutoencoder(nn.Module):
             # evolve with the DMD operator
             if self.dmd_multistep:
                 n_steps = min(self.dmd_multistep_length, window_size - 1)
-                yhat_steps = [cx_latent[:, 0, :]]
-                for _ in range(n_steps):
+                yhat_steps = [cx_latent[:, 0, :] @ A_dmd.T]
+                for _ in range(n_steps - 1):
                     yhat_steps.append(yhat_steps[-1] @ A_dmd.T)
-                yhat_latent = torch.cat(
-                    [torch.stack(yhat_steps, dim=1), cx_latent[:, n_steps + 1 :, :]],
-                    dim=1,
-                )
+                yhat_multi = torch.stack(yhat_steps, dim=1)
+                yhat_single = cx_latent[:, n_steps:, :] @ A_dmd.T
+                yhat_latent = torch.cat([yhat_multi, yhat_single], dim=1)
             else:
                 yhat_latent = cx_latent @ A_dmd.T
 
@@ -519,10 +518,8 @@ def torch_train(
                 callback(epoch, compiled_model)  # ty: ignore[invalid-argument-type]
 
     if best_state is not None:
-        model.load_state_dict(best_state)
-        log.info(
-            "Restored best model from epoch %03d (loss %.5e)", best_epoch, best_loss
-        )
+        # model.load_state_dict(best_state)
+        log.info("Best model at epoch %03d (loss %.5e)", best_epoch, best_loss)
 
     return model, optimizer, losses
 
@@ -699,12 +696,12 @@ def main(
         mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
         log.info("    Converged:    %d/%d", torch.sum(mask), mask.numel())
 
-        with figure(
-            basename.with_stem(f"{basename.stem}-predict-{epoch:04d}"),
-            overwrite=overwrite,
-        ) as fig:
-            ax = fig.gca()
-            ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
+        # with figure(
+        #     basename.with_stem(f"{basename.stem}-predict-{epoch:04d}"),
+        #     overwrite=overwrite,
+        # ) as fig:
+        #     ax = fig.gca()
+        #     ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
 
     # }}}
 
