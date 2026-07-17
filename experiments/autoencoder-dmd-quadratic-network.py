@@ -320,7 +320,7 @@ class DMDLoss(nn.Module):
             loss_pre = self.mse(x_in[:, 1:, :], yhat_out[:, :-1, :])
             loss_pre = self.gamma_pre * loss_pre
         else:
-            loss_lin = torch.zeros_like(loss_rec)
+            loss_pre = torch.zeros_like(loss_rec)
 
         return DMDLossResult(
             total=loss_rec + loss_lin + loss_pre,
