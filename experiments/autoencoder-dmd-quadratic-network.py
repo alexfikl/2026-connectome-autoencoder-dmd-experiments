@@ -201,11 +201,13 @@ class DMDAutoencoder(nn.Module):
         if self.training and self.dmd_enabled:
             # same-space DMD on the encoded augmented trajectory
             cx_latent = view_as_complex(x_latent)
-            X = cx_latent[:, :-1, :].reshape(-1, r)
-            Y = cx_latent[:, 1:, :].reshape(-1, r)
 
-            A_dmd = Y.T @ torch.linalg.pinv(X.T, rtol=self.eps)
-            assert A_dmd.shape == (r, r)
+            with torch.no_grad():
+                X = cx_latent[:, :-1, :].reshape(-1, r)
+                Y = cx_latent[:, 1:, :].reshape(-1, r)
+
+                A_dmd = Y.T @ torch.linalg.pinv(X.T, rtol=self.eps)
+                assert A_dmd.shape == (r, r)
 
             # evolve with the DMD operator
             yhat_latent = [cx_latent[:, 0, :] @ A_dmd.T]
