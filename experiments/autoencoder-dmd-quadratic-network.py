@@ -66,9 +66,9 @@ def make_layers(
         pairwise(sizes), nonlinearities, strict=True
     ):
         # build nonlinearity
-        if nonlinearity == "quadratic":
+        if nonlinearity == "cquadratic":
             activation = ComplexQuadratic(interleaved=True)
-        elif nonlinearity == "blended_quadratic":
+        elif nonlinearity == "cblended_quadratic":
             activation = ComplexBlendedQuadratic(
                 0.5 if alpha is None else alpha, interleaved=True
             )
@@ -168,7 +168,7 @@ class DMDAutoencoder(nn.Module):
         nlayers = len(encoder_layer_sizes)
         encoder_layers = make_layers(
             (self.input_size, *encoder_layer_sizes),
-            # (*(("blended_quadratic",) * (nlayers - 1)), "quadratic"),
+            # (*(("cblended_quadratic",) * (nlayers - 1)), "cquadratic"),
             ("leaky_modrelu",) * nlayers,
             alpha=alpha,
             device=device,
@@ -180,7 +180,7 @@ class DMDAutoencoder(nn.Module):
         nlayers = len(decoder_layer_sizes)
         decoder_layers = make_layers(
             (self.latent_size, *decoder_layer_sizes),
-            # ("quadratic", *(("blended_quadratic",) * (nlayers - 1))),
+            # ("cquadratic", *(("cblended_quadratic",) * (nlayers - 1))),
             ("leaky_modrelu",) * nlayers,
             alpha=alpha,
             device=device,
