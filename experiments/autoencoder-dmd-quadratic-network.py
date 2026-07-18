@@ -690,15 +690,17 @@ def main(
             maxit=maxit,
             norm_factor=norm_factor,
         )
-        mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
-        log.info("    Converged:    %d/%d", torch.sum(mask), mask.numel())
+        in_set = (
+            torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
+        )
+        log.info("    Converged:    %d/%d", torch.sum(in_set), in_set.numel())
 
         with figure(
             basename.with_stem(f"{basename.stem}-predict-{epoch:04d}"),
             overwrite=overwrite,
         ) as fig:
             ax = fig.gca()
-            ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
+            ax.imshow(in_set.cpu().numpy(), extent=bbox, cmap="binary")
 
     # }}}
 
@@ -744,11 +746,13 @@ def main(
 
         # {{{ generate dataset
 
-        min_escape_iters = 1 * (maxit + 1) // 4
-        # min_escape_iters = None
+        # NOTE: keep the fast escapers as well; the pinned states are masked
+        # out of the DMD fit and the losses below, so their clipped tails do
+        # not dominate the training anymore
+        min_escape_iters = 2
 
-        x, _, zmask = cast(
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        x, _, mask, zmask = cast(
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
             generate_timeseries_dataset(
                 mat,
                 bbox=bbox,
@@ -768,7 +772,7 @@ def main(
             xp=array_api_compat.array_namespace(mat),
             device=device,
         )
-        c = torch.view_as_real(c[zmask])
+        c = torch.view_as_real(c[mask])
         c = c.unsqueeze(1).expand(-1, x.shape[1], -1)
 
         x = torch.concat([x, c], dim=-1)

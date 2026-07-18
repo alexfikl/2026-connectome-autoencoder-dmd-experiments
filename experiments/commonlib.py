@@ -261,16 +261,18 @@ def generate_timeseries_dataset(
     maxit: int = 128,
     min_escape_iters: int | None = None,
     xp: Any = None,
-) -> tuple[Array3D, Array3D, Array2D]:
+) -> tuple[Array3D, Array3D, Array2D, Array2D]:
     """
     :arg min_escape_iters: Minimum iterations before a trajectory is allowed
         to escape.  Points escaping earlier are excluded.  ``None`` keeps
         only fully converged points (escaped at the final timestep).
-    :returns: a tuple ``(x, y, mask)``, where *x* and *y* are arrays of shape
-        ``(ntrajectories, maxit - 1, 2d)`` and the *mask* is an array of shape
-        ``(resolution, resolution)``. The two arrays represent consecutive
-        time steps ``(z_n, z_{n + 1} - c)`` and the *mask* gives the converged
-        points at the final time step over the whole *bbox*.
+
+    :returns: a tuple ``(x, y, mask, in_set)``, where *x* and *y* are arrays of
+        shape ``(ntrajectories, maxit - 1, 2d)`` and the *mask* and *inset* are an
+        arrays of shape ``(resolution, resolution)``. The two arrays represent
+        consecutive time steps ``(z_n, z_{n + 1} - c)``, the *mask* gives the
+        chosen points in the dataset, and *in_set* gives the converged points
+        at the final time step over the whole *bbox*.
     """
     if xp is None:
         xp = array_api_compat.array_namespace(mat)
@@ -286,9 +288,19 @@ def generate_timeseries_dataset(
             xp=xp,
         )
 
+    # converged points over the whole grid (never escaped, i.e. still below the
+    # escape radius at the final time step)
+    in_set = (
+        xp.sum(xp.real(z[-1]) ** 2 + xp.imag(z[-1]) ** 2, axis=-1) < escape_radius**2
+    )
+
     # only keep points that survive long enough
     z, mask = post_process_dataset(
-        z, escape_radius, interleaved=True, min_escape_iters=min_escape_iters, xp=xp
+        z,
+        escape_radius,
+        interleaved=True,
+        min_escape_iters=min_escape_iters,
+        xp=xp,
     )
     c = c[mask][:, None, None]
 
@@ -299,13 +311,14 @@ def generate_timeseries_dataset(
 
     zabs = xp.sqrt(z[:, :, ::2] ** 2 + z[:, :, 1::2] ** 2)
     log.info("Dataset:")
-    log.info("    Converged:    %d/%d", xp.sum(mask), math.prod(mask.shape))
+    log.info("    Converged:    %d/%d", xp.sum(in_set), math.prod(in_set.shape))
+    log.info("    Picked:       %d/%d", xp.sum(mask), math.prod(mask.shape))
     log.info("    Size:         %s", z.shape)
     log.info("    Max:          %.5e (radius %.5e)", xp.max(zabs), escape_radius)
     log.info("    Spread:       %.5e ± %.5e", xp.mean(zabs), xp.std(zabs))
 
     # NOTE: mask only returned for plotting
-    return x, y, mask
+    return x, y, mask, in_set
 
 
 def make_timeseries_datasets(

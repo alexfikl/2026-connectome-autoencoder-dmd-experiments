@@ -389,7 +389,7 @@ def main(
 
         # {{{ generate dataset
 
-        x, y, zmask = generate_timeseries_dataset(
+        x, y, _, zmask = generate_timeseries_dataset(
             mat,
             bbox=bbox,
             resolution=resolution,

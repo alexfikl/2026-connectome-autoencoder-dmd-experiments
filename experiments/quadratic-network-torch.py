@@ -188,8 +188,8 @@ def main(
     else:
         # {{{ generate dataset
 
-        x, y, zmask = cast(
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        x, y, _, zmask = cast(
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
             generate_timeseries_dataset(
                 mat,
                 bbox=bbox,
