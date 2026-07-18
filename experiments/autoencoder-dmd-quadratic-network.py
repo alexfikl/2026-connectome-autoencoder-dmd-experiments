@@ -596,9 +596,14 @@ def torch_predict(
         z[:, :, -2:] = c
 
         for _ in range(1, maxit):
+            # NOTE: the model already learned `A * norm_factor` so no rescaling
+            # needed here. We just need it at the end to go back to physical space
             g = model.encoder(z)
             g_next = view_as_complex(g) @ A_dmd.T
             z = model.decoder(view_as_real(g_next))
+
+            # reset c because why not, no point in letting the model go through it
+            z[:, :, -2:] = c
 
         z = z[:, :, :-2] * norm_factor
 
