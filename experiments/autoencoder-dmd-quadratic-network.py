@@ -714,7 +714,7 @@ def main(
         device=device,
         dtype=mat.dtype.to_real(),
     )
-    optimizer = optim.AdamW(model.parameters(), lr=1.0e-4, weight_decay=1.0e-3)
+    optimizer = optim.Adam(model.parameters(), lr=1.0e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         patience=3,
