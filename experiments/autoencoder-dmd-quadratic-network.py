@@ -41,6 +41,18 @@ def view_as_real(x: torch.Tensor) -> torch.Tensor:
     return torch.view_as_real(x).reshape(*x.shape[:-1], -1)
 
 
+def compute_active_mask(x: torch.Tensor, escape_radius: float) -> torch.Tensor:
+    """Compute a boolean mask of active (non-pinned) states in ``x``.
+
+    ``x`` is the augmented state ``[z_n; c]`` in interleaved real format of
+    shape ``(batch, window, 2(d + 1))``. A state is pinned (clipped) if its
+    squared norm exceeds the escape radius (see ``commonlib.generate_dataset``).
+    """
+    zx = view_as_complex(x[..., :-2])
+    sqr_norm = torch.sum(zx.real**2 + zx.imag**2, dim=-1)
+    return sqr_norm <= escape_radius**2
+
+
 def make_layers(
     sizes: tuple[int, ...],
     nonlinearities: tuple[str, ...],
@@ -110,10 +122,10 @@ class DMDAutoencoderResult(NamedTuple):
     """Encoded augmented trajectory (same as encoder input, for loss_lin)."""
 
     yhat_latent: torch.Tensor | None
-    """DMD multi-step prediction of the latent augmented trajectory."""
+    """DMD one-step prediction of the latent augmented trajectory (steps 1..n)."""
 
     yhat_out: torch.Tensor | None
-    """Decoded DMD multi-step prediction (back in physical augmented space)."""
+    """Decoded DMD one-step prediction (back in physical augmented space)."""
 
 
 class DMDAutoencoder(nn.Module):
@@ -124,6 +136,7 @@ class DMDAutoencoder(nn.Module):
         encoder_layer_sizes: int | tuple[int, ...] | None = None,
         decoder_layer_sizes: int | tuple[int, ...] | None = None,
         dmd_enabled: bool = False,
+        escape_radius: float | None = None,
         eps: float = 1.0e-4,
         alpha: float | None = None,
         device: str | torch.device | None = None,
@@ -160,6 +173,9 @@ class DMDAutoencoder(nn.Module):
         self.dtype = dtype
 
         self.dmd_enabled = dmd_enabled
+        # escape radius (in dataset units, i.e. after norm_factor scaling) used
+        # to mask out pinned states; None disables the masking
+        self.escape_radius = escape_radius
         self.eps = eps
 
         # {{{ construct autoencoder
@@ -190,6 +206,26 @@ class DMDAutoencoder(nn.Module):
 
         # }}}
 
+    def fit_dmd(self, cx_latent: torch.Tensor, x_in: torch.Tensor) -> torch.Tensor:
+        r = self.latent_size
+
+        X = cx_latent[:, :-1, :].reshape(-1, r)
+        Y = cx_latent[:, 1:, :].reshape(-1, r)
+
+        # drop pinned -> pinned transitions: they are artifacts of the
+        # clipping in generate_dataset, not actual dynamics (the escape
+        # transition into the first pinned state is kept)
+        if self.escape_radius is not None:
+            w = compute_active_mask(x_in, self.escape_radius)[:, :-1]
+            w = w.reshape(-1).to(torch.bool)
+            if torch.any(w):
+                X = X[w]
+                Y = Y[w]
+
+        A_dmd = Y.T @ torch.linalg.pinv(X.T, rtol=self.eps)
+        assert A_dmd.shape == (r, r)
+        return A_dmd
+
     def forward(self, x_in: torch.Tensor) -> DMDAutoencoderResult:
         r = self.latent_size
         batch_size, window_size = x_in.shape[:2]
@@ -203,22 +239,18 @@ class DMDAutoencoder(nn.Module):
             cx_latent = view_as_complex(x_latent)
 
             with torch.no_grad():
-                X = cx_latent[:, :-1, :].reshape(-1, r)
-                Y = cx_latent[:, 1:, :].reshape(-1, r)
+                A_dmd = self.fit_dmd(cx_latent, x_in)
 
-                A_dmd = Y.T @ torch.linalg.pinv(X.T, rtol=self.eps)
-                assert A_dmd.shape == (r, r)
-
-            # evolve with the DMD operator
-            yhat_latent = [cx_latent[:, 0, :] @ A_dmd.T]
-            for _ in range(1, window_size):
-                yhat_latent.append(yhat_latent[-1] @ A_dmd.T)
-
-            yhat_latent = view_as_real(torch.stack(yhat_latent, dim=1))
-            assert yhat_latent.shape == (batch_size, window_size, 2 * r)
+            # evolve with the DMD operator. NOTE: only one-step (teacher-forced)
+            # predictions are used for training: a multi-step rollout overflows
+            # as soon as A is expansive along the escape directions, which
+            # produces inf losses and NaN gradients
+            yhat_latent = cx_latent[:, :-1, :] @ A_dmd.T
+            yhat_latent = view_as_real(yhat_latent)
+            assert yhat_latent.shape == (batch_size, window_size - 1, 2 * r)
 
             yhat_out = self.decoder(yhat_latent)
-            assert yhat_out.shape == x_in.shape
+            assert yhat_out.shape == (batch_size, window_size - 1, x_in.shape[-1])
         else:
             A_dmd = torch.eye(r, r, device=x_in.device, dtype=x_in.dtype)
             yhat_latent = None
@@ -270,6 +302,19 @@ class DMDLossResult(NamedTuple):
         self.total.backward(*args, **kwargs)
 
 
+def masked_mse(
+    y: torch.Tensor,
+    yhat: torch.Tensor,
+    weight: torch.Tensor | None,
+) -> torch.Tensor:
+    """Weighted mean squared error over the ``(batch, window)`` dimensions."""
+    if weight is None:
+        return torch.mean((y - yhat) ** 2)
+
+    error = torch.sum(weight.unsqueeze(-1) * (y - yhat) ** 2)
+    return error / (torch.sum(weight) * y.shape[-1] + 1.0e-8)
+
+
 class DMDLoss(nn.Module):
     def __init__(
         self,
@@ -278,6 +323,7 @@ class DMDLoss(nn.Module):
         gamma_lin: float = 1.0,
         gamma_pre: float = 1.0,
         scale: float = 1.0,
+        escape_radius: float | None = None,
     ) -> None:
         super().__init__()
 
@@ -285,6 +331,8 @@ class DMDLoss(nn.Module):
         self.gamma_rec = gamma_rec / scale
         self.gamma_lin = gamma_lin / scale
         self.gamma_pre = gamma_pre / scale
+        # escape radius (in dataset units) used to mask out pinned states
+        self.escape_radius = escape_radius
 
     @property
     def dim(self) -> int:
@@ -299,20 +347,29 @@ class DMDLoss(nn.Module):
         yhat_latent: torch.Tensor | None = None,
         yhat_out: torch.Tensor | None = None,
     ) -> DMDLossResult:
+        # per-transition weights that mask out pinned -> pinned transitions:
+        # they are artifacts of the clipping, not actual dynamics (the escape
+        # transition into the first pinned state is kept)
+        if self.escape_radius is None:
+            weight = None
+        else:
+            weight = compute_active_mask(x_in, self.escape_radius)[:, :-1]
+            weight = weight.to(x_in.dtype)
+
         # reconstruction loss
         loss_rec = self.mse(x_in, x_out)
         loss_rec = self.gamma_rec * loss_rec
 
-        # latent space linearity loss
+        # latent space linearity loss (one-step, teacher-forced)
         if y_latent is not None and yhat_latent is not None:
-            loss_lin = self.mse(y_latent[:, 1:, :], yhat_latent[:, :-1, :])
+            loss_lin = masked_mse(y_latent[:, 1:, :], yhat_latent, weight)
             loss_lin = self.gamma_lin * loss_lin
         else:
             loss_lin = torch.zeros_like(loss_rec)
 
-        # linear reconstruction loss
+        # linear reconstruction loss (one-step, teacher-forced)
         if yhat_out is not None:
-            loss_pre = self.mse(x_in[:, 1:, :], yhat_out[:, :-1, :])
+            loss_pre = masked_mse(x_in[:, 1:, :], yhat_out, weight)
             loss_pre = self.gamma_pre * loss_pre
         else:
             loss_pre = torch.zeros_like(loss_rec)
@@ -352,6 +409,7 @@ def torch_train(
 
     device = X_train.device
     compiled_model = torch.compile(model)
+    # compiled_model = model
 
     train_dataset = SlidingWindowDataset(
         X_train, window_size=window_size, nwindows=nwindows
@@ -536,27 +594,33 @@ def build_latent_dmd(
     """
     r = model.latent_size
 
-    n = Z.shape[0] * (Z.shape[1] - 1)
-    complex_dtype = torch.complex64 if Z.dtype == torch.float32 else torch.complex128
-
-    Xs = torch.empty((n, r), dtype=complex_dtype, device=Z.device)
-    Ys = torch.empty((n, r), dtype=complex_dtype, device=Z.device)
-
     with torch.no_grad():
         model.eval()
 
-        offset = 0
+        Xs = []
+        Ys = []
         for start in range(0, Z.shape[0], block_size):
             z_block = Z[start : start + block_size]
             cx = view_as_complex(model.encoder(z_block))
 
-            size = z_block.shape[0] * (z_block.shape[1] - 1)
-            Xs[offset : offset + size] = cx[:, :-1, :].reshape(-1, r)
-            Ys[offset : offset + size] = cx[:, 1:, :].reshape(-1, r)
+            X_block = cx[:, :-1, :].reshape(-1, r)
+            Y_block = cx[:, 1:, :].reshape(-1, r)
 
-            offset += size
+            # drop pinned -> pinned transitions (see DMDAutoencoder.forward)
+            if model.escape_radius is not None:
+                w = compute_active_mask(z_block, model.escape_radius)[:, :-1]
+                w = w.reshape(-1).to(torch.bool)
+                if torch.any(w):
+                    X_block = X_block[w]
+                    Y_block = Y_block[w]
 
-        return Ys.T @ torch.linalg.pinv(Xs.T, rtol=model.eps)
+            Xs.append(X_block)
+            Ys.append(Y_block)
+
+        X = torch.cat(Xs)
+        Y = torch.cat(Ys)
+
+        return Y.T @ torch.linalg.pinv(X.T, rtol=model.eps)
 
 
 def torch_predict(
@@ -739,6 +803,7 @@ def main(
         A_dmd = checkpoint["a_dmd"]
         norm_factor = checkpoint["norm_factor"]
 
+        model.escape_radius = escape_radius / norm_factor
         model.eval()
     else:
         from commonlib import generate_timeseries_dataset
@@ -746,10 +811,7 @@ def main(
 
         # {{{ generate dataset
 
-        # NOTE: keep the fast escapers as well; the pinned states are masked
-        # out of the DMD fit and the losses below, so their clipped tails do
-        # not dominate the training anymore
-        min_escape_iters = 2
+        min_escape_iters = 1 * (maxit + 1) // 4
 
         x, _, mask, zmask = cast(
             tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
@@ -780,6 +842,8 @@ def main(
         norm_factor = 1.0
 
         x = x / norm_factor
+        # NOTE: the data is scaled by norm_factor, so scale the radius as well
+        model.escape_radius = escape_radius / norm_factor
         (x_train,), (x_validate,), (x_test,) = random_split((x,), (0.8, 0.1, 0.1))
 
         if device.type == "cuda":
@@ -790,7 +854,9 @@ def main(
         # {{{ train
 
         target_scale = torch.mean(x_train.conj() * x_train).real.item()
-        criterion = DMDLoss(scale=target_scale)
+        criterion = DMDLoss(
+            scale=target_scale, escape_radius=escape_radius / norm_factor
+        )
 
         _, optimizer, losses = torch_train(
             model,
