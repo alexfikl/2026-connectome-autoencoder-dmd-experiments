@@ -57,7 +57,8 @@ def make_layers(
         ComplexBlendedQuadratic,
         ComplexLinear,
         ComplexQuadratic,
-        kaiming_uniform_,
+        LeakyModReLU,
+        complex_kaiming_uniform_,
     )
 
     layers = []
@@ -71,6 +72,12 @@ def make_layers(
             activation = ComplexBlendedQuadratic(
                 0.5 if alpha is None else alpha, interleaved=True
             )
+        elif nonlinearity == "leakly_modrelu":
+            activation = LeakyModReLU(
+                bias=-0.1,
+                alpha=0.1 if alpha is None else alpha,
+                interleaved=True,
+            )
         else:
             raise ValueError(f"unsupported nonlinearity: {nonlinearity!r}")
 
@@ -78,7 +85,7 @@ def make_layers(
         linear = ComplexLinear(
             n_in, n_out, bias=False, interleaved=True, device=device, dtype=dtype
         )
-        kaiming_uniform_(
+        complex_kaiming_uniform_(
             linear.weight,
             nonlinearity=nonlinearity,
             param=alpha,
@@ -117,8 +124,6 @@ class DMDAutoencoder(nn.Module):
         encoder_layer_sizes: int | tuple[int, ...] | None = None,
         decoder_layer_sizes: int | tuple[int, ...] | None = None,
         dmd_enabled: bool = False,
-        dmd_multistep: bool = False,
-        dmd_multistep_length: int = 16,
         eps: float = 1.0e-4,
         alpha: float | None = None,
         device: str | torch.device | None = None,
@@ -154,8 +159,6 @@ class DMDAutoencoder(nn.Module):
         self.decoder_layer_sizes = decoder_layer_sizes
         self.dtype = dtype
 
-        self.dmd_multistep = dmd_multistep
-        self.dmd_multistep_length = dmd_multistep_length
         self.dmd_enabled = dmd_enabled
         self.eps = eps
 
@@ -165,7 +168,8 @@ class DMDAutoencoder(nn.Module):
         nlayers = len(encoder_layer_sizes)
         encoder_layers = make_layers(
             (self.input_size, *encoder_layer_sizes),
-            (*(("blended_quadratic",) * (nlayers - 1)), "quadratic"),
+            # (*(("blended_quadratic",) * (nlayers - 1)), "quadratic"),
+            ("leaky_modrelu",) * nlayers,
             alpha=alpha,
             device=device,
             dtype=dtype,
@@ -176,7 +180,8 @@ class DMDAutoencoder(nn.Module):
         nlayers = len(decoder_layer_sizes)
         decoder_layers = make_layers(
             (self.latent_size, *decoder_layer_sizes),
-            ("quadratic", *(("blended_quadratic",) * (nlayers - 1))),
+            # ("quadratic", *(("blended_quadratic",) * (nlayers - 1))),
+            ("leaky_modrelu",) * nlayers,
             alpha=alpha,
             device=device,
             dtype=dtype,
@@ -203,23 +208,11 @@ class DMDAutoencoder(nn.Module):
             assert A_dmd.shape == (r, r)
 
             # evolve with the DMD operator
-            if self.dmd_multistep:
-                if self.dmd_multistep_length is None:
-                    n_steps = window_size - 1
-                else:
-                    n_steps = min(self.dmd_multistep_length, window_size - 1)
+            yhat_latent = [cx_latent[:, 0, :] @ A_dmd.T]
+            for _ in range(1, window_size):
+                yhat_latent.append(yhat_latent[-1] @ A_dmd.T)
 
-                yhat_steps = [cx_latent[:, 0, :] @ A_dmd.T]
-                for _ in range(n_steps - 1):
-                    yhat_steps.append(yhat_steps[-1] @ A_dmd.T)
-
-                yhat_multi = torch.stack(yhat_steps, dim=1)
-                yhat_single = cx_latent[:, n_steps:, :] @ A_dmd.T
-                yhat_latent = torch.cat([yhat_multi, yhat_single], dim=1)
-            else:
-                yhat_latent = cx_latent @ A_dmd.T
-
-            yhat_latent = view_as_real(yhat_latent)
+            yhat_latent = view_as_real(torch.stack(yhat_latent, dim=1))
             assert yhat_latent.shape == (batch_size, window_size, 2 * r)
 
             yhat_out = self.decoder(yhat_latent)
@@ -350,7 +343,6 @@ def torch_train(
     epochs: int = 50,
     batch_size: int = 2048,
     dmd_warmup_epochs: int = 0,
-    dmd_multistep_warmup_epochs: int = 0,
     patience_early_stop: int = 0,
     callback: Callable[[int, DMDAutoencoder], None] | None = None,
 ) -> tuple[DMDAutoencoder, torch.optim.Optimizer, torch.Tensor]:
@@ -392,14 +384,8 @@ def torch_train(
 
         model.train()
         model.dmd_enabled = epoch >= dmd_warmup_epochs
-        model.dmd_multistep = epoch >= dmd_warmup_epochs + dmd_multistep_warmup_epochs
         if epoch == dmd_warmup_epochs and dmd_warmup_epochs > 0:
             log.info("Enabling DMD at epoch %03d", epoch + 1)
-        if (
-            epoch == dmd_warmup_epochs + dmd_multistep_warmup_epochs
-            and model.dmd_multistep
-        ):
-            log.info("Enabling DMD multi-step at epoch %03d", epoch + 1)
 
         loss_epoch = torch.zeros(criterion.dim, device=device)
         num_batches = 0
@@ -637,7 +623,6 @@ def main(
     window_size: int = 32,
     nwindows: int = 1,
     dmd_warmup_epochs: int = 0,
-    dmd_multistep_warmup_epochs: int = 0,
     early_stop_patience: int = 0,
     overwrite: bool = False,
 ) -> int:
@@ -701,12 +686,12 @@ def main(
         mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
         log.info("    Converged:    %d/%d", torch.sum(mask), mask.numel())
 
-        # with figure(
-        #     basename.with_stem(f"{basename.stem}-predict-{epoch:04d}"),
-        #     overwrite=overwrite,
-        # ) as fig:
-        #     ax = fig.gca()
-        #     ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
+        with figure(
+            basename.with_stem(f"{basename.stem}-predict-{epoch:04d}"),
+            overwrite=overwrite,
+        ) as fig:
+            ax = fig.gca()
+            ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
 
     # }}}
 
@@ -808,7 +793,6 @@ def main(
             window_size=window_size,
             nwindows=nwindows,
             dmd_warmup_epochs=dmd_warmup_epochs,
-            dmd_multistep_warmup_epochs=dmd_multistep_warmup_epochs,
             patience_early_stop=early_stop_patience,
             callback=plot_predict,
         )
@@ -995,12 +979,6 @@ if __name__ == "__main__":
         help="Train this many epochs without DMD before enabling it (0 disables)",
     )
     parser.add_argument(
-        "--dmd-multistep-warmup-epochs",
-        type=int,
-        default=0,
-        help="Extra epochs with single-step DMD before enabling multi-step",
-    )
-    parser.add_argument(
         "--early-stop-patience",
         type=int,
         default=0,
@@ -1027,7 +1005,6 @@ if __name__ == "__main__":
                 dataidx=args.dataidx,
                 resolution=args.resolution,
                 dmd_warmup_epochs=args.dmd_warmup_epochs,
-                dmd_multistep_warmup_epochs=args.dmd_multistep_warmup_epochs,
                 early_stop_patience=args.early_stop_patience,
                 outfile=args.outfile,
                 overwrite=args.force,
