@@ -72,7 +72,7 @@ def make_layers(
             activation = ComplexBlendedQuadratic(
                 0.5 if alpha is None else alpha, interleaved=True
             )
-        elif nonlinearity == "leakly_modrelu":
+        elif nonlinearity == "leaky_modrelu":
             activation = LeakyModReLU(
                 bias=-0.1,
                 alpha=0.1 if alpha is None else alpha,
