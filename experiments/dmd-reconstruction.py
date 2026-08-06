@@ -145,7 +145,7 @@ def main(
     with figure(basename.with_stem(f"{basename.stem}-sigma")) as fig:
         ax = fig.gca()
 
-        ax.semilogy(model.S.real)
+        ax.semilogy(np.real(model.S))
         ax.set_xlabel("n")
         ax.set_ylabel(r"$\sigma$")
 

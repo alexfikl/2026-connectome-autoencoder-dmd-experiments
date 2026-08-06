@@ -100,7 +100,7 @@ def dmd_optimal_mode_strengths(
 
     # project all X1 snapshots into the reduced space: shape (rank, n_pairs)
     # X1 has shape (d+1, n_pairs), U has shape (d+1, rank)
-    Xhat = model.U.conj().T @ X1
+    Xhat = np.conj(model.U).T @ X1
 
     # optimal amplitude via Jovanovic normal equations:
     #   P = (Phi^H Phi) o conj(V V^H),  q = diag(V Xhat^H Phi),  b = P^{-1} q

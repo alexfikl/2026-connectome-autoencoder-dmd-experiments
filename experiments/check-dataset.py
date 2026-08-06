@@ -52,7 +52,7 @@ def compute_statistics(
     :arg z: trajectories of shape ``(n_levels, nx, ny, d)`` as returned by
         :func:`commonlib.generate_dataset`.
     """
-    sqr_norm = np.sum(z.real**2 + z.imag**2, axis=-1)
+    sqr_norm = np.sum(np.real(z) ** 2 + np.imag(z) ** 2, axis=-1)
     escaped = sqr_norm > escape_radius**2
 
     never_escaped = np.all(~escaped, axis=0)
@@ -162,7 +162,7 @@ def main(
 
     # {{{ log statistics
 
-    npoints = escape_time.size
+    npoints = np.size(escape_time)
     nconverged = np.sum(converged)
     nescapers = np.sum(escapers)
     nkept = np.sum(kept)

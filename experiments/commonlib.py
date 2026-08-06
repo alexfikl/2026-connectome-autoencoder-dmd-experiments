@@ -387,7 +387,7 @@ def dmd_predict(
     z[-1, :, :] = c
 
     # project the state back to the reduced state space
-    zhat = xp.einsum("ij,j...->i...", model.U.conj().T, z)
+    zhat = xp.einsum("ij,j...->i...", xp.conj(model.U).T, z)
 
     # iterate in the reduced state space for speeeeed!!!
     for _ in range(1, maxit):

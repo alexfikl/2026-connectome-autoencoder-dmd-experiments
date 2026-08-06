@@ -844,7 +844,10 @@ def main(
         x = x / norm_factor
         # NOTE: the data is scaled by norm_factor, so scale the radius as well
         model.escape_radius = escape_radius / norm_factor
-        (x_train,), (x_validate,), (x_test,) = random_split((x,), (0.8, 0.1, 0.1))
+        (x_train,), (x_validate,), (x_test,) = cast(
+            tuple[tuple[torch.Tensor], tuple[torch.Tensor], tuple[torch.Tensor]],
+            random_split((x,), (0.8, 0.1, 0.1)),
+        )
 
         if device.type == "cuda":
             torch.cuda.empty_cache()
@@ -853,7 +856,7 @@ def main(
 
         # {{{ train
 
-        target_scale = torch.mean(x_train.conj() * x_train).real.item()
+        target_scale = torch.mean(torch.conj(x_train) * x_train).real.item()
         criterion = DMDLoss(
             scale=target_scale, escape_radius=escape_radius / norm_factor
         )
