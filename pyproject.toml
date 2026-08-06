@@ -38,6 +38,7 @@ dependencies = [
     "networkx>=3.5",
     "nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git#egg=nneuroutil",
     "numpy>=2",
+    "orbitkit @ git+https://github.com/alexfikl/orbitkit.git#egg=orbitkit",
     "rich",
     "scienceplots>=2.2",
 ]
