@@ -439,6 +439,7 @@ if __name__ == "__main__":
     raise SystemExit(
         main(
             args.filenames,
+            outfile=args.outfile,
             overwrite=args.force,
         )
     )
