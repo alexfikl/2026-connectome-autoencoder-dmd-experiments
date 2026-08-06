@@ -109,6 +109,7 @@ lint.isort.force-wrap-aliases = true
 lint.isort.known-first-party = [
     "commonlib",
     "nneuroutil",
+    "orbitkit",
 ]
 lint.isort.required-imports = [
     "from __future__ import annotations",
