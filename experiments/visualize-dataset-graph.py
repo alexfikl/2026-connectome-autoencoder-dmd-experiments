@@ -111,7 +111,7 @@ def visualize_strength(
         )
         ax2.set_xlabel("Index")
         ax2.set_title("Strength (+)")
-        ax1.set_ylim([ymin, ymax])
+        ax2.set_ylim([ymin, ymax])
 
         ax3.plot([], [])
         ax3.plot([], [])
@@ -125,7 +125,7 @@ def visualize_strength(
         )
         ax3.set_xlabel("Index")
         ax3.set_title("Strength (-)")
-        ax1.set_ylim([ymin, ymax])
+        ax3.set_ylim([ymin, ymax])
 
 
 # }}}
