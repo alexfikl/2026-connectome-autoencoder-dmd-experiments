@@ -156,7 +156,7 @@ def main(
     escape_time = stats.escape_time
 
     converged = escape_time == n_levels
-    escapers = ~converged
+    escapers = not converged
 
     # }}}
 
