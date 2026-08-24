@@ -127,7 +127,7 @@ def visualize_strength(
         ax3.plot([], [])
         ax3.plot([], [])
         plot_mean_std(
-            ax2,
+            ax3,
             s_neg_mean,
             s_neg_std,
             xlabel="Index",
@@ -180,6 +180,7 @@ def visualize_clustering_coefficient(
             ylim=(0.0, 0.5),
         )
 
+        ax2.plot([], [])
         plot_mean_std(
             ax2,
             cc7_mean,
@@ -189,6 +190,8 @@ def visualize_clustering_coefficient(
             ylim=(0.0, 0.5),
         )
 
+        ax3.plot([], [])
+        ax3.plot([], [])
         plot_mean_std(
             ax3,
             cc8_mean,
@@ -202,6 +205,140 @@ def visualize_clustering_coefficient(
 # }}}
 
 
+# {{{ visualize_local_assortativity
+
+
+def visualize_local_assortativity(
+    filename: pathlib.Path,
+    matrices: Array3D[np.floating[Any]],
+    *,
+    overwrite: bool = False,
+) -> None:
+    from orbitkit.metrics import compute_local_assortativity_sabek
+
+    la1_mean, la1_std = run(
+        np.abs(matrices),
+        partial(compute_local_assortativity_sabek, alpha=1.0, beta=1.0),
+    )
+    la2_mean, la2_std = run(
+        np.where(matrices > 0, matrices, 0.0),
+        partial(compute_local_assortativity_sabek, alpha=1.0, beta=1.0),
+    )
+    la3_mean, la3_std = run(
+        np.where(matrices < 0, -matrices, 0.0),
+        partial(compute_local_assortativity_sabek, alpha=1.0, beta=1.0),
+    )
+
+    with figure(
+        filename.with_stem(f"{filename.stem}-local-assortativity"),
+        ncols=3,
+        figsize=(15, 5),
+        overwrite=overwrite,
+    ) as fig:
+        ax1, ax2, ax3 = fig.axes
+
+        plot_mean_std(
+            ax1,
+            la1_mean,
+            la1_std,
+            xlabel="Index",
+            title="Assortativity (abs)",
+            ylim=(-0.005, 0.016),
+        )
+
+        ax2.plot([], [])
+        plot_mean_std(
+            ax2,
+            la2_mean,
+            la2_std,
+            xlabel="Index",
+            title="Assortativity (+)",
+            ylim=(-0.005, 0.016),
+        )
+
+        ax3.plot([], [])
+        ax3.plot([], [])
+        plot_mean_std(
+            ax3,
+            la3_mean,
+            la3_std,
+            xlabel="Index",
+            title="Assortativity (-)",
+            ylim=(-0.005, 0.016),
+        )
+
+
+# }}}
+
+
+# {{{ visualize_eigenvector_centrality
+
+
+def visualize_eigenvector_centrality(
+    filename: pathlib.Path,
+    matrices: Array3D[np.floating[Any]],
+    *,
+    overwrite: bool = False,
+) -> None:
+    from orbitkit.metrics import compute_eigenvector_centrality
+
+    def _compute_eigenvector_centrality(
+        mat: Array2D[np.floating[Any]],
+    ) -> Array1D[np.floating[Any]]:
+        result = compute_eigenvector_centrality(mat)
+        assert result.eigenbasis.shape[-1] == 1
+        return result.eigenbasis[:, 0]
+
+    ec1_mean, ec1_std = run(matrices, _compute_eigenvector_centrality)
+    ec2_mean, ec2_std = run(
+        np.where(matrices > 0, matrices, 0.0), _compute_eigenvector_centrality
+    )
+    ec3_mean, ec3_std = run(
+        np.where(matrices < 0, -matrices, 0.0), _compute_eigenvector_centrality
+    )
+
+    with figure(
+        filename.with_stem(f"{filename.stem}-eigenvector-centrality"),
+        ncols=3,
+        figsize=(15, 5),
+        overwrite=overwrite,
+    ) as fig:
+        ax1, ax2, ax3 = fig.axes
+
+        plot_mean_std(
+            ax1,
+            ec1_mean,
+            ec1_std,
+            xlabel="Index",
+            title="Eigenvector Centrality",
+            ylim=(-0.1, 0.16),
+        )
+
+        ax2.plot([], [])
+        plot_mean_std(
+            ax2,
+            ec2_mean,
+            ec2_std,
+            xlabel="Index",
+            title="Eigenvector Centrality (+)",
+            ylim=(-0.1, 0.16),
+        )
+
+        ax3.plot([], [])
+        ax3.plot([], [])
+        plot_mean_std(
+            ax3,
+            ec3_mean,
+            ec3_std,
+            xlabel="Index",
+            title="Eigenvector Centrality (-)",
+            ylim=(-0.1, 0.16),
+        )
+
+
+# }}}
+
+
 def main(
     filename: pathlib.Path,
     *,
@@ -209,6 +346,8 @@ def main(
     datakey: str = "matrices",
     show_strength: bool = True,
     show_clustering_coefficient: bool = True,
+    show_local_assortativity: bool = True,
+    show_eigenvector_centrality: bool = True,
     overwrite: bool = False,
 ) -> int:
     if not filename.exists():
@@ -238,6 +377,12 @@ def main(
 
     if show_clustering_coefficient:
         visualize_clustering_coefficient(outfile, matrices, overwrite=overwrite)
+
+    if show_local_assortativity:
+        visualize_local_assortativity(outfile, matrices, overwrite=overwrite)
+
+    if show_eigenvector_centrality:
+        visualize_eigenvector_centrality(outfile, matrices, overwrite=overwrite)
 
     return 0
 
