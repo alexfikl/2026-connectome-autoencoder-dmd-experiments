@@ -38,7 +38,7 @@ def main(
     outfile: pathlib.Path | None = None,
     datakey: str = "matrices",
     dataidx: int = 5,
-    method: Literal["dmd", "edmd"] = "edmd",
+    method: Literal["dmd", "edmd"] = "dmd",
     bbox: tuple[float, float, float, float] = (-0.04, 0.04, -0.04, 0.04),
     escape_radius: float | None = 100.0,
     resolution: int = 64,
@@ -151,7 +151,7 @@ def main(
 
     # {{{ train
 
-    from nneuroutil.dmd import build_full_dmd, build_full_extended_dmd
+    from nneuroutil.dmd import build_full_dmd, build_full_extended_dmd, fit_residual
 
     with tictoc("Constructed DMD model"):
         if method == "dmd":
@@ -166,11 +166,12 @@ def main(
                 ],
                 X1,
                 X2,
-                first_observable_is_state=True,
                 method="ridge",
             )
         else:
             raise ValueError(f"unknown method: {method!r}")
+
+        log.info("Fit residual: %.8e", fit_residual(dmd, X1, X2))
 
     with figure(basename.with_stem(f"{basename.stem}-sigma")) as fig:
         ax = fig.gca()
@@ -262,6 +263,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("filename", type=pathlib.Path)
     parser.add_argument(
+        "--method",
+        choices=("dmd", "edmd"),
+        default="dmd",
+        help="DMD variant to use for learning the dynamical system",
+    )
+    parser.add_argument(
         "--dataidx",
         type=int,
         default=5,
@@ -313,6 +320,7 @@ if __name__ == "__main__":
                 args.filename,
                 dataidx=args.dataidx,
                 resolution=args.resolution,
+                method=args.method,
                 overwrite=args.force,
             )
         )
