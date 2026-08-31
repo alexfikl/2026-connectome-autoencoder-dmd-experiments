@@ -93,7 +93,7 @@ def dmd_optimal_mode_strengths(
     model = build_dmd(X1, X2, eps=1.0e-6)
 
     # eigendecomposition of the reduced propagator; sort by descending |eigenvalue|
-    eigenvalues, eigenvectors = np.linalg.eig(model.Ahat)
+    eigenvalues, eigenvectors = np.linalg.eig(model.A)
     order = np.argsort(np.abs(eigenvalues))[::-1]
     eigenvalues = eigenvalues[order]
     eigenvectors = eigenvectors[:, order]

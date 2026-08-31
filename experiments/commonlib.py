@@ -14,7 +14,6 @@ import numpy as np
 
 from nneuroutil.array_api_extras import interleave
 from nneuroutil.data import SlicedDataLoader
-from nneuroutil.dmd import DMD
 from nneuroutil.helpers import TicTocTimer, module_logger, tictoc
 from nneuroutil.typing import Array2D, Array3D, Array4D
 
@@ -207,7 +206,7 @@ def post_process_dataset(
     * Stack/Interleave into a real array of shape ``(ntrajectories, maxit, 2 d)``.
 
     :arg z: a complex tensor of shape ``(maxit, resolution, resolution, d)``.
-    :arg min_escape_iters: Minimum iterations before escape.  ``None`` keeps
+    :arg min_escape_iters: minimum iterations before escape.  ``None`` keeps
         only fully converged points (escaped at the final timestep).
     :arg c: a complex tensor of shape ``(resolution, resolution)``
     :returns: a tuple of ``(z, mask)`` of the post-processed dataset and the mask
@@ -361,40 +360,6 @@ def make_timeseries_datasets(
         ],
         (training, validation, testing),
     )
-
-
-# }}}
-
-
-# {{{ dmd
-
-
-def dmd_predict(
-    model: DMD,
-    Z: Array4D,
-    *,
-    bbox: tuple[float, float, float, float],
-) -> Array3D:
-    xp = array_api_compat.array_namespace(Z)
-    device = Z.device
-
-    maxit, nx, ny, d = Z.shape
-    c = generate_grid(*bbox, nx=nx, ny=ny, dtype=model.dtype, xp=xp, device=device)
-    c = c[None, :, :]
-
-    # initialize the state to (z0, c)
-    z = xp.zeros((d + 1, nx, ny), dtype=model.dtype, device=device)
-    z[-1, :, :] = c
-
-    # project the state back to the reduced state space
-    zhat = xp.einsum("ij,j...->i...", xp.conj(model.U).T, z)
-
-    # iterate in the reduced state space for speeeeed!!!
-    for _ in range(1, maxit):
-        zhat = model(zhat)
-
-    # NOTE: remove the last element because that corresponds to c theoretically
-    return xp.einsum("ij,j...->i...", model.U, zhat)[:-1]
 
 
 # }}}
