@@ -206,27 +206,127 @@ def main(
 
     # }}}
 
-    # {{{ forecast
+    # {{{ predict
 
     with tictoc("Predicting"):
-        Zpredict = torch.concat([Z[0], c[:, :, None]], dim=-1)
-        Zpredict = dmd.encode(Zpredict)
+        Zpredict = [Z[0]]
+        Xpredict = torch.concat([Z[0], c[:, :, None]], dim=-1)
+        Xpredict = dmd.encode(Xpredict)
 
         for _ in range(1, maxit):
-            Zpredict = dmd.evolve(Zpredict)
-            Zpredict[:, :, -1] = c
+            Xpredict = dmd.evolve(Xpredict)
+            Xpredict[:, :, -1] = c
+            Zpredict.append(dmd.decode(Xpredict)[:, :, :d])
 
-        Zpredict = cast("torch.Tensor", dmd.decode(Zpredict))
+        Zpredict = torch.stack(Zpredict, dim=0)
 
-    # NOTE: this is a linear operator, so we expect everybody to converge
-    escaped = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
-    total_escaped = torch.sum(escaped)
-    log.info("Escaped %d (points %d)", total_escaped, resolution * resolution)
+    # }}}
+
+    # {{{ plot predict error
+
+    from nneuroutil.dmd import relative_forecast_error
+
+    with figure(basename.with_stem(f"{basename.stem}-forecast")) as fig:
+        ax = fig.gca()
+
+        error = relative_forecast_error(dmd, Z[:, mask, :], Zpredict[:, mask, :])
+        error = cast("torch.Tensor", error).cpu().numpy()
+        assert error.shape == (maxit, torch.sum(mask))
+
+        median = np.median(error, axis=1)
+        p25 = np.percentile(error, 25, axis=1)
+        p75 = np.percentile(error, 75, axis=1)
+
+        ax.plot(median, label="Median")
+        ax.fill_between(np.arange(maxit), p25, p75, alpha=0.3)
+        ax.set_xlabel("$n$")
+        ax.set_ylabel("Error")
+        ax.legend()
+
+    # }}}
+
+    # {{{ observable error
+
+    X1_lift = dmd.encode(X1)
+    X2_lift = dmd.encode(X2)
+    X2_lift_hat = dmd.evolve(X1_lift)
+
+    if method == "dmd":
+        obs_labels = (r"$z$", r"$c$")
+        obs_slices = (slice(0, d), slice(d, d + 1))
+    elif method == "edmd":
+        obs_labels = (r"$z$", r"$(A z)^2$", r"$(A z)^4$", r"$c$")
+        obs_slices = (
+            slice(0, d),
+            slice(d, 2 * d),
+            slice(2 * d, 3 * d),
+            slice(3 * d, 3 * d + 1),
+        )
+    else:
+        raise AssertionError
+
+    obs_residuals: list[float] = []
+    for label, s in zip(obs_labels, obs_slices, strict=True):
+        denom = torch.linalg.norm(X2_lift[:, s])
+        res_val = torch.linalg.norm(X2_lift[:, s] - X2_lift_hat[:, s]) / denom
+        obs_residuals.append(res_val.item())
+
+        log.info("Observable %s 1-step residual: %.8e", label, res_val.item())
+
+    with figure(basename.with_stem(f"{basename.stem}-observables")) as fig:
+        ax = fig.gca()
+
+        ax.bar(obs_labels, obs_residuals)
+        ax.set_yscale("log")
+        ax.set_xlabel("Observable")
+        ax.set_ylabel("Residual")
+
+    # }}}
+
+    # {{{ fit residuals (lifted vs physical vs decoder reconstruction)
+
+    res_lift = (
+        torch.linalg.norm(X2_lift - X2_lift_hat) / torch.linalg.norm(X2_lift)
+    ).item()
+
+    X2_phys_hat = dmd.decode(X2_lift_hat)
+    res_phys = (torch.linalg.norm(X2 - X2_phys_hat) / torch.linalg.norm(X2)).item()
+
+    X1_rec = dmd.decode(X1_lift)
+    res_rec = (torch.linalg.norm(X1 - X1_rec) / torch.linalg.norm(X1)).item()
+
+    log.info("Residual (lifted space): %.8e", res_lift)
+    log.info("Residual (physical decoded): %.8e", res_phys)
+    log.info("Residual (decoder consistency): %.8e", res_rec)
+
+    with figure(basename.with_stem(f"{basename.stem}-residuals")) as fig:
+        ax = fig.gca()
+
+        ax.bar(
+            ["lift. fit", "phys. dec.", "dec. recon."],
+            [res_lift, res_phys, res_rec],
+        )
+        ax.set_yscale("log")
+        ax.set_ylabel("Relative Error")
+
+    # }}}
+
+    # {{{ plot final error
 
     from nneuroutil.vision import as_grayscale, otsu_threshold_from_image
 
+    # NOTE: this is a linear operator, so we expect everybody to converge
+    escaped = (
+        torch.sum(
+            Zpredict[-1, :, :, :d].real ** 2 + Zpredict[-1, :, :, :d].imag ** 2, dim=-1
+        )
+        < escape_radius**2
+    )
+    total_escaped = torch.sum(escaped)
+    log.info("Escaped %d (points %d)", total_escaped, resolution * resolution)
+
     # NOTE: try to tell who escaped by looking at the error
-    error = torch.linalg.norm(Z[-1] - Zpredict[:, :, :d], dim=-1)
+    error = torch.linalg.norm(Z[-1] - Zpredict[-1, :, :, :d], dim=-1)
 
     # binarize error in a nice way
     gray = as_grayscale(error, dtype=torch.uint8)
