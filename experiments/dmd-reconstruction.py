@@ -14,7 +14,6 @@ from nneuroutil.helpers import FuzzyChoiceAction, module_logger, tictoc
 from nneuroutil.torch_extras import (
     available_device_names,
     torch_default_device,
-    view_as_complex,
 )
 from nneuroutil.visualization import figure, make_colorbar_axes
 
@@ -130,28 +129,20 @@ def main(
     #   3. Reshape and get the `X1, X2` blocks for DMD
 
     with tictoc("Built dataset"):
-        from commonlib import post_process_dataset
+        # NOTE: Z has shape (maxit, resolution, resolution, d)
+        Z_conv = Z[:, mask, :]
+        c_conv = c[mask, None].unsqueeze(0).expand(maxit - 1, -1, -1)
 
-        # NOTE: Z has shape (ntrajectories, maxit, d)
-        X, mask = cast(
-            tuple[torch.Tensor, torch.Tensor],
-            post_process_dataset(Z, escape_radius, min_escape_iters=None),
-        )
-        X = view_as_complex(X)
-
-        C = torch.tile(c[mask][:, None, None], (1, maxit, 1))
-        X = torch.concatenate([X, C], dim=-1)
-        X = X.permute(1, 0, 2)
-
-        X1 = X[:-1].reshape(-1, d + 1)
-        X2 = X[1:].reshape(-1, d + 1)
+        X1 = torch.cat([Z_conv[:-1], c_conv], dim=-1).reshape(-1, d + 1)
+        X2 = torch.cat([Z_conv[1:], c_conv], dim=-1).reshape(-1, d + 1)
+        del Z_conv, c_conv
         log.info("Dataset: %s", X1.shape)
 
     # }}}
 
     # {{{ train
 
-    from nneuroutil.dmd import build_full_dmd, build_full_extended_dmd, fit_residual
+    from nneuroutil.dmd import build_full_dmd, build_full_extended_dmd
 
     with tictoc("Constructed DMD model"):
         if method == "dmd":
@@ -171,8 +162,6 @@ def main(
         else:
             raise ValueError(f"unknown method: {method!r}")
 
-        log.info("Fit residual: %.8e", fit_residual(dmd, X1, X2))
-
     with figure(basename.with_stem(f"{basename.stem}-sigma")) as fig:
         ax = fig.gca()
 
@@ -182,7 +171,7 @@ def main(
         S = torch.linalg.svdvals(dmd.A)
         # S = torch.cumsum(S, dim=0) / torch.sum(S)
         ax.semilogy(S.cpu().numpy(), label=r"$\sigma_{{DMD}}$")
-        S = torch.linalg.svdvals(X1)
+        S = torch.linalg.svdvals(X1.mH @ X1).sqrt()
         # S = torch.cumsum(S, dim=0) / torch.sum(S)
         ax.semilogy(S.cpu().numpy(), label=r"$\sigma_{{X}}$")
         ax.set_xlabel("n")
@@ -209,16 +198,19 @@ def main(
     # {{{ predict
 
     with tictoc("Predicting"):
-        Zpredict = [Z[0]]
-        Xpredict = torch.concat([Z[0], c[:, :, None]], dim=-1)
+        Zpredict = torch.empty(
+            (maxit, resolution, resolution, d),
+            dtype=Z.dtype,
+            device=device,
+        )
+        Zpredict[0] = Z[0]
+        Xpredict = torch.cat([Z[0], c[:, :, None]], dim=-1)
         Xpredict = dmd.encode(Xpredict)
 
-        for _ in range(1, maxit):
+        for i in range(1, maxit):
             Xpredict = dmd.evolve(Xpredict)
             Xpredict[:, :, -1] = c
-            Zpredict.append(dmd.decode(Xpredict)[:, :, :d])
-
-        Zpredict = torch.stack(Zpredict, dim=0)
+            Zpredict[i] = dmd.decode(Xpredict)[:, :, :d]
 
     # }}}
 
@@ -243,13 +235,13 @@ def main(
         ax.set_ylabel("Error")
         ax.legend()
 
+    Z_final = Z[-1]
+    Zpredict_final = Zpredict[-1]
+    del Z, Zpredict
+
     # }}}
 
     # {{{ observable error
-
-    X1_lift = dmd.encode(X1)
-    X2_lift = dmd.encode(X2)
-    X2_lift_hat = dmd.evolve(X1_lift)
 
     if method == "dmd":
         obs_labels = (r"$z$", r"$c$")
@@ -265,6 +257,16 @@ def main(
     else:
         raise AssertionError
 
+    X1_lift = dmd.encode(X1)
+    X1_rec = dmd.decode(X1_lift)
+    res_rec = (torch.linalg.norm(X1 - X1_rec) / torch.linalg.norm(X1)).item()
+    del X1, X1_rec
+
+    X2_lift_hat = dmd.evolve(X1_lift)
+    del X1_lift
+
+    X2_lift = dmd.encode(X2)
+
     obs_residuals: list[float] = []
     for label, s in zip(obs_labels, obs_slices, strict=True):
         denom = torch.linalg.norm(X2_lift[:, s])
@@ -272,6 +274,17 @@ def main(
         obs_residuals.append(res_val.item())
 
         log.info("Observable %s 1-step residual: %.8e", label, res_val.item())
+
+    res_lift = (
+        torch.linalg.norm(X2_lift - X2_lift_hat) / torch.linalg.norm(X2_lift)
+    ).item()
+    del X2_lift
+
+    X2_phys_hat = dmd.decode(X2_lift_hat)
+    del X2_lift_hat
+
+    res_phys = (torch.linalg.norm(X2 - X2_phys_hat) / torch.linalg.norm(X2)).item()
+    del X2, X2_phys_hat
 
     with figure(basename.with_stem(f"{basename.stem}-observables")) as fig:
         ax = fig.gca()
@@ -284,16 +297,6 @@ def main(
     # }}}
 
     # {{{ fit residuals (lifted vs physical vs decoder reconstruction)
-
-    res_lift = (
-        torch.linalg.norm(X2_lift - X2_lift_hat) / torch.linalg.norm(X2_lift)
-    ).item()
-
-    X2_phys_hat = dmd.decode(X2_lift_hat)
-    res_phys = (torch.linalg.norm(X2 - X2_phys_hat) / torch.linalg.norm(X2)).item()
-
-    X1_rec = dmd.decode(X1_lift)
-    res_rec = (torch.linalg.norm(X1 - X1_rec) / torch.linalg.norm(X1)).item()
 
     log.info("Residual (lifted space): %.8e", res_lift)
     log.info("Residual (physical decoded): %.8e", res_phys)
@@ -318,7 +321,8 @@ def main(
     # NOTE: this is a linear operator, so we expect everybody to converge
     escaped = (
         torch.sum(
-            Zpredict[-1, :, :, :d].real ** 2 + Zpredict[-1, :, :, :d].imag ** 2, dim=-1
+            Zpredict_final[..., :d].real ** 2 + Zpredict_final[..., :d].imag ** 2,
+            dim=-1,
         )
         < escape_radius**2
     )
@@ -326,7 +330,7 @@ def main(
     log.info("Escaped %d (points %d)", total_escaped, resolution * resolution)
 
     # NOTE: try to tell who escaped by looking at the error
-    error = torch.linalg.norm(Z[-1] - Zpredict[-1, :, :, :d], dim=-1)
+    error = torch.linalg.norm(Z_final - Zpredict_final[..., :d], dim=-1)
 
     # binarize error in a nice way
     gray = as_grayscale(error, dtype=torch.uint8)
