@@ -138,26 +138,17 @@ def main(
     # {{{ build dataset
 
     # NOTE: To build the dataset we
-    #   1. Add c as an extra variable (DMD can't learn affine systems, so we help it)
-    #   2. Remove all entries that escaped (no point there)
-    #   3. Reshape and get the `X1, X2` blocks for DMD
+    #   1. Remove all entries that escaped (no point there)
+    #   2. Treat c as an external parameter/control input U
+    #   3. Reshape and get the `X1, U, X2` blocks for DMDc
 
     with tictoc("Build dataset"):
         # NOTE: Z has shape (maxit, converged, d)
-        #       X has shape (maxit, converged, d + 1)
-        X = torch.cat(
-            [
-                Z,
-                c[mask, None].unsqueeze(0).expand(maxit, -1, -1),
-            ],
-            dim=-1,
-        )
+        X1 = Z[:-1].reshape(-1, d)
+        X2 = Z[1:].reshape(-1, d)
+        U = c[mask, None].unsqueeze(0).expand(maxit - 1, -1, -1).reshape(-1, 1)
 
-        X1 = X[:-1].reshape(-1, d + 1)
-        X2 = X[1:].reshape(-1, d + 1)
-        log.info("Dataset: %s", X1.shape)
-
-        del X
+        log.info("Dataset: X1 = %s, U = %s, X2 = %s", X1.shape, U.shape, X2.shape)
 
     mem.add_record("Built dataset")
 
@@ -165,20 +156,20 @@ def main(
 
     # {{{ train
 
-    from nneuroutil.dmd import build_full_dmd, build_full_extended_dmd
+    from nneuroutil.dmdc import build_full_dmdc, build_full_extended_dmdc
 
     with tictoc("Constructed DMD model"):
         if method == "dmd":
-            dmd = build_full_dmd(X1, X2, method="ridge")
+            dmd = build_full_dmdc(X1, U, X2, method="ridge")
         elif method == "edmd":
-            dmd = build_full_extended_dmd(
+            dmd = build_full_extended_dmdc(
                 [
-                    lambda x, A=mat: x[..., :d],
-                    lambda x, A=mat: torch.einsum("...j,ij->...i", x[..., :d], A) ** 2,
-                    lambda x, A=mat: torch.einsum("...j,ij->...i", x[..., :d], A) ** 4,
-                    lambda x, A=mat: x[..., -1:],
+                    lambda x, A=mat: x,
+                    lambda x, A=mat: torch.einsum("...j,ij->...i", x, A) ** 2,
+                    lambda x, A=mat: torch.einsum("...j,ij->...i", x, A) ** 4,
                 ],
                 X1,
+                U,
                 X2,
                 method="ridge",
             )
@@ -215,6 +206,8 @@ def main(
         ax.set_aspect("equal")
         ax.legend()
 
+        log.info("max |lambda_dmd| = %.8e", np.max(np.abs(S)))
+
     # }}}
 
     # {{{ predict
@@ -226,14 +219,12 @@ def main(
             device=device,
         )
         Zpredict[0] = Z_init
-        Xpredict = torch.cat([Z_init, c[:, :, None]], dim=-1)
+        Xpredict = dmd.encode(Z_init)
         del Z_init
-        Xpredict = dmd.encode(Xpredict)
 
         for i in range(1, maxit):
-            Xpredict = dmd.evolve(Xpredict)
-            Xpredict[:, :, -1] = c
-            Zpredict[i] = dmd.decode(Xpredict)[:, :, :d]
+            Xpredict = dmd.evolve(Xpredict, c[:, :, None])
+            Zpredict[i] = cast("torch.Tensor", dmd.decode(Xpredict))
 
         Zpredict_final = Zpredict[-1].clone()
         Zpredict = Zpredict[:, mask, :]
@@ -244,13 +235,15 @@ def main(
 
     # {{{ plot predict error
 
-    from nneuroutil.dmd import relative_forecast_error
+    from nneuroutil.dmdc import relative_forecast_error
 
     with figure(basename.with_stem(f"{basename.stem}-forecast")) as fig:
         ax = fig.gca()
 
-        error = relative_forecast_error(dmd, Z, Zpredict)
-        del Z, Zpredict
+        Upredict = c[mask, None].unsqueeze(0).expand(maxit, -1, -1)
+        error = relative_forecast_error(dmd, Z, Upredict, Zpredict)
+        del Z, Zpredict, Upredict
+
         error = cast("torch.Tensor", error).cpu().numpy()
         assert error.shape == (maxit, torch.sum(mask))
 
@@ -271,15 +264,14 @@ def main(
     # {{{ observable error
 
     if method == "dmd":
-        obs_labels = (r"$z$", r"$c$")
-        obs_slices = (slice(0, d), slice(d, d + 1))
+        obs_labels = (r"$z$",)
+        obs_slices = (slice(0, d),)
     elif method == "edmd":
-        obs_labels = (r"$z$", r"$(A z)^2$", r"$(A z)^4$", r"$c$")
+        obs_labels = (r"$z$", r"$(A z)^2$", r"$(A z)^4$")
         obs_slices = (
             slice(0, d),
             slice(d, 2 * d),
             slice(2 * d, 3 * d),
-            slice(3 * d, 3 * d + 1),
         )
     else:
         raise AssertionError
@@ -289,8 +281,8 @@ def main(
     res_rec = (torch.linalg.norm(X1 - X1_rec) / torch.linalg.norm(X1)).item()
     del X1, X1_rec
 
-    X2_lift_hat = dmd.evolve(X1_lift)
-    del X1_lift
+    X2_lift_hat = dmd.evolve(X1_lift, U)
+    del X1_lift, U
 
     X2_lift = dmd.encode(X2)
 
@@ -350,7 +342,7 @@ def main(
     # NOTE: this is a linear operator, so we expect everybody to converge
     escaped = (
         torch.sum(
-            Zpredict_final[..., :d].real ** 2 + Zpredict_final[..., :d].imag ** 2,
+            Zpredict_final.real**2 + Zpredict_final.imag**2,
             dim=-1,
         )
         < escape_radius**2
@@ -359,7 +351,7 @@ def main(
     log.info("Escaped %d (points %d)", total_escaped, resolution * resolution)
 
     # NOTE: try to tell who escaped by looking at the error
-    error = torch.linalg.norm(Z_final - Zpredict_final[..., :d], dim=-1)
+    error = torch.linalg.norm(Z_final - Zpredict_final, dim=-1)
 
     # binarize error in a nice way
     gray = as_grayscale(error, dtype=torch.uint8)
