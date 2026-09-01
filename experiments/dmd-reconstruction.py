@@ -250,6 +250,7 @@ def main(
         ax = fig.gca()
 
         error = relative_forecast_error(dmd, Z, Zpredict)
+        del Z, Zpredict
         error = cast("torch.Tensor", error).cpu().numpy()
         assert error.shape == (maxit, torch.sum(mask))
 
