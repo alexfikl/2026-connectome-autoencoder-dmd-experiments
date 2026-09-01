@@ -10,9 +10,9 @@ contourpy==1.3.3
     # via matplotlib
 cycler==0.12.1
     # via matplotlib
-fonttools==4.63.0
+fonttools==4.64.0
     # via matplotlib
-kiwisolver==1.5.0
+kiwisolver==1.5.1
     # via matplotlib
 markdown-it-py==4.2.0
     # via rich
@@ -24,7 +24,7 @@ mdurl==0.1.2
     # via markdown-it-py
 networkx==3.6.1
     # via fractal-dmd-autoencoder (pyproject.toml)
-nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@bfaad9ca3af77174197084887e84a1c01a32d63e#egg=nneuroutil
+nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@7f0ab457b0559c4201a823ff2c80e00464e84d11#egg=nneuroutil
     # via fractal-dmd-autoencoder (pyproject.toml)
 numpy==2.4.6 ; python_full_version < '3.12'
     # via
