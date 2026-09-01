@@ -12,6 +12,7 @@ import torch
 
 from nneuroutil.helpers import FuzzyChoiceAction, module_logger, tictoc
 from nneuroutil.torch_extras import (
+    TorchMemoryTracker,
     available_device_names,
     torch_default_device,
 )
@@ -48,6 +49,9 @@ def main(
 
     device = torch.get_default_device()
     log.info("Device: %s", device)
+
+    mem = TorchMemoryTracker(device=device)
+    mem.record("Start")
 
     # {{{ validate inputs
 
@@ -90,6 +94,8 @@ def main(
 
     # {{{ generate dataset
 
+    mem.record("Before data generation")
+
     d = mat.shape[0]
     with tictoc(f"Generated data on {bbox}"):
         from commonlib import generate_dataset
@@ -104,6 +110,8 @@ def main(
                 maxit=maxit,
             ),
         )
+
+    mem.record("After data generation")
 
     mask = torch.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, dim=-1) < escape_radius**2
     log.info("Points:")
@@ -128,15 +136,20 @@ def main(
     #   2. Remove all entries that escaped (no point there)
     #   3. Reshape and get the `X1, X2` blocks for DMD
 
-    with tictoc("Built dataset"):
+    with tictoc("Build dataset"):
         # NOTE: Z has shape (maxit, resolution, resolution, d)
-        Z_conv = Z[:, mask, :]
-        c_conv = c[mask, None].unsqueeze(0).expand(maxit - 1, -1, -1)
+        #       X has shape (maxit, converged, d)
+        X = torch.cat(
+            [Z[:, mask, :], c[mask, None].unsqueeze(0).expand(maxit, -1, -1)], dim=-1
+        )
 
-        X1 = torch.cat([Z_conv[:-1], c_conv], dim=-1).reshape(-1, d + 1)
-        X2 = torch.cat([Z_conv[1:], c_conv], dim=-1).reshape(-1, d + 1)
-        del Z_conv, c_conv
+        X1 = X[:-1].reshape(-1, d + 1)
+        X2 = X[1:].reshape(-1, d + 1)
         log.info("Dataset: %s", X1.shape)
+
+        del X
+
+    mem.record("Built dataset")
 
     # }}}
 
@@ -162,17 +175,16 @@ def main(
         else:
             raise ValueError(f"unknown method: {method!r}")
 
+    mem.record("Constructed DMD model")
+
     with figure(basename.with_stem(f"{basename.stem}-sigma")) as fig:
         ax = fig.gca()
 
         S = torch.linalg.svdvals(mat)
-        # S = torch.cumsum(S, dim=0) / torch.sum(S)
         ax.semilogy(S.cpu().numpy(), label=r"$\sigma_A$")
         S = torch.linalg.svdvals(dmd.A)
-        # S = torch.cumsum(S, dim=0) / torch.sum(S)
         ax.semilogy(S.cpu().numpy(), label=r"$\sigma_{{DMD}}$")
         S = torch.linalg.svdvals(X1.mH @ X1).sqrt()
-        # S = torch.cumsum(S, dim=0) / torch.sum(S)
         ax.semilogy(S.cpu().numpy(), label=r"$\sigma_{{X}}$")
         ax.set_xlabel("n")
         ax.legend()
@@ -197,7 +209,7 @@ def main(
 
     # {{{ predict
 
-    with tictoc("Predicting"):
+    with tictoc(f"Predicting using {method.upper()}"):
         Zpredict = torch.empty(
             (maxit, resolution, resolution, d),
             dtype=Z.dtype,
@@ -211,6 +223,8 @@ def main(
             Xpredict = dmd.evolve(Xpredict)
             Xpredict[:, :, -1] = c
             Zpredict[i] = dmd.decode(Xpredict)[:, :, :d]
+
+    mem.record("After predicting")
 
     # }}}
 
@@ -235,9 +249,11 @@ def main(
         ax.set_ylabel("Error")
         ax.legend()
 
-    Z_final = Z[-1]
-    Zpredict_final = Zpredict[-1]
+    Z_final = Z[-1].clone()
+    Zpredict_final = Zpredict[-1].clone()
     del Z, Zpredict
+
+    mem.record("Freed trajectories")
 
     # }}}
 
@@ -285,6 +301,8 @@ def main(
 
     res_phys = (torch.linalg.norm(X2 - X2_phys_hat) / torch.linalg.norm(X2)).item()
     del X2, X2_phys_hat
+
+    mem.record("Computed residuals & errors")
 
     with figure(basename.with_stem(f"{basename.stem}-observables")) as fig:
         ax = fig.gca()
@@ -347,7 +365,11 @@ def main(
 
         ax.imshow((gray < thresh).cpu().numpy(), extent=bbox, cmap="binary")  # ty: ignore[unsupported-operator]
 
+    mem.record("Finished")
+
     # }}}
+
+    log.info("Memory:\n%s", mem)
 
     return 0
 
