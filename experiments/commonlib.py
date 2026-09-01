@@ -175,20 +175,32 @@ def generate_dataset(
     escape_radius_sqr = escape_radius**2
 
     # iterate
-    result = [xp.zeros((resolution, resolution, d), dtype=A.dtype, device=A.device)]
+    z0 = xp.zeros((resolution, resolution, d), dtype=A.dtype, device=A.device)
+    if array_api_compat.is_writeable_array(z0):  # spell: disable
+        del z0
+        z = xp.zeros((maxit, resolution, resolution, d), dtype=A.dtype, device=A.device)
+        for i in range(1, maxit):
+            # evolve
+            z_new = xp.einsum("ij,klj->kli", A, z[i - 1]) ** 2 + c
 
-    for i in range(1, maxit):
-        # evolve
-        z_prev = result[i - 1]
-        z_new = xp.einsum("ij,klj->kli", A, z_prev) ** 2 + c
+            # clip escaped values over escape radius
+            escaped = xp.sum(z_new.real**2 + z_new.imag**2, axis=-1) > escape_radius_sqr
+            z[i] = xp.where(escaped[..., None], max_z, z_new)
+    else:
+        result = [z0]
+        for i in range(1, maxit):
+            # evolve
+            z_prev = result[i - 1]
+            z_new = xp.einsum("ij,klj->kli", A, z_prev) ** 2 + c
 
-        # clip escaped values over escape radius
-        escaped = xp.sum(z_new.real**2 + z_new.imag**2, axis=-1) > escape_radius_sqr
-        z_new = xp.where(escaped[..., None], max_z, z_new)
+            # clip escaped values over escape radius
+            escaped = xp.sum(z_new.real**2 + z_new.imag**2, axis=-1) > escape_radius_sqr
+            z_new = xp.where(escaped[..., None], max_z, z_new)
 
-        result.append(z_new)
+            result.append(z_new)
+        z = xp.stack(result)
 
-    return xp.stack(result), c.squeeze(-1)
+    return z, c.squeeze(-1)
 
 
 def post_process_dataset(
