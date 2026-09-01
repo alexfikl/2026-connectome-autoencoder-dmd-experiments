@@ -12,8 +12,8 @@ import torch
 
 from nneuroutil.helpers import FuzzyChoiceAction, module_logger, tictoc
 from nneuroutil.torch_extras import (
-    TorchMemoryTracker,
     available_device_names,
+    make_memory_tracker,
     torch_default_device,
 )
 from nneuroutil.visualization import figure, make_colorbar_axes
@@ -50,8 +50,8 @@ def main(
     device = torch.get_default_device()
     log.info("Device: %s", device)
 
-    mem = TorchMemoryTracker(device=device)
-    mem.record("Start")
+    mem = make_memory_tracker(device)
+    mem.add_record("Start")
 
     # {{{ validate inputs
 
@@ -94,7 +94,7 @@ def main(
 
     # {{{ generate dataset
 
-    mem.record("Before data generation")
+    mem.add_record("Before data generation")
 
     d = mat.shape[0]
     with tictoc(f"Generated data on {bbox}"):
@@ -111,7 +111,7 @@ def main(
             ),
         )
 
-    mem.record("After data generation")
+    mem.add_record("After data generation")
 
     mask = torch.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, dim=-1) < escape_radius**2
     log.info("Points:")
@@ -149,7 +149,7 @@ def main(
 
         del X
 
-    mem.record("Built dataset")
+    mem.add_record("Built dataset")
 
     # }}}
 
@@ -175,7 +175,7 @@ def main(
         else:
             raise ValueError(f"unknown method: {method!r}")
 
-    mem.record("Constructed DMD model")
+    mem.add_record("Constructed DMD model")
 
     with figure(basename.with_stem(f"{basename.stem}-sigma")) as fig:
         ax = fig.gca()
@@ -224,7 +224,7 @@ def main(
             Xpredict[:, :, -1] = c
             Zpredict[i] = dmd.decode(Xpredict)[:, :, :d]
 
-    mem.record("After predicting")
+    mem.add_record("After predicting")
 
     # }}}
 
@@ -253,7 +253,7 @@ def main(
     Zpredict_final = Zpredict[-1].clone()
     del Z, Zpredict
 
-    mem.record("Freed trajectories")
+    mem.add_record("Freed trajectories")
 
     # }}}
 
@@ -302,7 +302,7 @@ def main(
     res_phys = (torch.linalg.norm(X2 - X2_phys_hat) / torch.linalg.norm(X2)).item()
     del X2, X2_phys_hat
 
-    mem.record("Computed residuals & errors")
+    mem.add_record("Computed residuals & errors")
 
     with figure(basename.with_stem(f"{basename.stem}-observables")) as fig:
         ax = fig.gca()
@@ -365,7 +365,7 @@ def main(
 
         ax.imshow((gray < thresh).cpu().numpy(), extent=bbox, cmap="binary")  # ty: ignore[unsupported-operator]
 
-    mem.record("Finished")
+    mem.add_record("Finished")
 
     # }}}
 
