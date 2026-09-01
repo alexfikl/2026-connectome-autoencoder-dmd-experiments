@@ -111,17 +111,23 @@ def main(
             ),
         )
 
+        # NOTE: only keep the data we actually use from here on out
+        Z_init = Z[0].clone()
+        Z_final = Z[-1].clone()
+
+        mask = torch.sum(Z_final.real**2 + Z_final.imag**2, dim=-1) < escape_radius**2
+        Z = Z[:, mask, :]
+
     mem.add_record("After data generation")
 
-    mask = torch.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, dim=-1) < escape_radius**2
     log.info("Points:")
     log.info("Converged: %d", torch.sum(mask))
     log.info(
         "Max: %.5e (radius %.5e)",
-        torch.max(torch.abs(Z)),
+        torch.max(torch.abs(Z_final)),
         escape_radius,
     )
-    log.info("Mean: %.5e", torch.mean(torch.abs(Z)))
+    log.info("Mean: %.5e", torch.mean(torch.abs(Z_final)))
 
     with figure(basename.with_stem(f"{basename.stem}-dataset")) as fig:
         ax = fig.gca()
@@ -137,10 +143,14 @@ def main(
     #   3. Reshape and get the `X1, X2` blocks for DMD
 
     with tictoc("Build dataset"):
-        # NOTE: Z has shape (maxit, resolution, resolution, d)
-        #       X has shape (maxit, converged, d)
+        # NOTE: Z has shape (maxit, converged, d)
+        #       X has shape (maxit, converged, d + 1)
         X = torch.cat(
-            [Z[:, mask, :], c[mask, None].unsqueeze(0).expand(maxit, -1, -1)], dim=-1
+            [
+                Z,
+                c[mask, None].unsqueeze(0).expand(maxit, -1, -1),
+            ],
+            dim=-1,
         )
 
         X1 = X[:-1].reshape(-1, d + 1)
@@ -212,17 +222,21 @@ def main(
     with tictoc(f"Predicting using {method.upper()}"):
         Zpredict = torch.empty(
             (maxit, resolution, resolution, d),
-            dtype=Z.dtype,
+            dtype=Z_init.dtype,
             device=device,
         )
-        Zpredict[0] = Z[0]
-        Xpredict = torch.cat([Z[0], c[:, :, None]], dim=-1)
+        Zpredict[0] = Z_init
+        Xpredict = torch.cat([Z_init, c[:, :, None]], dim=-1)
+        del Z_init
         Xpredict = dmd.encode(Xpredict)
 
         for i in range(1, maxit):
             Xpredict = dmd.evolve(Xpredict)
             Xpredict[:, :, -1] = c
             Zpredict[i] = dmd.decode(Xpredict)[:, :, :d]
+
+        Zpredict_final = Zpredict[-1].clone()
+        Zpredict = Zpredict[:, mask, :]
 
     mem.add_record("After predicting")
 
@@ -235,7 +249,7 @@ def main(
     with figure(basename.with_stem(f"{basename.stem}-forecast")) as fig:
         ax = fig.gca()
 
-        error = relative_forecast_error(dmd, Z[:, mask, :], Zpredict[:, mask, :])
+        error = relative_forecast_error(dmd, Z, Zpredict)
         error = cast("torch.Tensor", error).cpu().numpy()
         assert error.shape == (maxit, torch.sum(mask))
 
@@ -248,10 +262,6 @@ def main(
         ax.set_xlabel("$n$")
         ax.set_ylabel("Error")
         ax.legend()
-
-    Z_final = Z[-1].clone()
-    Zpredict_final = Zpredict[-1].clone()
-    del Z, Zpredict
 
     mem.add_record("Freed trajectories")
 
