@@ -156,13 +156,13 @@ def main(
 
     # {{{ train
 
-    from nneuroutil.dmdc import build_full_dmdc, build_full_extended_dmdc
+    from nneuroutil.dmdc import build_dense_dmdc, build_dense_extended_dmdc
 
     with tictoc("Constructed DMD model"):
         if method == "dmd":
-            dmd = build_full_dmdc(X1, U, X2, method="ridge")
+            dmd = build_dense_dmdc(X1, U, X2, method="ridge")
         elif method == "edmd":
-            dmd = build_full_extended_dmdc(
+            dmd = build_dense_extended_dmdc(
                 [
                     lambda x, A=mat: x,
                     lambda x, A=mat: torch.einsum("...j,ij->...i", x, A) ** 2,
