@@ -70,12 +70,12 @@ def make_layers(
         ComplexLinear,
         ComplexQuadratic,
         LeakyModReLU,
-        complex_kaiming_uniform_,
+        kaiming_uniform_,
     )
 
     layers = []
-    for (n_in, n_out), nonlinearity in zip(
-        pairwise(sizes), nonlinearities, strict=True
+    for i, ((n_in, n_out), nonlinearity) in enumerate(
+        zip(pairwise(sizes), nonlinearities, strict=True)
     ):
         # build nonlinearity
         if nonlinearity == "cquadratic":
@@ -97,9 +97,10 @@ def make_layers(
         linear = ComplexLinear(
             n_in, n_out, bias=False, interleaved=True, device=device, dtype=dtype
         )
-        complex_kaiming_uniform_(
+        kaiming_uniform_(
             linear.weight,
-            nonlinearity=nonlinearity,
+            # NOTE: the init is done on the pre-activations, so first layer is linear
+            nonlinearity="linear" if i == 0 else nonlinearity,
             param=alpha,
         )
 

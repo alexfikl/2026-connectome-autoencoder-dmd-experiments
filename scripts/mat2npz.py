@@ -97,7 +97,7 @@ def convert_matlab(
 
     from scipy.io import loadmat
 
-    result = loadmat(filename)
+    result = loadmat(filename, spmatrix=False)
 
     ret = 0
     matrices = {}
