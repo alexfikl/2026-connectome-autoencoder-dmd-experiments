@@ -12,8 +12,8 @@ import torch
 
 from nneuroutil.helpers import FuzzyChoiceAction, module_logger, tictoc
 from nneuroutil.torch_extras import (
+    TorchMemoryTracker,
     available_device_names,
-    make_memory_tracker,
     torch_default_device,
 )
 from nneuroutil.visualization import figure, make_colorbar_axes
@@ -50,7 +50,7 @@ def main(
     device = torch.get_default_device()
     log.info("Device: %s", device)
 
-    mem = make_memory_tracker(device)
+    mem = TorchMemoryTracker(device)
     mem.add_record("Start")
 
     # {{{ validate inputs

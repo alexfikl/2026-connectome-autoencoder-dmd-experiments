@@ -14,8 +14,8 @@ from torch.utils.data import TensorDataset
 
 from nneuroutil.helpers import FuzzyChoiceAction, module_logger
 from nneuroutil.torch_extras import (
+    TorchMemoryTracker,
     available_device_names,
-    make_memory_tracker,
     torch_default_device,
 )
 from nneuroutil.visualization import figure, make_colorbar_axes
@@ -56,18 +56,26 @@ class QuadraticNetwork(nn.Module):
         self.output_size = output_size
         self.dtype = dtype
 
-        from nneuroutil.torch_extras import Bias, ComplexLinear, ComplexQuadratic
+        from nneuroutil.torch_extras import (
+            Bias,
+            ComplexLinear,
+            ComplexQuadratic,
+            kaiming_uniform_,
+        )
 
         # NOTE: we know that our function is (A x)^2 + c, so just encode that
+        A = ComplexLinear(
+            input_size,
+            output_size,
+            bias=False,
+            interleaved=True,
+            device=device,
+            dtype=dtype,
+        )
+        kaiming_uniform_(A.weight, nonlinearity="cquadratic")
+
         self.model = nn.Sequential(
-            ComplexLinear(
-                input_size,
-                output_size,
-                bias=False,
-                interleaved=True,
-                device=device,
-                dtype=dtype,
-            ),
+            A,
             ComplexQuadratic(interleaved=True),
             Bias(2 * output_size, device=device, dtype=dtype),
         )
@@ -105,7 +113,7 @@ def main(
     device = torch.get_default_device()
     log.info("Device: %s", device)
 
-    mem = make_memory_tracker(device)
+    mem = TorchMemoryTracker(device)
     mem.add_record("Start")
 
     # {{{ vallidate inputs
@@ -151,6 +159,10 @@ def main(
     # {{{ plot predict
 
     def plot_predict(epoch: int, m: nn.Module) -> None:
+        # NOTE: plot 10 epochs and then only every 10th one to save time / memory
+        if epoch > 10 and epoch % 10 != 0:
+            return
+
         Zpredict = torch_predict(
             model,
             bbox=bbox,
