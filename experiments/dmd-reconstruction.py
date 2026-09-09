@@ -162,6 +162,9 @@ def main(
         if method == "dmd":
             dmd = build_dense_dmdc(X1, U, X2, method="ridge")
         elif method == "edmd":
+            # NOTE: we know our system, so we choose some nice observables:
+            #   x, (A x)^2, (A x)^4
+            # This might be missing some cross terms, but it is what it is.
             dmd = build_dense_extended_dmdc(
                 [
                     lambda x, A=mat: x,
@@ -181,12 +184,16 @@ def main(
     with figure(basename.with_stem(f"{basename.stem}-sigma")) as fig:
         ax = fig.gca()
 
+        # NOTE: none of these will match or anything, but plotting for visualization
         S = torch.linalg.svdvals(mat)
         ax.semilogy(S.cpu().numpy(), label=r"$\sigma_A$")
+
         S = torch.linalg.svdvals(dmd.A)
         ax.semilogy(S.cpu().numpy(), label=r"$\sigma_{{DMD}}$")
+
         S = torch.linalg.svdvals(X1.mH @ X1).sqrt()
         ax.semilogy(S.cpu().numpy(), label=r"$\sigma_{{X}}$")
+
         ax.set_xlabel("n")
         ax.legend()
 
@@ -196,23 +203,31 @@ def main(
         theta = np.linspace(0, 2.0 * np.pi, 512)
         ax.plot(np.sin(theta), np.cos(theta), "k-", lw=1)
 
+        # NOTE: none of these will match or anything, but plotting for visualization
         S = torch.linalg.eigvals(mat.cpu()).numpy()
         ax.plot(S.real, S.imag, "o", label=r"$\lambda_A$")
+
         S = torch.linalg.eigvals(dmd.A.cpu()).numpy()  # ty: ignore[unresolved-attribute]
         ax.plot(S.real, S.imag, "o", label=r"$\lambda_{{DMD}}$")
+
         ax.set_xlabel(r"$\lambda_r$")
         ax.set_xlabel(r"$\lambda_i$")
         ax.set_xlim([-3, 3])
         ax.set_aspect("equal")
         ax.legend()
 
-        log.info("max |lambda_dmd| = %.8e", np.max(np.abs(S)))
+    # NOTE: this should really be < 1 if we want a stable rollout. If it's > 1,
+    # then slowly all the trajectories will explode regardless of Z0
+    log.info("max |lambda_dmd| = %.8e", np.max(np.abs(S)))
 
     # }}}
 
     # {{{ predict
 
     with tictoc(f"Predicting using {method.upper()}"):
+        # TODO: would be nice to predict at 2x resolution to see if we're
+        # able to do anything here. That would need to also evolve at 2x
+        # resolution to be able to compare the two.
         Zpredict = torch.empty(
             (maxit, resolution, resolution, d),
             dtype=Z_init.dtype,
@@ -339,7 +354,6 @@ def main(
 
     from nneuroutil.vision import as_grayscale, otsu_threshold_from_image
 
-    # TODO: would be nice to make this predict on a larger c grid to comparison
     # NOTE: this is a linear operator, so we expect everybody to converge
     escaped = (
         torch.sum(
