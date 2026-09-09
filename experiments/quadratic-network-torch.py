@@ -257,7 +257,7 @@ def main(
             predictions = model(x_test)
             loss_test = criterion(predictions, y_test) / target_scale
 
-            loss_test = loss_test.cpu().numpy()
+            loss_test = loss_test.cpu().item()
             log.info("[%03d/%03d] test %.5e", epochs, epochs, loss_test)
 
         # }}}

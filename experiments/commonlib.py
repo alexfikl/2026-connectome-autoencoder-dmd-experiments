@@ -185,7 +185,8 @@ def generate_dataset(
 
             # clip escaped values over escape radius
             escaped = xp.sum(z_new.real**2 + z_new.imag**2, axis=-1) > escape_radius_sqr
-            z[i] = xp.where(escaped[..., None], max_z, z_new)
+            z[i] = z_new
+            z[i][escaped] = max_z
     else:
         result = [z0]
         for i in range(1, maxit):
@@ -320,6 +321,8 @@ def generate_timeseries_dataset(
     y = interleave(z[:, 1:, ::2] - c.real, z[:, 1:, 1::2] - c.imag, axis=-1)
     assert x.shape == y.shape
 
+    del c
+
     zabs = xp.sqrt(z[:, :, ::2] ** 2 + z[:, :, 1::2] ** 2)
     log.info("Dataset:")
     log.info("    Converged:    %d/%d", xp.sum(in_set), math.prod(in_set.shape))
@@ -327,6 +330,8 @@ def generate_timeseries_dataset(
     log.info("    Size:         %s", z.shape)
     log.info("    Max:          %.5e (radius %.5e)", xp.max(zabs), escape_radius)
     log.info("    Spread:       %.5e ± %.5e", xp.mean(zabs), xp.std(zabs))
+
+    del zabs
 
     # NOTE: mask only returned for plotting
     return x, y, mask, in_set
