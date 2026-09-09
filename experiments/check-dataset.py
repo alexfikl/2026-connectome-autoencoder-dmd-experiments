@@ -156,7 +156,7 @@ def main(
     escape_time = stats.escape_time
 
     converged = escape_time == n_levels
-    escapers = not converged
+    escapers = np.logical_not(converged)
 
     # }}}
 
@@ -289,7 +289,7 @@ def main(
         )
 
         xticks = list(range(8, n_levels, 8))
-        ax.set_xticks([1, *xticks, n_levels + 1])
+        ax.set_xticks([1, *xticks, n_levels + 2])
         ax.set_xticklabels([str(1), *(str(t) for t in xticks), "never"])
         ax.set_xlabel("Escape iteration $t_e$")
         ax.set_ylabel("Count")
