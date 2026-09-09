@@ -146,6 +146,8 @@ def main(
     if escape_radius is None:
         escape_radius = determine_escape_radius(mat)
 
+    mem.add_record("After data load")
+
     if outfile is None:
         outfile = filename.parent / f"{filename.stem}-quad.npz"
 
@@ -260,6 +262,8 @@ def main(
             loss_test = loss_test.cpu().item()
             log.info("[%03d/%03d] test %.5e", epochs, epochs, loss_test)
 
+        mem.add_record("After test loss")
+
         # }}}
 
         # {{{ checkpoint
@@ -286,6 +290,8 @@ def main(
             },
             weightsfile,
         )
+
+        mem.add_record("After checkpoint")
 
         # }}}
 

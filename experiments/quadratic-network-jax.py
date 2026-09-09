@@ -14,7 +14,7 @@ import numpy as np
 import optax
 from flax import nnx
 
-from nneuroutil.flax_extras import available_device_names
+from nneuroutil.flax_extras import JaxMemoryTracker, available_device_names
 from nneuroutil.helpers import FuzzyChoiceAction, module_logger, to_complex
 
 log = module_logger("lib.quadratic_network")
@@ -286,6 +286,9 @@ def main(
     (device,) = jax.devices(jax.default_backend())
     log.info("Device: %s", device)
 
+    mem = JaxMemoryTracker(device)
+    mem.add_record("Start")
+
     # {{{ validate inputs
 
     if not filename.exists():
@@ -317,6 +320,8 @@ def main(
 
         escape_radius = determine_escape_radius(mat)
 
+    mem.add_record("After data load")
+
     if outfile is None:
         outfile = filename.parent / f"{filename.stem}-quad.npz"
 
@@ -334,6 +339,10 @@ def main(
     from nneuroutil.visualization import figure, make_colorbar_axes
 
     def plot_predict(epoch: int, m: QuadraticNetwork) -> None:
+        # NOTE: plot 10 epochs and then only every 10th one to save time / memory
+        if epoch > 10 and epoch % 10 != 0:
+            return
+
         Zpredict = flax_predict(
             m,
             bbox=bbox,
@@ -407,6 +416,8 @@ def main(
             ),
         )
 
+        mem.add_record("After data generation")
+
         # }}}
 
         # {{{ train
@@ -427,6 +438,8 @@ def main(
             callback=plot_predict,
         )
 
+        mem.add_record("After training")
+
         # }}}
 
         # {{{ test loss
@@ -436,6 +449,8 @@ def main(
         loss_test = float(criterion(predictions, y_test) / target_scale)
 
         log.info("[%03d/%03d] test %.5e", epochs, epochs, loss_test)
+
+        mem.add_record("After test loss")
 
         # }}}
 
@@ -463,6 +478,8 @@ def main(
                 },
                 f,
             )
+
+        mem.add_record("After checkpoint")
 
         # }}}
 
@@ -554,6 +571,9 @@ def main(
         ax22.legend()
 
     # }}}
+
+    mem.add_record("Finished")
+    log.info("Memory:\n%s", mem)
 
     return 0
 
