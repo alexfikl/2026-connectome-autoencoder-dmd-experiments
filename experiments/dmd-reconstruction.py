@@ -339,6 +339,7 @@ def main(
 
     from nneuroutil.vision import as_grayscale, otsu_threshold_from_image
 
+    # TODO: would be nice to make this predict on a larger c grid to comparison
     # NOTE: this is a linear operator, so we expect everybody to converge
     escaped = (
         torch.sum(

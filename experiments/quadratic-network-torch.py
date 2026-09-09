@@ -13,7 +13,11 @@ from torch import nn
 from torch.utils.data import TensorDataset
 
 from nneuroutil.helpers import FuzzyChoiceAction, module_logger
-from nneuroutil.torch_extras import available_device_names, torch_default_device
+from nneuroutil.torch_extras import (
+    available_device_names,
+    make_memory_tracker,
+    torch_default_device,
+)
 from nneuroutil.visualization import figure, make_colorbar_axes
 
 log = module_logger("lib.quadratic_network")
@@ -100,6 +104,9 @@ def main(
 
     device = torch.get_default_device()
     log.info("Device: %s", device)
+
+    mem = make_memory_tracker(device)
+    mem.add_record("Start")
 
     # {{{ vallidate inputs
 
@@ -207,6 +214,8 @@ def main(
             make_timeseries_datasets(x, y, (0.8, 0.1, 0.1)),
         )
 
+        mem.add_record("After data generation")
+
         # }}}
 
         # {{{ train
@@ -227,6 +236,8 @@ def main(
             patience_early_stop=early_stop_patience,
             callback=plot_predict,
         )
+
+        mem.add_record("After training")
 
         model.eval()
         with torch.no_grad():
@@ -295,6 +306,8 @@ def main(
 
     # }}}
 
+    mem.add_record("Finished")
+
     # {{{ plot weight matrices
 
     # NOTE: the nn is trained to appproximate the trajectory, not the matrix A,
@@ -352,6 +365,8 @@ def main(
         ax22.legend()
 
     # }}}
+
+    log.info("Memory:\n%s", mem)
 
     return 0
 
