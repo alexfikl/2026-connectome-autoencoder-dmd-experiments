@@ -17,6 +17,10 @@ SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
 Plot CDF of absolute edge weights for connectome matrices.
 
+This also plots the per-matrix relative deviation from the pooled quantile
+function, i.e. how each matrix's weight distribution differs from the overall
+one as a function of the CDF level q.
+
 Example:
 
     > {SCRIPT_PATH.name} data/Emotion_LR_Task.npz
@@ -49,11 +53,7 @@ def main(
         return 1
 
     if outfile is None:
-        outfile = filename.with_stem(f"{filename.stem}-cdf").with_suffix("")
-
-    if not overwrite and outfile.exists():
-        log.error("File already exists (use --force to overwrite): '%s'.", outfile)
-        return 1
+        outfile = filename.with_suffix("")
 
     try:
         data = np.load(filename)
@@ -75,7 +75,7 @@ def main(
     from commonlib import set_matplotlib_style  # ruff:ignore[unused-import]
     from nneuroutil.visualization import figure
 
-    with figure(outfile) as fig:
+    with figure(outfile.with_stem(f"{outfile.stem}-cdf"), overwrite=overwrite) as fig:
         ax = fig.gca()
         ax.plot(amat_sorted, cdf, linewidth=2, color="C0")
 
@@ -89,6 +89,44 @@ def main(
 
         ax.set_xlabel("weight")
         ax.set_ylabel("CDF")
+
+    with figure(
+        outfile.with_stem(f"{outfile.stem}-cdf-ratio"), overwrite=overwrite
+    ) as fig:
+        ax = fig.gca()
+
+        q_grid = np.linspace(0.0, 1.0, 2001)[1:-1]
+        w_ref = np.quantile(amat_sorted, q_grid)
+
+        wmats = []
+        for mat in matrices:
+            wmat = np.abs(mat)
+            wmat = np.sort(wmat[wmat > 0.0])
+            wmats.append(np.quantile(wmat, q_grid) / w_ref - 1.0)
+
+        wmat = np.asarray(wmats)
+        median = np.median(wmat, axis=0)
+        p5, p95 = np.percentile(wmat, [5, 95], axis=0)
+
+        ax.axhline(0.0, linestyle="--", lw=1, color="k")
+
+        ax.plot(q_grid, wmat.T * 100.0, lw=0.5, alpha=0.2, color="C0")
+        ax.fill_between(
+            q_grid,
+            p5 * 100.0,
+            p95 * 100.0,
+            color="C0",
+            alpha=0.2,
+            label="5% - 95%",
+        )
+        ax.plot(q_grid, median * 100.0, color="C0", label="median")
+
+        vmax = np.percentile(np.abs(wmat) * 100.0, 99.5)
+        ax.set_ylim([-vmax, vmax])
+
+        ax.legend(loc="lower right")
+        ax.set_xlabel("CDF level $q$")
+        ax.set_ylabel(r"relative deviation $w(q) / w_{\mathrm{ref}}(q) - 1$ [\%]")
 
     return 0
 
