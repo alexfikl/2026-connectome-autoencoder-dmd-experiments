@@ -110,6 +110,7 @@ lint.isort.known-first-party = [
     "commonlib",
     "nneuroutil",
     "orbitkit",
+    "torchlib",
 ]
 lint.isort.required-imports = [
     "from __future__ import annotations",

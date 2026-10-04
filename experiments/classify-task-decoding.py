@@ -28,7 +28,7 @@ Example:
 def main(
     filenames: tuple[pathlib.Path, ...],
     *,
-    method: Literal["lda", "svm"] = "svm",
+    method: Literal["lda", "svm", "mlp"] = "svm",
     datakey: str = "matrices",
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
@@ -124,6 +124,21 @@ def main(
                 x_test_i.shape[0],
                 matched / x_test_i.shape[0] * 100,
             )
+    elif method == "mlp":
+        from torchlib import classify_multilayer_perceptron
+
+        mlp = classify_multilayer_perceptron(x_train, y_train)
+
+        for x_test_i, y_test_i in zip(x_test, y_test, strict=True):
+            y_test_mlp = mlp.predict(x_test_i)
+            matched = torch.sum(torch.eq(y_test_mlp, y_test_i))
+
+            log.info(
+                "Match %d out of %d (%.2f%%)",
+                matched,
+                x_test_i.shape[0],
+                matched / x_test_i.shape[0] * 100,
+            )
     else:
         raise ValueError(f"unknown method: {method!r}")
 
@@ -153,7 +168,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--method",
-        choices=("lda", "svm"),
+        choices=("lda", "svm", "mlp"),
         default="lda",
         help="The method used to do the classification",
     )
