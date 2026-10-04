@@ -28,7 +28,7 @@ networkx==3.6.1 ; python_full_version < '3.12'
     # via fractal-dmd-autoencoder (pyproject.toml)
 networkx==3.7 ; python_full_version >= '3.12'
     # via fractal-dmd-autoencoder (pyproject.toml)
-nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@78120a98380e67178edc79dbb9e2a6d8394afb77#egg=nneuroutil
+nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@c096be28c4545bb63136f20c88659a0a954af9bf#egg=nneuroutil
     # via fractal-dmd-autoencoder (pyproject.toml)
 numpy==2.4.6 ; python_full_version < '3.12'
     # via
