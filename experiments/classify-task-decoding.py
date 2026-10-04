@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import cast
+from typing import Literal, cast
 
 import numpy as np
 import torch
@@ -28,6 +28,7 @@ Example:
 def main(
     filenames: tuple[pathlib.Path, ...],
     *,
+    method: Literal["lda", "svm"] = "svm",
     datakey: str = "matrices",
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
@@ -93,20 +94,38 @@ def main(
         x_test.append(x_test_i)
         y_test.append(label)
 
-    from nneuroutil.classifier import classify_linear_discriminant_analysis
+    if method == "lda":
+        from nneuroutil.classifier import classify_linear_discriminant_analysis
 
-    lda = classify_linear_discriminant_analysis(x_train, y_train)
+        lda = classify_linear_discriminant_analysis(x_train, y_train)
 
-    for x_test_i, y_test_i in zip(x_test, y_test, strict=True):
-        y_test_lda = lda.predict(x_test_i, metric="l2")
-        matched = torch.sum(torch.eq(y_test_lda, y_test_i))  # ty: ignore[no-matching-overload]
+        for x_test_i, y_test_i in zip(x_test, y_test, strict=True):
+            y_test_lda = lda.predict(x_test_i, metric="l2")
+            matched = torch.sum(torch.eq(y_test_lda, y_test_i))  # ty: ignore[no-matching-overload]
 
-        log.info(
-            "Match %d out of %d (%.2f%%)",
-            matched,
-            x_test_i.shape[0],
-            matched / x_test_i.shape[0] * 100,
-        )
+            log.info(
+                "Match %d out of %d (%.2f%%)",
+                matched,
+                x_test_i.shape[0],
+                matched / x_test_i.shape[0] * 100,
+            )
+    elif method == "svm":
+        from nneuroutil.classifier import classify_support_vector_machine
+
+        svm = classify_support_vector_machine(x_train, y_train)
+
+        for x_test_i, y_test_i in zip(x_test, y_test, strict=True):
+            y_test_lda = svm.predict(x_test_i)
+            matched = torch.sum(torch.eq(y_test_lda, y_test_i))  # ty: ignore[no-matching-overload]
+
+            log.info(
+                "Match %d out of %d (%.2f%%)",
+                matched,
+                x_test_i.shape[0],
+                matched / x_test_i.shape[0] * 100,
+            )
+    else:
+        raise ValueError(f"unknown method: {method!r}")
 
     return ret
 
@@ -131,6 +150,12 @@ if __name__ == "__main__":
         choices=sorted(available_device_names()),
         default="cpu",
         help="The default deviced used by the framework",
+    )
+    parser.add_argument(
+        "--method",
+        choices=("lda", "svm"),
+        default="lda",
+        help="The method used to do the classification",
     )
     parser.add_argument(
         "-o",
@@ -163,6 +188,7 @@ if __name__ == "__main__":
             main(
                 args.filenames,
                 outfile=args.outfile,
+                method=args.method,
                 overwrite=args.force,
             )
         )
