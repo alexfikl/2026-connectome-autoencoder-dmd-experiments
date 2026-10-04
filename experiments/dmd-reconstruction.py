@@ -212,7 +212,7 @@ def main(
 
         ax.set_xlabel(r"$\lambda_r$")
         ax.set_xlabel(r"$\lambda_i$")
-        ax.set_xlim([-3, 3])
+        ax.set_xlim((-3, 3))
         ax.set_aspect("equal")
         ax.legend()
 

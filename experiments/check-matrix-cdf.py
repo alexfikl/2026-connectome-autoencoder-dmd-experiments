@@ -83,7 +83,11 @@ def main(
         for p, color in zip(percentiles, colors, strict=True):
             q = np.quantile(amat_sorted, p)
             ax.axvline(
-                q, linestyle="--", alpha=0.7, color=color, label=f"{p:.0%}: {q:.5f}"
+                float(q),
+                linestyle="--",
+                alpha=0.7,
+                color=color,
+                label=f"{p:.0%}: {q:.5f}",
             )
         ax.legend(loc="lower right")
 
@@ -122,7 +126,7 @@ def main(
         ax.plot(q_grid, median * 100.0, color="C0", label="median")
 
         vmax = np.percentile(np.abs(wmat) * 100.0, 99.5)
-        ax.set_ylim([-vmax, vmax])
+        ax.set_ylim((-vmax, vmax))
 
         ax.legend(loc="lower right")
         ax.set_xlabel("CDF level $q$")

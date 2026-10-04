@@ -274,7 +274,7 @@ def main(
         bins = np.arange(1, n_levels + 2) - 0.5
         ax.hist(
             escape_time[escapers].ravel(),
-            bins=bins,
+            bins=bins,  # ty: ignore[invalid-argument-type]
             color="C0",
             label="Escaped",
         )
@@ -324,8 +324,8 @@ def main(
         )
         ax1.set_xlabel("Iteration $n$")
         ax1.set_ylabel("Fraction of kept trajectories")
-        ax1.set_xlim([0, n_levels - 1])
-        ax1.set_ylim([0, 1])
+        ax1.set_xlim((0, n_levels - 1))
+        ax1.set_ylim((0, 1))
         ax1.legend(loc="upper left")
         ax1.set_title("Trajectory composition")
 
@@ -345,7 +345,7 @@ def main(
         )
         ax2.bar_label(bars, fmt="%.1f%%")
         ax2.set_ylabel("% of all kept transitions")
-        ax2.set_ylim([0, 100])
+        ax2.set_ylim((0, 100))
         ax2.set_title("Transition types")
 
     # }}}
@@ -388,7 +388,7 @@ def main(
 
         ax.set_xlabel("Iteration $n$")
         ax.set_ylabel(r"$\|z_n\|_2$")
-        ax.set_xlim([0, n_levels - 1])
+        ax.set_xlim((0, n_levels - 1))
         ax.legend(loc="lower right")
 
     # }}}
