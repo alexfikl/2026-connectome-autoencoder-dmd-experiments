@@ -8,6 +8,7 @@ import pathlib
 from collections.abc import Sequence
 from typing import Any, Literal
 
+import array_api_compat
 import numpy as np
 import rich.logging
 from typing_extensions import TypeAliasType, TypeVar
@@ -112,79 +113,155 @@ def make_eig_features(
 # {{{ make_signed_graph_features
 
 
-def _make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
-    import networkx as nx
+def _global_efficiency(distances: Array2D[np.floating[Any]]) -> float:
+    """Average global efficiency from an unweighted distance matrix."""
+    n, _ = distances.shape
+    if n < 2:
+        return 0.0
 
-    # construct graphs
+    d = distances[np.triu_indices(n, k=1)]
+    mask = np.isfinite(d) & (d > 0)
+    with np.errstate(divide="ignore"):
+        reciprocal = np.where(mask, 1.0 / d, 0.0)
+
+    return float(2.0 * np.sum(reciprocal) / (n * (n - 1)))
+
+
+def _local_efficiency(g: Any, distances: Array2D[np.floating[Any]]) -> float:
+    """Average local efficiency from an unweighted distance matrix."""
+    n, _ = distances.shape
+    if n == 0:
+        return 0.0
+
+    total = 0.0
+    for i in range(n):
+        nbrs = np.asarray(g.neighbors(i))
+        k = nbrs.size
+        if k < 2:
+            continue
+
+        d = distances[np.ix_(nbrs, nbrs)][np.triu_indices(k, k=1)]
+        mask = np.isfinite(d) & (d > 0)
+        with np.errstate(divide="ignore"):
+            reciprocal = np.where(mask, 1.0 / d, 0.0)
+
+        total += 2.0 * np.sum(reciprocal) / (k * (k - 1))
+
+    return float(total / n)
+
+
+def _small_worldness(g: Any, *, niter: int = 1, nrand: int = 1) -> float:
+    """Small-worldness coefficient (matching :func:`networkx.sigma`)."""
+    if g.vcount() < 4 or g.ecount() < 2:
+        return np.nan
+
+    clustering = g.transitivity_undirected()
+    path_length = g.average_path_length(unconn=True)
+
+    random_clustering = []
+    random_path_length = []
+    for _ in range(nrand):
+        null = g.copy()
+        null.rewire(n=niter * g.ecount(), allowed_edge_types="simple")
+        random_clustering.append(null.transitivity_undirected())
+        random_path_length.append(null.average_path_length(unconn=True))
+
+    cr = float(np.mean(random_clustering))
+    lr = float(np.mean(random_path_length))
+    if cr <= 0.0 or lr <= 0.0:
+        return np.nan
+
+    return float((clustering / cr) / (path_length / lr))
+
+
+def _make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
+    import random
+
+    import igraph as ig
+
+    from orbitkit.metrics import (
+        compute_rich_club_coefficient,
+        compute_weighted_clustering_coefficient_nx,
+    )
+
+    ig.set_random_number_generator(random.Random(42))  # ruff: ignore[suspicious-non-cryptographic-random-usage]
+
+    # construct graph
     # NOTE: distance = 1/weight for some measures (shortest path on cost)
-    G = nx.from_numpy_array(mat)
-    for u, v, d in G.edges(data=True):
-        if d["weight"] > 0:
-            G[u][v]["distance"] = 1.0 / d["weight"]
-    log.info("        Nodes %d Edges %d", len(G.nodes()), len(G.edges()))
+    g = ig.Graph.Weighted_Adjacency(mat, mode="undirected", attr="weight", loops=False)
+    g.es["distance"] = (1.0 / np.asarray(g.es["weight"])).tolist()
+    log.info("        Nodes %d Edges %d", g.vcount(), g.ecount())
+
+    # unweighted shortest paths are reused by the efficiency measures
+    distances = np.asarray(g.distances())
 
     features = []
     starts = [0]
     descrs = []
 
     # Strength: average weighted degree
-    strengths = np.array([d for _, d in G.degree(weight="weight")])
-    features.append(np.mean(strengths))
-    starts.append(np.size(features[-1]))
+    features.append(float(np.mean(g.strength(weights="weight"))))
+    starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Strength")
 
     # Clustering Coefficient
-    features.append(nx.average_clustering(G, weight="weight"))
-    starts.append(np.size(features[-1]))
+    features.append(compute_weighted_clustering_coefficient_nx(mat))
+    starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Clustering Coefficient")
 
     # Modularity
-    communities = nx.community.louvain_communities(G, weight="weight", seed=42)
-    features.append(nx.community.modularity(G, communities, weight="weight"))
-    starts.append(np.size(features[-1]))
+    communities = g.community_leiden(
+        objective_function="modularity", weights="weight", n_iterations=-1
+    )
+    features.append(g.modularity(communities.membership, weights="weight"))
+    starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Modularity")
 
     # Eigenvector Centrality
-    ec = nx.eigenvector_centrality(G, weight="weight", max_iter=1000)
-    features.append(np.mean(list(ec.values())))
-    starts.append(np.size(features[-1]))
+    ec = np.asarray(g.eigenvector_centrality(weights="weight"))
+    norm = np.linalg.norm(ec)
+    features.append(float(np.mean(ec / norm)) if norm > 0.0 else 0.0)
+    starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Eigenvector Centrality")
 
     # Rich-club Coefficient (mean across degrees)
-    rc = nx.rich_club_coefficient(G, normalized=False)
-    features.append(np.mean(list(rc.values())))
-    starts.append(np.size(features[-1]))
+    features.append(compute_rich_club_coefficient(mat))
+    starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Rich-club Coefficient")
 
     # Transitivity (unweighted)
-    features.append(nx.transitivity(G))
-    starts.append(np.size(features[-1]))
+    features.append(g.transitivity_undirected())
+    starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Transitivity")
 
     # Characteristic Path Length
-    features.append(nx.average_shortest_path_length(G, weight="distance"))
-    starts.append(np.size(features[-1]))
+    features.append(g.average_path_length(weights="distance", unconn=True))
+    starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Characteristic Path Length")
 
     # Global Efficiency
-    features.append(nx.global_efficiency(G))
-    starts.append(np.size(features[-1]))
+    features.append(_global_efficiency(distances))
+    starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Global Efficiency")
 
     # Local Efficiency
-    features.append(nx.local_efficiency(G))
-    starts.append(np.size(features[-1]))
+    features.append(_local_efficiency(g, distances))
+    starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Local Efficiency")
 
-    # Betweenness Centrality (mean across nodes)
-    bc = nx.betweenness_centrality(G, weight="distance", normalized=True)
-    features.append(np.mean(list(bc.values())))
-    starts.append(np.size(features[-1]))
+    # Betweenness Centrality (mean across nodes, normalized as in networkx)
+    n, _ = mat.shape
+    if n > 2:
+        bc = np.asarray(g.betweenness(weights="distance", directed=False))
+        features.append(float(np.mean(bc)) * 2.0 / ((n - 1) * (n - 2)))
+    else:
+        features.append(0.0)
+    starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Betweenness Centrality")
 
     # Small-worldness (requires connected graph)
-    features.append(nx.sigma(G, niter=1, nrand=1, seed=42))
-    starts.append(np.size(features[-1]))
+    features.append(_small_worldness(g, niter=1, nrand=1))
+    starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Small-worldness")
 
     return FeatureDataset(
@@ -216,36 +293,36 @@ def make_unsigned_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDatas
 
     # Strength
     features.append(okm.compute_weighted_degree(mat))
-    starts.append(np.size(features[-1]))
+    starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Strength")
 
     # Clustering Coefficient
     features.append(
         okm.compute_weighted_clustering_coefficient_costantini(mat, variant=6)
     )
-    starts.append(np.size(features[-1]))
+    starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Clustering Coefficient")
 
     # Local Assortativity
     features.append(
         okm.compute_local_assortativity_sabek(np.abs(mat), alpha=1.0, beta=1.0)
     )
-    starts.append(np.size(features[-1]))
+    starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Local Assortativity")
 
     # Eigenvector Centrality
     features.append(okm.compute_eigenvector_centrality(mat).score)
-    starts.append(np.size(features[-1]))
+    starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Eigenvector Centrality")
 
     # Modularity
     communities = signed_leiden_communities(mat)
     features.append(np.array(okm.compute_modularity(mat, communities)))
-    starts.append(np.size(features[-1]))
+    starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Modularity")
 
     return FeatureDataset(
-        x=np.vstack(features),
+        x=np.hstack(features),
         labels=np.array(0),
         label_names=(),
         starts=np.array(starts),
@@ -268,6 +345,19 @@ def make_dmd_features(
     resolution: int = 64,
     maxit: int = 192,
 ) -> FeatureDataset:
+    # NOTE: the DMD run is pretty slow, so we try to do it on the GPU
+    try:  # ruff: ignore[too-many-statements-in-try-clause]
+        import torch
+
+        from nneuroutil.torch_extras import available_device_names
+
+        if any(dev.startswith("cuda") for dev in available_device_names()):
+            torch.set_default_device("cuda")
+            xp = array_api_compat.array_namespace(torch.empty(0))
+        xp = array_api_compat.array_namespace(np.array(0))
+    except ImportError:
+        xp = array_api_compat.array_namespace(np.array(0))
+
     from commonlib import generate_dataset
     from nneuroutil.dmdc import build_dense_dmdc
 
@@ -280,10 +370,10 @@ def make_dmd_features(
 
     # {{{ generate data
 
-    dtype = np.result_type(mat.dtype, np.complex64)
+    dtype = xp.result_type(mat.dtype, xp.complex64)
 
     Z, c = generate_dataset(
-        np.astype(mat, dtype),
+        xp.astype(xp.asarray(mat), dtype),
         bbox=bbox,
         resolution=resolution,
         escape_radius=escape_radius,
@@ -291,7 +381,7 @@ def make_dmd_features(
     )
 
     # NOTE: only keep the data we actually use from here on out
-    mask = np.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, axis=-1) < escape_radius**2
+    mask = xp.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, axis=-1) < escape_radius**2
     Z = Z[:, mask, :]
 
     # }}}
@@ -299,35 +389,38 @@ def make_dmd_features(
     # {{{ build dataset
 
     # NOTE: Z has shape (maxit, converged, d)
-    X1 = Z[:-1].reshape(-1, n)
-    X2 = Z[1:].reshape(-1, n)
-    U = np.broadcast_to(c[mask, None], (maxit - 1, mask.sum(), 1)).reshape(-1, 1)
+    X1 = xp.reshape(Z[:-1], (-1, n))
+    X2 = xp.reshape(Z[1:], (-1, n))
+    U = xp.reshape(
+        xp.broadcast_to(c[mask, None], (maxit - 1, xp.sum(mask), 1)),
+        (-1, 1),
+    )
 
     # }}}
 
     # {{{ features
 
     dmd = build_dense_dmdc(X1, U, X2, method="ridge")
-    eigs, Phi = np.linalg.eig(dmd.A.T)  # ty: ignore[unresolved-attribute]
+    eigs, Phi = xp.linalg.eig(dmd.A.T)  # ty: ignore[unresolved-attribute]
 
-    P = np.linalg.pinv(Phi)
-    G = X1.conj().T @ X1
-    coeff_energy = np.maximum(np.real(np.diag(P @ G @ P.conj().T)), 0.0)
-    strengths = np.linalg.norm(Phi, axis=0) * np.sqrt(coeff_energy)
+    P = xp.linalg.pinv(Phi)
+    G = xp.conj(X1).T @ X1
+    coeff_energy = xp.maximum(xp.real(xp.diag(P @ G @ xp.conj(P).T)), 0.0)
+    strengths = xp.linalg.norm(Phi, axis=0) * xp.sqrt(coeff_energy)
 
-    order = np.argsort(-strengths)[:top_k]
+    order = xp.argsort(-strengths)[:top_k]
     eigs = eigs[order]
-    strengths = strengths[order] / np.sum(strengths)
+    strengths = strengths[order] / xp.sum(strengths)
     Phi = Phi[:, order]
 
-    features = np.concatenate([
+    features = xp.concatenate([
         strengths,
         eigs.real,
         eigs.imag,
-        np.abs(Phi).T.ravel(),
+        xp.abs(Phi).T.ravel(),
     ])
 
-    starts = np.array([
+    starts = np.asarray([
         *range(top_k),
         *(top_k + i for i in range(top_k)),
         *(2 * top_k + i for i in range(top_k)),
@@ -344,7 +437,11 @@ def make_dmd_features(
     # }}}
 
     return FeatureDataset(
-        x=features, labels=np.array(0), label_names=(), starts=starts, descrs=descrs
+        x=np.asarray(features),
+        labels=np.array(0),
+        label_names=(),
+        starts=starts,
+        descrs=descrs,
     )
 
 
@@ -418,6 +515,9 @@ def make_features(
             if density is not None:
                 cutoff = np.quantile(amat_i[amat_i > feps], 1 - density)
                 mat_i = np.where(amat_i > cutoff, mat_i, 0.0)
+
+            # NOTE: ensure the matrix is symmetric (some algorithms need that)
+            mat_i = (mat_i + mat_i.T) / 2.0
 
             try:  # ruff: ignore[too-many-statements-in-try-clause]
                 if ftype == "matrix":
