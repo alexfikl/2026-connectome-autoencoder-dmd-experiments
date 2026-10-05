@@ -44,9 +44,13 @@ def main(
     from nneuroutil.data import random_split
 
     x_train: list[torch.Tensor] = []
-    x_test: list[torch.Tensor] = []
     y_train: list[int] = []
+
+    x_test: list[torch.Tensor] = []
     y_test: list[int] = []
+
+    idx_train: torch.Tensor | None = None
+    idx_test: torch.Tensor | None = None
 
     for label, filename in enumerate(filenames):
         if not filename.exists():
@@ -83,15 +87,18 @@ def main(
         x = matrices[:, rows, cols]
 
         # split each dataset for training / testing as is tradition
-        (x_train_i,), (x_test_i,) = cast(
-            tuple[tuple[torch.Tensor], tuple[torch.Tensor]],
-            random_split((x,), (0.6, 0.4)),
-        )
+        # NOTE: we only do this once because the various datasets seem to be the
+        # same subjects in the same order, so this doesn't contaminate
+        if idx_train is None and idx_test is None:
+            (idx_train,), (idx_test,) = cast(
+                tuple[tuple[torch.Tensor], tuple[torch.Tensor]],
+                random_split((torch.arange(x.shape[0]),), (0.6, 0.4)),
+            )
 
-        x_train.append(x_train_i)
+        x_train.append(x[idx_train])
         y_train.append(label)
 
-        x_test.append(x_test_i)
+        x_test.append(x[idx_test])
         y_test.append(label)
 
     if method == "lda":
