@@ -7,7 +7,7 @@ import math
 import os
 import pathlib
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import array_api_compat
 import numpy as np
@@ -15,7 +15,7 @@ import numpy as np
 from nneuroutil.array_api_extras import interleave
 from nneuroutil.data import SlicedDataLoader
 from nneuroutil.helpers import TicTocTimer, module_logger, tictoc
-from nneuroutil.typing import Array2D, Array3D, Array4D
+from nneuroutil.typing import Array1D, Array2D, Array3D, Array4D
 
 if TYPE_CHECKING:
     import torch
@@ -52,6 +52,101 @@ def set_matplotlib_style() -> None:
 
 
 set_matplotlib_style()
+
+# }}}
+
+
+# {{{ load_feature_datasets
+
+
+class FeatureDataset(NamedTuple):
+    x: Array2D[np.floating[Any]]
+    """Feature matrix of shape ``(nsamples, nfeatures)``."""
+    labels: Array1D[np.integer[Any]]
+    """Integer class label for each sample."""
+    label_names: tuple[str, ...]
+    """Class name for each integer label."""
+    starts: Array1D[np.integer[Any]]
+    """Feature group boundaries of length ``ngroups + 1``."""
+    descrs: tuple[str, ...]
+    """Description of each feature group."""
+
+
+def load_feature_datasets(
+    filename: pathlib.Path,
+    *,
+    datakey: str = "datasets",
+    drop_nan: bool = True,
+    xp: Any = None,
+) -> FeatureDataset:
+    """Load a feature file written by ``make-features.py``.
+
+    :arg datakey: name of the variable holding the class dictionary.
+    """
+    if not filename.exists():
+        raise FileNotFoundError(f"file does not exist: '{filename}'")
+
+    try:
+        data = np.load(filename, allow_pickle=True)
+    except Exception:
+        raise RuntimeError(f"failed to load data from file: '{filename}'") from None
+
+    if datakey not in data:
+        raise ValueError(f"file does not contain '{datakey}' dataset: '{filename}'")
+
+    datasets = data[datakey]
+    if datasets.ndim == 0:
+        datasets = datasets[()]
+
+    if not isinstance(datasets, dict):
+        raise ValueError(f"expected a dictionary in '{datakey}': '{filename}'")
+
+    descrs = data["descrs"]
+    if descrs.ndim == 0:
+        descrs = descrs[()]
+    descrs = tuple(str(d) for d in descrs)
+
+    if xp is None:
+        xp = array_api_compat.array_namespace(np.array([0]))
+
+    label_names = tuple(datasets)
+    arrays: list[Array2D[np.floating[Any]]] = []
+    labels: list[Array1D[np.integer[Any]]] = []
+
+    for i, name in enumerate(label_names):
+        array = datasets[name]
+        if array.ndim != 2:
+            raise ValueError(f"expected a 2d array for class '{name}': {array.shape}")
+
+        # drop samples that failed to compute any features
+        if drop_nan:
+            valid = ~np.any(np.isnan(array), axis=1)
+            if not np.all(valid):
+                log.info(
+                    "Dropping %d samples with missing features from '%s'.",
+                    np.sum(~valid),
+                    name,
+                )
+                array = array[valid]
+
+        arrays.append(xp.asarray(array))
+        labels.append(xp.full(array.shape[0], i))
+
+    if not arrays:
+        raise ValueError(f"no classes found in '{filename}'")
+
+    nfeatures = arrays[0].shape[1]
+    if any(a.shape[1] != nfeatures for a in arrays):
+        raise ValueError(f"feature arrays have inconsistent sizes in '{filename}'")
+
+    return FeatureDataset(
+        x=xp.concatenate(arrays, axis=0),
+        labels=xp.concatenate(labels),
+        label_names=label_names,
+        starts=xp.asarray(data["starts"]),
+        descrs=descrs,
+    )
+
 
 # }}}
 
