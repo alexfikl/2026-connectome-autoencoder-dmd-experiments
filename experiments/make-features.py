@@ -6,11 +6,13 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections.abc import Sequence
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal
 
 import numpy as np
 import rich.logging
 from typing_extensions import TypeAliasType, TypeVar
+
+from commonlib import FeatureDataset
 
 log = logging.getLogger(pathlib.Path(__file__).stem)
 log.setLevel(logging.ERROR)
@@ -39,16 +41,10 @@ Array2D = TypeAliasType(
 )
 
 
-class Features(NamedTuple):
-    features: Array1D[np.floating[Any]]
-    starts: Array1D[np.integer[Any]]
-    descrs: tuple[str, ...]
-
-
 # {{{ make_matrix_features
 
 
-def make_matrix_features(mat: Array2D[np.floating[Any]]) -> Features:
+def make_matrix_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     n, m = mat.shape
     if n != m:
         raise ValueError(f"'mat' is not square: {mat.shape}")
@@ -59,7 +55,9 @@ def make_matrix_features(mat: Array2D[np.floating[Any]]) -> Features:
     starts = np.array([0, features.size])
     descrs = ("Lower triangular matrix entries",)
 
-    return Features(features, starts, descrs)
+    return FeatureDataset(
+        x=features, labels=np.array(0), label_names=(), starts=starts, descrs=descrs
+    )
 
 
 # }}}
@@ -72,7 +70,7 @@ def make_eig_features(
     mat: Array2D[np.floating[Any]],
     *,
     top_k: int = 3,
-) -> Features:
+) -> FeatureDataset:
     n, m = mat.shape
     if n != m:
         raise ValueError(f"'mat' is not square: {mat.shape}")
@@ -103,7 +101,9 @@ def make_eig_features(
         *(f"Eigenvector {i}" for i in range(top_k)),
     )
 
-    return Features(features, starts, descrs)
+    return FeatureDataset(
+        x=features, labels=np.array(0), label_names=(), starts=starts, descrs=descrs
+    )
 
 
 # }}}
@@ -112,7 +112,7 @@ def make_eig_features(
 # {{{ make_signed_graph_features
 
 
-def _make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> Features:
+def _make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     import networkx as nx
 
     # construct graphs
@@ -187,10 +187,16 @@ def _make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> Features:
     starts.append(np.size(features[-1]))
     descrs.append("Small-worldness")
 
-    return Features(np.array(features), np.array(starts), descrs=tuple(descrs))
+    return FeatureDataset(
+        x=np.array(features),
+        labels=np.array(0),
+        label_names=(),
+        starts=np.array(starts),
+        descrs=tuple(descrs),
+    )
 
 
-def make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> Features:
+def make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     return _make_signed_graph_features(np.abs(mat))
 
 
@@ -200,7 +206,7 @@ def make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> Features:
 # {{{ make_unsigned_graph_features
 
 
-def make_unsigned_graph_features(mat: Array2D[np.floating[Any]]) -> Features:
+def make_unsigned_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     import orbitkit.metrics as okm
     from orbitkit.clusters import signed_leiden_communities
 
@@ -238,7 +244,13 @@ def make_unsigned_graph_features(mat: Array2D[np.floating[Any]]) -> Features:
     starts.append(np.size(features[-1]))
     descrs.append("Modularity")
 
-    return Features(np.vstack(features), np.array(starts), descrs=tuple(descrs))
+    return FeatureDataset(
+        x=np.vstack(features),
+        labels=np.array(0),
+        label_names=(),
+        starts=np.array(starts),
+        descrs=tuple(descrs),
+    )
 
 
 # }}}
@@ -255,7 +267,7 @@ def make_dmd_features(
     escape_radius: float = 100.0,
     resolution: int = 64,
     maxit: int = 192,
-) -> Features:
+) -> FeatureDataset:
     from commonlib import generate_dataset
     from nneuroutil.dmdc import build_dense_dmdc
 
@@ -331,7 +343,9 @@ def make_dmd_features(
 
     # }}}
 
-    return Features(features, starts, descrs)
+    return FeatureDataset(
+        x=features, labels=np.array(0), label_names=(), starts=starts, descrs=descrs
+    )
 
 
 # }}}
@@ -407,15 +421,15 @@ def make_features(
 
             try:  # ruff: ignore[too-many-statements-in-try-clause]
                 if ftype == "matrix":
-                    features, starts, descrs = make_matrix_features(mat_i)
+                    features = make_matrix_features(mat_i)
                 elif ftype == "eig":
-                    features, starts, descrs = make_eig_features(mat_i)
+                    features = make_eig_features(mat_i)
                 elif ftype == "sgraph":
-                    features, starts, descrs = make_signed_graph_features(mat_i)
+                    features = make_signed_graph_features(mat_i)
                 elif ftype == "ugraph":
-                    features, starts, descrs = make_unsigned_graph_features(mat_i)
+                    features = make_unsigned_graph_features(mat_i)
                 elif ftype == "dmd":
-                    features, starts, descrs = make_dmd_features(mat_i)
+                    features = make_dmd_features(mat_i)
                 else:
                     raise ValueError(f"unknown feature type: {ftype!r}")
             except Exception as exc:
@@ -428,21 +442,20 @@ def make_features(
                 ret = 1
                 continue
 
+            nfeatures = np.size(features.x)
             if result is None:
-                result = np.full(
-                    (nsamples, features.size), np.nan, dtype=features.dtype
-                )
+                result = np.full((nsamples, nfeatures), np.nan, dtype=features.x.dtype)
 
-            assert result.shape[1] == features.size
-            assert starts[-1] == features.size
-            assert np.sum(np.diff(starts)) == features.size
+            assert result.shape[1] == nfeatures
+            assert features.starts[-1] == nfeatures
+            assert np.sum(np.diff(features.starts)) == nfeatures
 
-            result[i] = features
+            result[i] = features.x
 
         assert filename.stem not in datasets
         datasets[filename.stem] = result
 
-    np.savez(outfile, datasets=datasets, starts=starts, descrs=descrs)
+    np.savez(outfile, datasets=datasets, starts=features.starts, descrs=features.descrs)
     return ret
 
 
