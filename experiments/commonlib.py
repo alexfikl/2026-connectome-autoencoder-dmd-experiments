@@ -59,7 +59,7 @@ set_matplotlib_style()
 # {{{ escape radius
 
 
-def determine_escape_radius(A: Array2D) -> float:
+def determine_escape_radius(A: Array2D[np.number[Any]]) -> float:
     xp = array_api_compat.array_namespace(A)
 
     assert A.shape[0] == A.shape[1]
@@ -87,7 +87,7 @@ def generate_grid(
     dtype: Any = None,
     xp: Any = None,
     device: Any = None,
-) -> Array2D:
+) -> Array2D[np.complexfloating[Any]]:
     """Generate a 2D complex grid in ``[re_min, re_max] x [im_min, im_max]``."""
 
     if xp is None:
@@ -121,14 +121,14 @@ def generate_grid(
 
 
 def generate_dataset(
-    A: Array2D,
+    A: Array2D[np.number[Any]],
     *,
     bbox: tuple[float, float, float, float],
     escape_radius: float = 100.0,
     resolution: int = 128,
     maxit: int = 128,
     xp: Any = None,
-) -> tuple[Array4D, Array2D]:
+) -> tuple[Array4D[np.complexfloating[Any]], Array2D[np.complexfloating[Any]]]:
     r"""Generate a full dataset based on the dynamical system:
 
     .. math::
@@ -158,12 +158,15 @@ def generate_dataset(
     if xp is None:
         xp = array_api_compat.array_namespace(A)
 
+    # convert to closest complex type -- should probably complain instead
+    dtype = xp.result_type(A.dtype, xp.complex64)
+
     # generate grid
     c = generate_grid(
         *bbox,
         nx=resolution,
         ny=resolution,
-        dtype=A.dtype,
+        dtype=dtype,
         xp=xp,
         device=A.device,
     )
@@ -175,10 +178,10 @@ def generate_dataset(
     escape_radius_sqr = escape_radius**2
 
     # iterate
-    z0 = xp.zeros((resolution, resolution, d), dtype=A.dtype, device=A.device)
+    z0 = xp.zeros((resolution, resolution, d), dtype=dtype, device=A.device)
     if array_api_compat.is_writeable_array(z0):  # spell: disable
         del z0
-        z = xp.zeros((maxit, resolution, resolution, d), dtype=A.dtype, device=A.device)
+        z = xp.zeros((maxit, resolution, resolution, d), dtype=dtype, device=A.device)
         for i in range(1, maxit):
             # evolve
             z_new = xp.einsum("ij,klj->kli", A, z[i - 1]) ** 2 + c
@@ -205,13 +208,13 @@ def generate_dataset(
 
 
 def post_process_dataset(
-    z: Array4D,
+    z: Array4D[np.complexfloating[Any]],
     escape_radius: float,
     *,
     interleaved: bool = True,
     min_escape_iters: int | None = None,
     xp: Any = None,
-) -> tuple[Array3D, Array2D]:
+) -> tuple[Array3D[np.floating[Any]], Array2D[np.bool]]:
     """Post-process the dataset returned from :func:`generate_dataset`.
 
     * Mask out points that escape before *min_escape_iters*.
@@ -265,7 +268,7 @@ def post_process_dataset(
 
 
 def generate_timeseries_dataset(
-    mat: Array2D,
+    mat: Array2D[np.number[Any]],
     *,
     bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
     escape_radius: float = 100.0,
@@ -273,7 +276,12 @@ def generate_timeseries_dataset(
     maxit: int = 128,
     min_escape_iters: int | None = None,
     xp: Any = None,
-) -> tuple[Array3D, Array3D, Array2D, Array2D]:
+) -> tuple[
+    Array3D[np.floating[Any]],
+    Array3D[np.floating[Any]],
+    Array2D[np.bool],
+    Array2D[np.bool],
+]:
     """
     :arg min_escape_iters: Minimum iterations before a trajectory is allowed
         to escape.  Points escaping earlier are excluded.  ``None`` keeps
@@ -338,16 +346,16 @@ def generate_timeseries_dataset(
 
 
 def make_timeseries_datasets(
-    x: Array3D,
-    y: Array3D,
+    x: Array3D[np.complexfloating[Any]],
+    y: Array3D[np.complexfloating[Any]],
     lengths: tuple[float, float, float] | None = None,
     *,
     rng: np.random.Generator | None = None,
     xp: Any = None,
 ) -> tuple[
-    tuple[Array2D, Array2D],
-    tuple[Array2D, Array2D],
-    tuple[Array2D, Array2D],
+    tuple[Array2D[np.floating[Any]], Array2D[np.floating[Any]]],
+    tuple[Array2D[np.floating[Any]], Array2D[np.floating[Any]]],
+    tuple[Array2D[np.floating[Any]], Array2D[np.floating[Any]]],
 ]:
     from nneuroutil.data import random_split
 
