@@ -22,7 +22,7 @@ Compute features for connectome matrices.
 
 Example:
 
-    > {SCRIPT_PATH.name} --variable-name matrices --outfile result.npz data.npz
+    > {SCRIPT_PATH.name} -k matrices --outfile result.npz data.npz
 """
 
 
@@ -41,7 +41,7 @@ Array2D = TypeAliasType(
 
 class Features(NamedTuple):
     features: Array1D[np.floating[Any]]
-    starts: Array1D[np.floating[Any]]
+    starts: Array1D[np.integer[Any]]
     descrs: tuple[str, ...]
 
 
@@ -65,7 +65,7 @@ def make_matrix_features(mat: Array2D[np.floating[Any]]) -> Features:
 # }}}
 
 
-# {{{ make_matrix_features
+# {{{ make_eig_features
 
 
 def make_eig_features(
@@ -109,26 +109,7 @@ def make_eig_features(
 # }}}
 
 
-# {{{ make_graph_features
-
-
-GRAPH_MEASURE_DESCRS = (
-    "Strength",
-    "Clustering Coefficient",
-    "Modularity",
-    # "Participation Coefficient",
-    # "Gateway Coefficient",
-    # "Assortativity",
-    # "Diversity Coefficient",
-    "Eigenvector Centrality",
-    "Rich-club Coefficient",
-    "Transitivity",
-    "Characteristic Path Length",
-    "Global Efficiency",
-    "Local Efficiency",
-    "Betweenness Centrality",
-    "Small-worldness",
-)
+# {{{ make_signed_graph_features
 
 
 def _make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> Features:
@@ -144,61 +125,120 @@ def _make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> Features:
 
     features = []
     starts = [0]
+    descrs = []
 
     # Strength: average weighted degree
     strengths = np.array([d for _, d in G.degree(weight="weight")])
     features.append(np.mean(strengths))
     starts.append(features[-1].size)
+    descrs.append("Strength")
 
     # Clustering Coefficient
     features.append(nx.average_clustering(G, weight="weight"))
     starts.append(features[-1].size)
+    descrs.append("Clustering Coefficient")
 
     # Modularity
     communities = nx.community.louvain_communities(G, weight="weight", seed=42)
     features.append(nx.community.modularity(G, communities, weight="weight"))
     starts.append(features[-1].size)
+    descrs.append("Modularity")
 
     # Eigenvector Centrality
     ec = nx.eigenvector_centrality(G, weight="weight", max_iter=1000)
     features.append(np.mean(list(ec.values())))
     starts.append(features[-1].size)
+    descrs.append("Eigenvector Centrality")
 
     # Rich-club Coefficient (mean across degrees)
     rc = nx.rich_club_coefficient(G, normalized=False)
     features.append(np.mean(list(rc.values())))
     starts.append(features[-1].size)
+    descrs.append("Rich-club Coefficient")
 
     # Transitivity (unweighted)
     features.append(nx.transitivity(G))
     starts.append(features[-1].size)
+    descrs.append("Transitivity")
 
     # Characteristic Path Length
     features.append(nx.average_shortest_path_length(G, weight="distance"))
     starts.append(features[-1].size)
+    descrs.append("Characteristic Path Length")
 
     # Global Efficiency
     features.append(nx.global_efficiency(G))
     starts.append(features[-1].size)
+    descrs.append("Global Efficiency")
 
     # Local Efficiency
     features.append(nx.local_efficiency(G))
     starts.append(features[-1].size)
+    descrs.append("Local Efficiency")
 
     # Betweenness Centrality (mean across nodes)
     bc = nx.betweenness_centrality(G, weight="distance", normalized=True)
     features.append(np.mean(list(bc.values())))
     starts.append(features[-1].size)
+    descrs.append("Betweenness Centrality")
 
     # Small-worldness (requires connected graph)
     features.append(nx.sigma(G, niter=1, nrand=1, seed=42))
     starts.append(features[-1].size)
+    descrs.append("Small-worldness")
 
-    return Features(np.vstack(features), np.array(starts), descrs=GRAPH_MEASURE_DESCRS)
+    return Features(np.array(features), np.array(starts), descrs=tuple(descrs))
 
 
 def make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> Features:
     return _make_signed_graph_features(np.abs(mat))
+
+
+# }}}
+
+
+# {{{ make_unsigned_graph_features
+
+
+def make_unsigned_graph_features(mat: Array2D[np.floating[Any]]) -> Features:
+    import orbitkit.metrics as okm
+    from orbitkit.clusters import signed_leiden_communities
+
+    features = []
+    starts = [0]
+    descrs = []
+
+    # Strength
+    features.append(okm.compute_weighted_degree(mat))
+    starts.append(features[-1].size)
+    descrs.append("Strength")
+
+    # Clustering Coefficient
+    features.append(
+        okm.compute_weighted_clustering_coefficient_costantini(mat, variant=6)
+    )
+    starts.append(features[-1].size)
+    descrs.append("Clustering Coefficient")
+
+    # Local Assortativity
+    features.append(
+        okm.compute_local_assortativity_sabek(np.abs(mat), alpha=1.0, beta=1.0)
+    )
+    starts.append(features[-1].size)
+    descrs.append("Local Assortativity")
+
+    # Eigenvector Centrality
+    features.append(okm.compute_eigenvector_centrality(mat).score)
+    starts.append(features[-1].size)
+    descrs.append("Eigenvector Centrality")
+
+    # Modularity
+    communities = signed_leiden_communities(mat)
+    features.append(np.array(okm.compute_modularity(mat, communities)))
+    starts.append(features[-1].size)
+    descrs.append("Modularity")
+
+    return Features(np.vstack(features), np.array(starts), descrs=tuple(descrs))
 
 
 # }}}
@@ -301,7 +341,7 @@ def make_features(
     filenames: Sequence[pathlib.Path],
     *,
     outfile: pathlib.Path | None = None,
-    ftype: Literal["graph", "matrix", "dmd", "eig"] = "matrix",
+    ftype: Literal["sgraph", "ugraph", "matrix", "dmd", "eig"] = "matrix",
     key: str = "matrices",
     eps: float | None = None,
     density: float | None = None,
@@ -320,7 +360,6 @@ def make_features(
 
     ret = 0
     datasets = {}
-    starts = []
 
     for filename in filenames:
         if not filename.exists():
@@ -371,8 +410,10 @@ def make_features(
                     features, starts, descrs = make_matrix_features(mat_i)
                 elif ftype == "eig":
                     features, starts, descrs = make_eig_features(mat_i)
-                elif ftype == "graph":
+                elif ftype == "sgraph":
                     features, starts, descrs = make_signed_graph_features(mat_i)
+                elif ftype == "ugraph":
+                    features, starts, descrs = make_unsigned_graph_features(mat_i)
                 elif ftype == "dmd":
                     features, starts, descrs = make_dmd_features(mat_i)
                 else:
@@ -388,7 +429,9 @@ def make_features(
                 continue
 
             if result is None:
-                result = np.empty((nsamples, features.size), dtype=features.dtype)
+                result = np.full(
+                    (nsamples, features.size), np.nan, dtype=features.dtype
+                )
 
             assert result.shape[1] == features.size
             assert starts[-1] == features.size
@@ -419,7 +462,7 @@ if __name__ == "__main__":
     parser.add_argument("filenames", nargs="*", type=pathlib.Path)
     parser.add_argument(
         "--features",
-        choices=("graph", "matrix", "dmd", "eig"),
+        choices=("sgraph", "matrix", "dmd", "eig", "ugraph"),
         default="matrix",
         help="Type of the features to compute",
     )
