@@ -130,61 +130,61 @@ def _make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> Features:
     # Strength: average weighted degree
     strengths = np.array([d for _, d in G.degree(weight="weight")])
     features.append(np.mean(strengths))
-    starts.append(features[-1].size)
+    starts.append(np.size(features[-1]))
     descrs.append("Strength")
 
     # Clustering Coefficient
     features.append(nx.average_clustering(G, weight="weight"))
-    starts.append(features[-1].size)
+    starts.append(np.size(features[-1]))
     descrs.append("Clustering Coefficient")
 
     # Modularity
     communities = nx.community.louvain_communities(G, weight="weight", seed=42)
     features.append(nx.community.modularity(G, communities, weight="weight"))
-    starts.append(features[-1].size)
+    starts.append(np.size(features[-1]))
     descrs.append("Modularity")
 
     # Eigenvector Centrality
     ec = nx.eigenvector_centrality(G, weight="weight", max_iter=1000)
     features.append(np.mean(list(ec.values())))
-    starts.append(features[-1].size)
+    starts.append(np.size(features[-1]))
     descrs.append("Eigenvector Centrality")
 
     # Rich-club Coefficient (mean across degrees)
     rc = nx.rich_club_coefficient(G, normalized=False)
     features.append(np.mean(list(rc.values())))
-    starts.append(features[-1].size)
+    starts.append(np.size(features[-1]))
     descrs.append("Rich-club Coefficient")
 
     # Transitivity (unweighted)
     features.append(nx.transitivity(G))
-    starts.append(features[-1].size)
+    starts.append(np.size(features[-1]))
     descrs.append("Transitivity")
 
     # Characteristic Path Length
     features.append(nx.average_shortest_path_length(G, weight="distance"))
-    starts.append(features[-1].size)
+    starts.append(np.size(features[-1]))
     descrs.append("Characteristic Path Length")
 
     # Global Efficiency
     features.append(nx.global_efficiency(G))
-    starts.append(features[-1].size)
+    starts.append(np.size(features[-1]))
     descrs.append("Global Efficiency")
 
     # Local Efficiency
     features.append(nx.local_efficiency(G))
-    starts.append(features[-1].size)
+    starts.append(np.size(features[-1]))
     descrs.append("Local Efficiency")
 
     # Betweenness Centrality (mean across nodes)
     bc = nx.betweenness_centrality(G, weight="distance", normalized=True)
     features.append(np.mean(list(bc.values())))
-    starts.append(features[-1].size)
+    starts.append(np.size(features[-1]))
     descrs.append("Betweenness Centrality")
 
     # Small-worldness (requires connected graph)
     features.append(nx.sigma(G, niter=1, nrand=1, seed=42))
-    starts.append(features[-1].size)
+    starts.append(np.size(features[-1]))
     descrs.append("Small-worldness")
 
     return Features(np.array(features), np.array(starts), descrs=tuple(descrs))
@@ -210,32 +210,32 @@ def make_unsigned_graph_features(mat: Array2D[np.floating[Any]]) -> Features:
 
     # Strength
     features.append(okm.compute_weighted_degree(mat))
-    starts.append(features[-1].size)
+    starts.append(np.size(features[-1]))
     descrs.append("Strength")
 
     # Clustering Coefficient
     features.append(
         okm.compute_weighted_clustering_coefficient_costantini(mat, variant=6)
     )
-    starts.append(features[-1].size)
+    starts.append(np.size(features[-1]))
     descrs.append("Clustering Coefficient")
 
     # Local Assortativity
     features.append(
         okm.compute_local_assortativity_sabek(np.abs(mat), alpha=1.0, beta=1.0)
     )
-    starts.append(features[-1].size)
+    starts.append(np.size(features[-1]))
     descrs.append("Local Assortativity")
 
     # Eigenvector Centrality
     features.append(okm.compute_eigenvector_centrality(mat).score)
-    starts.append(features[-1].size)
+    starts.append(np.size(features[-1]))
     descrs.append("Eigenvector Centrality")
 
     # Modularity
     communities = signed_leiden_communities(mat)
     features.append(np.array(okm.compute_modularity(mat, communities)))
-    starts.append(features[-1].size)
+    starts.append(np.size(features[-1]))
     descrs.append("Modularity")
 
     return Features(np.vstack(features), np.array(starts), descrs=tuple(descrs))
