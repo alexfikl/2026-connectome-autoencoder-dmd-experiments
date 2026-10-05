@@ -35,6 +35,7 @@ justfmt:
     @echo -e "\e[1;32mjust --fmt clean!\e[0m"
 
 # }}}
+
 # {{{ linting
 
 [doc("Run all linting checks over the source code")]
@@ -61,6 +62,7 @@ ty:
     @echo -e "\e[1;32mty clean!\e[0m"
 
 # }}}
+
 # {{{ develop
 
 [doc("Regenerate ctags")]
@@ -86,21 +88,16 @@ requirements_txt:
 pin: requirements_txt
 
 # }}}
+
 # {{{ datasets
-DATASET_URL := 'https://raw.githubusercontent.com/alexfikl/2025-fractal-connectomes-paper-experiments/refs/heads/main/data'
 
-[private]
-download_dataset name:
-    curl -o "data/{{ name }}.mat" "{{ DATASET_URL }}/{{ name }}.mat"
-    {{ PYTHON }} scripts/mat2npz.py \
-        --variable-name 'w:matrices' \
-        --transpose \
-        "data/{{ name }}.mat"
-
-[doc("Download datasets")]
+[doc("Convert HPC datasets")]
 dataset:
-    mkdir -p data
-    @just download_dataset Emotion_LR_Task
-    @just download_dataset Rest_LR_Task
+    @for mat in data/*.mat; do \
+        {{ PYTHON }} scripts/mat2npz.py --force \
+            --variable-name 'w:matrices' \
+            --transpose \
+            "data/$(basename ${mat})"; \
+    done
 
 # }}}
