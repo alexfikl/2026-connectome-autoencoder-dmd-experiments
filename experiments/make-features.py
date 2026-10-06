@@ -72,13 +72,10 @@ def make_eig_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     if n != m:
         raise ValueError(f"'mat' is not square: {mat.shape}")
 
+    # NOTE: normalizing the eigenvalues does not seem to work very well. The
+    # matrices themselves are already symmetric, in [-1, 1], with zero trace,
+    # so they're normalized enough.
     eigs, _ = np.linalg.eigh(mat)
-
-    # NOTE: normalize eigenvalues to ensure they're comparable across datasets
-    total = np.sum(eigs)
-    if abs(total) < 1.0e-12:
-        total = 1.0
-    eigs /= total
 
     return FeatureDataset(
         x=eigs,
