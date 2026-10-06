@@ -288,7 +288,7 @@ def make_dmd_features(
     except ImportError:
         xp = array_api_compat.array_namespace(np.array(0))
 
-    log.info("Computing DMD modes using %s", xp)
+    log.info("Computing DMD modes using '%s'.", xp.__name__)
 
     from commonlib import generate_dataset
     from nneuroutil.dmdc import build_dense_dmdc
