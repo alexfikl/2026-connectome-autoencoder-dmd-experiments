@@ -275,9 +275,9 @@ if __name__ == "__main__":
     parser.add_argument("filenames", nargs="+", type=pathlib.Path)
     parser.add_argument(
         "--method",
-        nargs="+",
+        action="append",
         choices=(*get_args(EmbeddingMethod), "all"),
-        default=("tsne",),
+        default=["tsne"],
         help="Embedding method(s) to compute",
     )
     parser.add_argument(
