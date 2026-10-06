@@ -67,43 +67,25 @@ def make_matrix_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
 # {{{ make_eig_features
 
 
-def make_eig_features(
-    mat: Array2D[np.floating[Any]],
-    *,
-    top_k: int = 3,
-) -> FeatureDataset:
+def make_eig_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     n, m = mat.shape
     if n != m:
         raise ValueError(f"'mat' is not square: {mat.shape}")
 
-    if top_k > n:
-        raise ValueError(f"'top_k' must be smaller than matrix size: {top_k}")
+    eigs, _ = np.linalg.eigh(mat)
 
-    eigs, eigvs = np.linalg.eigh(mat)
-
-    # get the largest eigenvalues in magnitude
-    order = np.argsort(-np.abs(eigs))[:top_k]
-    eigs = eigs[order]
-    eigvs = eigvs[:, order]
-
-    # NOTE: fix sign ambiguity
-    idx = np.argmax(np.abs(eigvs), axis=0)
-    eigvs = eigvs * np.sign(eigvs[idx, np.arange(top_k)])
-
-    features = np.concatenate([
-        eigs,
-        eigvs.T.ravel(),
-    ])
-
-    k = top_k + 1
-    starts = np.array([*range(k), *[top_k + i * n for i in range(1, k)]])
-    descrs = (
-        *(f"Eigenvalue {i}" for i in range(top_k)),
-        *(f"Eigenvector {i}" for i in range(top_k)),
-    )
+    # NOTE: normalize eigenvalues to ensure they're comparable across datasets
+    total = np.sum(eigs)
+    if abs(total) < 1.0e-12:
+        total = 1.0
+    eigs /= total
 
     return FeatureDataset(
-        x=features, labels=np.array(0), label_names=(), starts=starts, descrs=descrs
+        x=eigs,
+        labels=np.array(0),
+        label_names=(),
+        starts=np.array([0, eigs.size]),
+        descrs=("Eigenvalues",),
     )
 
 
