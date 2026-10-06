@@ -5,11 +5,11 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Any, Literal
+from collections.abc import Sequence
+from typing import Any, Literal, get_args
 
 import numpy as np
 
-import commonlib  # ruff: ignore[unused-import]
 from commonlib import FeatureDataset, load_feature_datasets
 from nneuroutil.helpers import module_logger
 from nneuroutil.typing import Array1D, Array2D
@@ -21,7 +21,7 @@ SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
 Visualize the features computed by make-features.py.
 
-Each input file (e.g. ``dataset-features-sgraph.npz``) is embedded into two
+Each input file (e.g. ``dataset-features-matrix.npz``) is embedded into two
 dimensions and plotted colored by class. The explained variance of a PCA is
 also plotted to give an idea of the intrinsic dimensionality of the features.
 
@@ -32,22 +32,7 @@ Example:
 
 EmbeddingMethod = Literal["pca", "tsne", "mds", "isomap", "spectral"]
 
-EPS = 1.0e-12
-
-
 # {{{ embeddings
-
-
-def standardize(
-    x: Array2D[np.floating[Any]],
-    *,
-    eps: float = EPS,
-) -> Array2D[np.floating[Any]]:
-    """Center and scale each feature to unit variance."""
-    mean = np.mean(x, axis=0)
-    std = np.std(x, axis=0)
-    std = np.where(std < eps, 1.0, std)
-    return (x - mean) / std
 
 
 def compute_embedding(
@@ -62,24 +47,24 @@ def compute_embedding(
     from sklearn.decomposition import PCA
 
     if method == "pca":
-        return np.asarray(
-            PCA(n_components=2, random_state=random_state).fit_transform(x)
-        )
+        pca = PCA(n_components=2, random_state=random_state)
+        return pca.fit_transform(x)
 
     # reduce to a manageable dimension for the manifold methods, mostly to
     # denoise the very high dimensional (e.g. matrix) features
     n_components = min(pca_components, x.shape[1], x.shape[0] - 1)
     if n_components > 2:
-        x = PCA(n_components=n_components, random_state=random_state).fit_transform(x)
+        pca = PCA(n_components=n_components, random_state=random_state)
+        x = pca.fit_transform(x)
 
     if method == "tsne":
         from sklearn.manifold import TSNE
 
         # perplexity must be smaller than the number of samples
-        perp = float(min(perplexity, (x.shape[0] - 1) / 3.0))
+        perp = max(1.0, min(perplexity, (x.shape[0] - 1) / 3.0))
         model = TSNE(
             n_components=2,
-            perplexity=max(perp, 1.0),
+            perplexity=perp,
             init="pca",
             learning_rate="auto",
             random_state=random_state,
@@ -109,7 +94,7 @@ def compute_embedding(
     else:
         raise ValueError(f"unknown method: {method!r}")
 
-    return np.asarray(model.fit_transform(x))
+    return model.fit_transform(x)
 
 
 def compute_silhouette(
@@ -123,7 +108,7 @@ def compute_silhouette(
     if nclasses < 2 or coords.shape[0] <= nclasses:
         return float("nan")
 
-    return float(silhouette_score(coords, labels))
+    return silhouette_score(coords, labels)
 
 
 # }}}
@@ -136,10 +121,14 @@ def plot_pca_variance(
     basename: pathlib.Path,
     x: Array2D[np.floating[Any]],
     *,
+    percentage: float = 0.9,
     overwrite: bool = False,
 ) -> None:
     from sklearn.decomposition import PCA
 
+    # NOTE: 'explained_variance_ratio_' is just a fancy name for the normalized
+    # singular values of the covariance matrix. We want to know how much each
+    # one contributes to the total, so we know how much we could potentially cut
     pca = PCA(n_components=min(x.shape)).fit(x)
     evr = pca.explained_variance_ratio_
     idx = np.arange(1, evr.size + 1)
@@ -158,7 +147,7 @@ def plot_pca_variance(
         ax1.set_title("Scree")
 
         ax2.plot(idx, np.cumsum(evr), "o-", markersize=3)
-        ax2.axhline(0.9, color="k", lw=1, ls="--")
+        ax2.axhline(percentage, color="k", lw=1, ls="--")
         ax2.set_xlabel("Component")
         ax2.set_ylabel("Cumulative explained variance")
         ax2.set_title("Cumulative")
@@ -182,13 +171,14 @@ def plot_embedding(
         ax = fig.gca()
 
         for i, name in enumerate(ds.label_names):
+            label = name.split("_")[0]
             mask = ds.labels == i
-            ax.scatter(coords[mask, 0], coords[mask, 1], s=18, alpha=0.75, label=name)
+            ax.scatter(coords[mask, 0], coords[mask, 1], s=18, alpha=0.75, label=label)
 
         ax.set_xlabel("Component 1")
         ax.set_ylabel("Component 2")
         ax.set_title(rf"{method.upper()} (silhouette ${silhouette:.3f}$)")
-        ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize="small")
+        ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize="medium")
 
 
 # }}}
@@ -198,15 +188,18 @@ def plot_embedding(
 
 
 def main(
-    filenames: list[pathlib.Path],
+    filenames: Sequence[pathlib.Path],
     *,
     methods: tuple[EmbeddingMethod, ...] = ("pca", "tsne"),
     outfile: pathlib.Path | None = None,
     pca_components: int = 50,
     perplexity: float = 30.0,
-    standardize_features: bool = True,
+    standardize_features: bool = False,
+    eps: float = 1.0e-12,
     overwrite: bool = False,
 ) -> int:
+    from scipy.stats import zscore
+
     ret = 0
 
     for filename in filenames:
@@ -222,17 +215,18 @@ def main(
             ret = 1
             continue
 
+        suffix = "-zscore" if standardize_features else ""
         if outfile is None:
-            basename = filename.with_suffix("")
+            basename = filename.with_stem(f"{filename.stem}{suffix}").with_suffix("")
         elif len(filenames) == 1:
-            basename = outfile.with_suffix("")
+            basename = outfile.with_stem(f"{outfile.stem}{suffix}").with_suffix("")
         else:
-            basename = outfile.with_stem(f"{outfile.stem}-{filename.stem}")
+            basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}{suffix}")
 
         x = ds.x
-        keep = np.var(x, axis=0) > EPS
+        keep = np.var(x, axis=0) > eps
         if not np.all(keep):
-            log.info("Dropping %d constant features.", int(np.sum(~keep)))
+            log.info("Dropping %d constant features.", np.sum(~keep))
             x = x[:, keep]
 
         log.info(
@@ -244,7 +238,7 @@ def main(
         )
 
         if standardize_features:
-            x = standardize(x)
+            x = zscore(x, ddof=1)
 
         plot_pca_variance(basename, x, overwrite=overwrite)
 
@@ -281,8 +275,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--method",
         nargs="+",
-        choices=("pca", "tsne", "mds", "isomap", "spectral"),
-        default=("pca", "tsne"),
+        choices=(*get_args(EmbeddingMethod), "all"),
+        default=("tsne",),
         help="Embedding method(s) to compute",
     )
     parser.add_argument(
@@ -299,8 +293,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--standardize",
-        action=argparse.BooleanOptionalAction,
-        default=True,
+        action="store_true",
         help="Standardize each feature to zero mean and unit variance",
     )
     parser.add_argument(
@@ -326,10 +319,14 @@ if __name__ == "__main__":
     if not args.quiet:
         log.setLevel(logging.INFO)
 
+    method = sorted(set(args.method))
+    if "all" in args.method:
+        method = get_args(EmbeddingMethod)
+
     raise SystemExit(
         main(
             args.filenames,
-            methods=tuple(args.method),
+            methods=tuple(method),
             outfile=args.outfile,
             pca_components=args.pca_components,
             perplexity=args.perplexity,
