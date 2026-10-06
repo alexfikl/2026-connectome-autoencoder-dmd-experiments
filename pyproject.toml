@@ -41,6 +41,7 @@ dependencies = [
     "orbitkit @ git+https://github.com/alexfikl/orbitkit.git#egg=orbitkit",
     "rich",
     "scienceplots>=2.2",
+    "scikit-learn>=1.7",
 ]
 
 [dependency-groups]
