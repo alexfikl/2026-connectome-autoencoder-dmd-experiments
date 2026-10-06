@@ -89,7 +89,7 @@ def make_eig_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
 # }}}
 
 
-# {{{ make_signed_graph_features
+# {{{ make_unsigned_graph_features
 
 
 def _global_efficiency(distances: Array2D[np.floating[Any]]) -> float:
@@ -153,7 +153,7 @@ def _small_worldness(g: Any, *, niter: int = 1, nrand: int = 1) -> float:
     return float((clustering / cr) / (path_length / lr))
 
 
-def _make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
+def _make_unsigned_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     import random
 
     import igraph as ig
@@ -169,7 +169,6 @@ def _make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDatase
     # NOTE: distance = 1/weight for some measures (shortest path on cost)
     g = ig.Graph.Weighted_Adjacency(mat, mode="undirected", attr="weight", loops=False)
     g.es["distance"] = (1.0 / np.asarray(g.es["weight"])).tolist()
-    log.info("        Nodes %d Edges %d", g.vcount(), g.ecount())
 
     # unweighted shortest paths are reused by the efficiency measures
     distances = np.asarray(g.distances())
@@ -179,7 +178,7 @@ def _make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDatase
     descrs = []
 
     # Strength: average weighted degree
-    features.append(float(np.mean(g.strength(weights="weight"))))
+    features.append(np.mean(g.strength(weights="weight")))
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Strength")
 
@@ -199,12 +198,12 @@ def _make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDatase
     # Eigenvector Centrality
     ec = np.asarray(g.eigenvector_centrality(weights="weight"))
     norm = np.linalg.norm(ec)
-    features.append(float(np.mean(ec / norm)) if norm > 0.0 else 0.0)
+    features.append(np.mean(ec / norm) if norm > 0.0 else 0.0)
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Eigenvector Centrality")
 
     # Rich-club Coefficient (mean across degrees)
-    features.append(compute_rich_club_coefficient(mat))
+    features.append(np.mean(list(compute_rich_club_coefficient(mat).values())))
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Rich-club Coefficient")
 
@@ -252,17 +251,17 @@ def _make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDatase
     )
 
 
-def make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
-    return _make_signed_graph_features(np.abs(mat))
+def make_unsigned_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
+    return _make_unsigned_graph_features(np.abs(mat))
 
 
 # }}}
 
 
-# {{{ make_unsigned_graph_features
+# {{{ make_signed_graph_features
 
 
-def make_unsigned_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
+def make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     import orbitkit.metrics as okm
     from orbitkit.clusters import signed_leiden_communities
 
@@ -525,6 +524,7 @@ def make_features(
             if result is None:
                 result = np.full((nsamples, nfeatures), np.nan, dtype=features.x.dtype)
 
+            assert features.x.dtype == np.float64
             assert result.shape[1] == nfeatures
             assert features.starts[-1] == nfeatures
             assert np.sum(np.diff(features.starts)) == nfeatures
