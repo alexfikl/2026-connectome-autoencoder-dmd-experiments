@@ -283,9 +283,12 @@ def make_dmd_features(
         if any(dev.startswith("cuda") for dev in available_device_names()):
             torch.set_default_device("cuda")
             xp = array_api_compat.array_namespace(torch.empty(0))
-        xp = array_api_compat.array_namespace(np.array(0))
+        else:
+            xp = array_api_compat.array_namespace(np.array(0))
     except ImportError:
         xp = array_api_compat.array_namespace(np.array(0))
+
+    log.info("Computing DMD modes using %s", xp)
 
     from commonlib import generate_dataset
     from nneuroutil.dmdc import build_dense_dmdc
@@ -299,10 +302,11 @@ def make_dmd_features(
 
     # {{{ generate data
 
+    mat = xp.asarray(mat)
     dtype = xp.result_type(mat.dtype, xp.complex64)
 
     Z, c = generate_dataset(
-        xp.astype(xp.asarray(mat), dtype),
+        xp.astype(mat, dtype),
         bbox=bbox,
         resolution=resolution,
         escape_radius=escape_radius,
@@ -330,23 +334,27 @@ def make_dmd_features(
     # {{{ features
 
     dmd = build_dense_dmdc(X1, U, X2, method="ridge")
-    eigs, Phi = xp.linalg.eig(dmd.A.T)  # ty: ignore[unresolved-attribute]
 
-    P = xp.linalg.pinv(Phi)
-    G = xp.conj(X1).T @ X1
-    coeff_energy = xp.maximum(xp.real(xp.diag(P @ G @ xp.conj(P).T)), 0.0)
-    strengths = xp.linalg.norm(Phi, axis=0) * xp.sqrt(coeff_energy)
+    X1 = X1.cpu().numpy()
+    A = dmd.A.cpu().numpy()  # ty: ignore[unresolved-attribute]
 
-    order = xp.argsort(-strengths)[:top_k]
+    eigs, Phi = np.linalg.eig(A.T)
+
+    P = np.linalg.pinv(Phi)
+    G = np.conj(X1).T @ X1
+    coeff_energy = np.maximum(np.real(np.diag(P @ G @ np.conj(P).T)), 0.0)
+    strengths = np.linalg.norm(Phi, axis=0) * np.sqrt(coeff_energy)
+
+    order = np.argsort(-strengths)[:top_k]
     eigs = eigs[order]
-    strengths = strengths[order] / xp.sum(strengths)
+    strengths = strengths[order] / np.sum(strengths)
     Phi = Phi[:, order]
 
-    features = xp.concatenate([
+    features = np.concatenate([
         strengths,
         eigs.real,
         eigs.imag,
-        xp.abs(Phi).T.ravel(),
+        np.abs(Phi).T.ravel(),
     ])
 
     starts = np.asarray([
