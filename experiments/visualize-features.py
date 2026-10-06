@@ -162,6 +162,7 @@ def plot_embedding(
     overwrite: bool = False,
 ) -> None:
     silhouette = compute_silhouette(coords, ds.labels)
+    log.info("    Silhouette: %.3f", silhouette)
 
     with figure(
         basename.with_stem(f"{basename.stem}-embedding-{method}"),
