@@ -126,10 +126,10 @@ def _local_efficiency(g: Any, distances: Array2D[np.floating[Any]]) -> float:
 
         total += 2.0 * np.sum(reciprocal) / (k * (k - 1))
 
-    return float(total / n)
+    return total / n
 
 
-def _small_worldness(g: Any, *, niter: int = 1, nrand: int = 1) -> float:
+def _small_worldness(g: Any, *, niter: int = 3, nrand: int = 20) -> float:
     """Small-worldness coefficient (matching :func:`networkx.sigma`)."""
     if g.vcount() < 4 or g.ecount() < 2:
         return np.nan
@@ -145,15 +145,17 @@ def _small_worldness(g: Any, *, niter: int = 1, nrand: int = 1) -> float:
         random_clustering.append(null.transitivity_undirected())
         random_path_length.append(null.average_path_length(unconn=True))
 
-    cr = float(np.mean(random_clustering))
-    lr = float(np.mean(random_path_length))
+    cr = np.mean(random_clustering)
+    lr = np.mean(random_path_length)
     if cr <= 0.0 or lr <= 0.0:
         return np.nan
 
-    return float((clustering / cr) / (path_length / lr))
+    return (clustering / cr) / (path_length / lr)
 
 
-def _make_unsigned_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
+def _make_unsigned_graph_features(
+    mat: Array2D[np.floating[Any]], *, eps: float = 1.0e-12
+) -> FeatureDataset:
     import random
 
     import igraph as ig
@@ -166,12 +168,11 @@ def _make_unsigned_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureData
     ig.set_random_number_generator(random.Random(42))  # ruff: ignore[suspicious-non-cryptographic-random-usage]
 
     # construct graph
-    # NOTE: distance = 1/weight for some measures (shortest path on cost)
     g = ig.Graph.Weighted_Adjacency(mat, mode="undirected", attr="weight", loops=False)
-    g.es["distance"] = (1.0 / np.asarray(g.es["weight"])).tolist()
 
     # unweighted shortest paths are reused by the efficiency measures
-    distances = np.asarray(g.distances())
+    g.es["distance"] = [-np.log(w) if w > eps else np.inf for w in g.es["weight"]]
+    distances = np.asarray(g.distances(weights="distance"))
 
     features = []
     starts = [0]
@@ -231,14 +232,14 @@ def _make_unsigned_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureData
     n, _ = mat.shape
     if n > 2:
         bc = np.asarray(g.betweenness(weights="distance", directed=False))
-        features.append(float(np.mean(bc)) * 2.0 / ((n - 1) * (n - 2)))
+        features.append(np.mean(bc) * 2.0 / ((n - 1) * (n - 2)))
     else:
         features.append(0.0)
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Betweenness Centrality")
 
     # Small-worldness (requires connected graph)
-    features.append(_small_worldness(g, niter=1, nrand=1))
+    features.append(_small_worldness(g))
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Small-worldness")
 
