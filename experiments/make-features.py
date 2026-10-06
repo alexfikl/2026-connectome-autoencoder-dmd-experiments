@@ -459,7 +459,7 @@ def make_features(
     overwrite: bool = False,
 ) -> int:
     if not filenames:
-        log.warning("No files give.")
+        log.warning("No files given.")
         return 0
 
     if outfile is None:
@@ -556,6 +556,8 @@ def make_features(
         datasets[filename.stem] = result
 
     np.savez(outfile, datasets=datasets, starts=features.starts, descrs=features.descrs)
+    log.info("Saving computed features: '%s'.", outfile)
+
     return ret
 
 
@@ -572,7 +574,7 @@ if __name__ == "__main__":
         formatter_class=HelpFormatter,
         description=SCRIPT_LONG_HELP,
     )
-    parser.add_argument("filenames", nargs="*", type=pathlib.Path)
+    parser.add_argument("filenames", nargs="+", type=pathlib.Path)
     parser.add_argument(
         "--features",
         choices=("sgraph", "matrix", "dmd", "eig", "ugraph"),
