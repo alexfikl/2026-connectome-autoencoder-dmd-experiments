@@ -294,7 +294,7 @@ def make_dmd_features(
     log.info("Computing DMD modes using '%s' (%s).", xp.__name__, device)
 
     from commonlib import generate_dataset
-    from nneuroutil.dmdc import build_dense_dmdc
+    from nneuroutil.dmdc import build_dense_symmetric_dmdc
 
     n, m = mat.shape
     if n != m:
@@ -339,7 +339,7 @@ def make_dmd_features(
 
     # {{{ features
 
-    dmd = build_dense_dmdc(X1, U, X2, method="ridge")
+    dmd = build_dense_symmetric_dmdc(X1, U, X2, method="ridge")
     G = xp.conj(X1).T @ X1
 
     G = np.asarray(array_api_compat.to_device(G, "cpu"))
@@ -349,16 +349,13 @@ def make_dmd_features(
 
     # NOTE: openmp does not seem to help much here, so we turn it off
     with threadpool_limits(limits=1):
-        eigs, Phi = np.linalg.eig(A.T)
-        P = np.linalg.pinv(Phi)
+        eigs, P = np.linalg.eigh(A.T)
 
-    coeff_energy = np.maximum(np.real(np.sum((P @ G) * np.conj(P), axis=1)), 0.0)
-    strengths = np.linalg.norm(Phi, axis=0) * np.sqrt(coeff_energy)
+    coeff_energy = np.maximum(np.real(np.sum((np.conj(P).T @ G) * P.T, axis=1)), 0.0)
+    strengths = np.sqrt(coeff_energy)
 
     order = np.argsort(-strengths)
-    strengths = strengths[order]
-    order = np.argsort(np.abs(eigs))
-    eigs = np.abs(eigs[order])
+    strengths = strengths[order] / np.sum(strengths)
 
     features = np.concatenate([strengths, eigs])
     starts = np.cumsum([0, strengths.size, eigs.size])
