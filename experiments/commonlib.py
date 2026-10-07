@@ -273,32 +273,39 @@ def generate_dataset(
     escape_radius_sqr = escape_radius**2
 
     # iterate
-    z0 = xp.zeros((resolution, resolution, d), dtype=dtype, device=A.device)
-    if array_api_compat.is_writeable_array(z0):  # spell: disable
-        del z0
-        z = xp.zeros((maxit, resolution, resolution, d), dtype=dtype, device=A.device)
+    c_flat = xp.reshape(c, (-1, 1))
+    if array_api_compat.is_writeable_array(c):  # spell: disable
+        z = xp.zeros((maxit, resolution * resolution, d), dtype=dtype, device=A.device)
         for i in range(1, maxit):
             # evolve
-            z_prev = z[i - 1]
-            z_new = xp.reshape(xp.reshape(z_prev, (-1, d)) @ A.T, z_prev.shape) ** 2 + c
+            z_new = (z[i - 1] @ A.T) ** 2 + c_flat
 
             # clip escaped values over escape radius
-            escaped = xp.sum(z_new.real**2 + z_new.imag**2, axis=-1) > escape_radius_sqr
-            z[i] = z_new
-            z[i][escaped] = max_z
+            escaped = (
+                xp.sum(z_new.real**2 + z_new.imag**2, axis=-1, keepdims=True)
+                > escape_radius_sqr
+            )
+            z[i] = xp.where(escaped, max_z, z_new)
+
+        z = xp.reshape(z, (maxit, resolution, resolution, d))
     else:
-        result = [z0]
+        z_init = xp.zeros((resolution * resolution, d), dtype=dtype, device=A.device)
+        result = [z_init]
         for i in range(1, maxit):
             # evolve
             z_prev = result[i - 1]
-            z_new = xp.reshape(xp.reshape(z_prev, (-1, d)) @ A.T, z_prev.shape) ** 2 + c
+            z_new = (z_prev @ A.T) ** 2 + c_flat
 
             # clip escaped values over escape radius
-            escaped = xp.sum(z_new.real**2 + z_new.imag**2, axis=-1) > escape_radius_sqr
-            z_new = xp.where(escaped[..., None], max_z, z_new)
+            escaped = (
+                xp.sum(z_new.real**2 + z_new.imag**2, axis=-1, keepdims=True)
+                > escape_radius_sqr
+            )
+            z_new = xp.where(escaped, max_z, z_new)
 
             result.append(z_new)
-        z = xp.stack(result)
+
+        z = xp.reshape(xp.stack(result), (maxit, resolution, resolution, d))
 
     return z, c.squeeze(-1)
 
