@@ -279,7 +279,8 @@ def generate_dataset(
         z = xp.zeros((maxit, resolution, resolution, d), dtype=dtype, device=A.device)
         for i in range(1, maxit):
             # evolve
-            z_new = xp.einsum("ij,klj->kli", A, z[i - 1]) ** 2 + c
+            z_prev = z[i - 1]
+            z_new = xp.reshape(xp.reshape(z_prev, (-1, d)) @ A.T, z_prev.shape) ** 2 + c
 
             # clip escaped values over escape radius
             escaped = xp.sum(z_new.real**2 + z_new.imag**2, axis=-1) > escape_radius_sqr
@@ -290,7 +291,7 @@ def generate_dataset(
         for i in range(1, maxit):
             # evolve
             z_prev = result[i - 1]
-            z_new = xp.einsum("ij,klj->kli", A, z_prev) ** 2 + c
+            z_new = xp.reshape(xp.reshape(z_prev, (-1, d)) @ A.T, z_prev.shape) ** 2 + c
 
             # clip escaped values over escape radius
             escaped = xp.sum(z_new.real**2 + z_new.imag**2, axis=-1) > escape_radius_sqr
