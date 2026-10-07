@@ -356,12 +356,13 @@ def make_dmd_features(
     strengths = np.linalg.norm(Phi, axis=0) * np.sqrt(coeff_energy)
 
     order = np.argsort(-strengths)
-    eigs = eigs[order]
-    strengths = strengths[order] / np.sum(strengths)
+    strengths = strengths[order]
+    order = np.argsort(np.abs(eigs))
+    eigs = np.abs(eigs[order])
 
-    features = np.concatenate([strengths, np.abs(eigs), np.angle(eigs)])
-    starts = np.cumsum([0, strengths.size, eigs.size, eigs.size])
-    descrs = ("DMD Strengths", "DMD Eig", "DMD Eig Angles")
+    features = np.concatenate([strengths, eigs])
+    starts = np.cumsum([0, strengths.size, eigs.size])
+    descrs = ("DMD Strengths", "DMD Eigs")
 
     # }}}
 

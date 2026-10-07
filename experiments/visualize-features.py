@@ -188,11 +188,57 @@ def plot_embedding(
 # {{{ main
 
 
+def make_baseline_contrast(
+    ds: FeatureDataset,
+    *,
+    baseline_label: str = "Rest_LR_Task",
+) -> FeatureDataset:
+    """Subtract the subject-matched baseline from all other classes.
+
+    Assumes all classes have matching sample ordering (row j is subject j).
+    The baseline class itself is dropped from the returned dataset.
+    """
+    if baseline_label not in ds.label_names:
+        raise ValueError(f"baseline '{baseline_label}' not in {ds.label_names}")
+
+    baseline_idx = ds.label_names.index(baseline_label)
+    baseline_mask = ds.labels == baseline_idx
+    baseline_x = ds.x[baseline_mask]
+
+    arrays = []
+    labels = []
+    label_names = []
+
+    for i, label_name in enumerate(ds.label_names):
+        if i == baseline_idx:
+            continue
+
+        mask = ds.labels == i
+        task_x = ds.x[mask]
+        if task_x.shape[0] != baseline_x.shape[0]:
+            raise ValueError(
+                f"sample count mismatch: {task_x.shape[0]} vs {baseline_x.shape[0]}"
+            )
+
+        arrays.append(task_x - baseline_x)
+        labels.append(np.full(task_x.shape[0], len(label_names)))
+        label_names.append(label_name)
+
+    return FeatureDataset(
+        x=np.concatenate(arrays, axis=0),
+        labels=np.concatenate(labels),
+        label_names=tuple(label_names),
+        starts=ds.starts,
+        descrs=ds.descrs,
+    )
+
+
 def main(
     filenames: Sequence[pathlib.Path],
     *,
     methods: tuple[EmbeddingMethod, ...] = ("pca", "tsne"),
     outfile: pathlib.Path | None = None,
+    baseline: str | None = None,
     pca_components: int = 50,
     perplexity: float = 30.0,
     standardize_features: bool = False,
@@ -223,6 +269,9 @@ def main(
             basename = outfile.with_stem(f"{outfile.stem}{suffix}").with_suffix("")
         else:
             basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}{suffix}")
+
+        if baseline is not None:
+            ds = make_baseline_contrast(ds, baseline_label=baseline)
 
         x = ds.x
         keep = np.var(x, axis=0) > eps
@@ -281,6 +330,12 @@ if __name__ == "__main__":
         help="Embedding method(s) to compute",
     )
     parser.add_argument(
+        "--baseline",
+        type=str,
+        default=None,
+        help="Name of baseline class to subtract per subject (e.g. Rest_LR_Task)",
+    )
+    parser.add_argument(
         "--pca-components",
         type=int,
         default=50,
@@ -329,6 +384,7 @@ if __name__ == "__main__":
             args.filenames,
             methods=tuple(method),
             outfile=args.outfile,
+            baseline=args.baseline,
             pca_components=args.pca_components,
             perplexity=args.perplexity,
             standardize_features=args.standardize,
