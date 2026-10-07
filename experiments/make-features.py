@@ -273,6 +273,7 @@ def make_dmd_features(
     escape_radius: float = 100.0,
     resolution: int = 64,
     maxit: int = 128,
+    stride: int = 2,
 ) -> FeatureDataset:
     # NOTE: the DMD run is pretty slow, so we try to do it on the GPU
     try:  # ruff: ignore[too-many-statements-in-try-clause]
@@ -319,16 +320,22 @@ def make_dmd_features(
     # NOTE: only keep the data we actually use from here on out
     mask = xp.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, axis=-1) < escape_radius**2
     Z = Z[:, mask, :]
+    c = c[mask]
+
+    # cull down the solutions, since a lot of them converge to the same value
+    Z = Z[:, ::stride, :]
+    c = c[::stride]
+    num_samples = Z.shape[1]
 
     # }}}
 
     # {{{ build dataset
 
-    # NOTE: Z has shape (maxit, converged, d)
+    # NOTE: Z has shape (maxit, num_samples, d)
     X1 = xp.reshape(Z[:-1], (-1, n))
     X2 = xp.reshape(Z[1:], (-1, n))
     U = xp.reshape(
-        xp.broadcast_to(c[mask, None], (maxit - 1, xp.sum(mask), 1)),
+        xp.broadcast_to(c[None, :, None], (maxit - 1, num_samples, 1)),
         (-1, 1),
     )
 
@@ -337,15 +344,15 @@ def make_dmd_features(
     # {{{ features
 
     dmd = build_dense_dmdc(X1, U, X2, method="ridge")
+    G = xp.conj(X1).T @ X1
 
-    X1 = X1.cpu().numpy()
-    A = dmd.A.cpu().numpy()  # ty: ignore[unresolved-attribute]
+    G = np.asarray(G)
+    A = np.asarray(dmd.A)
 
     eigs, Phi = np.linalg.eig(A.T)
 
     P = np.linalg.pinv(Phi)
-    G = np.conj(X1).T @ X1
-    coeff_energy = np.maximum(np.real(np.diag(P @ G @ np.conj(P).T)), 0.0)
+    coeff_energy = np.maximum(np.real(np.sum((P @ G) * np.conj(P), axis=1)), 0.0)
     strengths = np.linalg.norm(Phi, axis=0) * np.sqrt(coeff_energy)
 
     order = np.argsort(-strengths)[:top_k]
