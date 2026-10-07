@@ -272,7 +272,7 @@ def make_dmd_features(
     bbox: tuple[float, float, float, float] = (-0.04, 0.04, -0.04, 0.04),
     escape_radius: float = 100.0,
     resolution: int = 64,
-    maxit: int = 192,
+    maxit: int = 128,
 ) -> FeatureDataset:
     # NOTE: the DMD run is pretty slow, so we try to do it on the GPU
     try:  # ruff: ignore[too-many-statements-in-try-clause]
@@ -282,13 +282,16 @@ def make_dmd_features(
 
         if any(dev.startswith("cuda") for dev in available_device_names()):
             torch.set_default_device("cuda")
+            device = "CUDA"
             xp = array_api_compat.array_namespace(torch.empty(0))
         else:
+            device = "CPU"
             xp = array_api_compat.array_namespace(np.array(0))
     except ImportError:
+        device = "CPU"
         xp = array_api_compat.array_namespace(np.array(0))
 
-    log.info("Computing DMD modes using '%s'.", xp.__name__)
+    log.info("Computing DMD modes using '%s' (%s).", xp.__name__, device)
 
     from commonlib import generate_dataset
     from nneuroutil.dmdc import build_dense_dmdc
@@ -302,11 +305,11 @@ def make_dmd_features(
 
     # {{{ generate data
 
-    mat = xp.asarray(mat)
-    dtype = xp.result_type(mat.dtype, xp.complex64)
+    # NOTE: complex64 is both smaller and faster -- we need some speed here
+    mat = xp.astype(xp.asarray(mat), xp.complex64)
 
     Z, c = generate_dataset(
-        xp.astype(mat, dtype),
+        mat,
         bbox=bbox,
         resolution=resolution,
         escape_radius=escape_radius,
