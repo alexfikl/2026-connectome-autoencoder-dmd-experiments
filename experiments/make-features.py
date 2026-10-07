@@ -268,7 +268,6 @@ def make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset
 def make_dmd_features(
     mat: Array2D[np.floating[Any]],
     *,
-    top_k: int = 3,
     bbox: tuple[float, float, float, float] = (-0.04, 0.04, -0.04, 0.04),
     escape_radius: float = 100.0,
     resolution: int = 64,
@@ -300,9 +299,6 @@ def make_dmd_features(
     n, m = mat.shape
     if n != m:
         raise ValueError(f"'mat' is not square: {mat.shape}")
-
-    if top_k > n:
-        raise ValueError(f"'top_k' must be smaller than matrix size: {top_k}")
 
     # {{{ generate data
 
@@ -359,31 +355,13 @@ def make_dmd_features(
     coeff_energy = np.maximum(np.real(np.sum((P @ G) * np.conj(P), axis=1)), 0.0)
     strengths = np.linalg.norm(Phi, axis=0) * np.sqrt(coeff_energy)
 
-    order = np.argsort(-strengths)[:top_k]
+    order = np.argsort(-strengths)
     eigs = eigs[order]
     strengths = strengths[order] / np.sum(strengths)
-    Phi = Phi[:, order]
 
-    features = np.concatenate([
-        strengths,
-        eigs.real,
-        eigs.imag,
-        np.abs(Phi).T.ravel(),
-    ])
-
-    starts = np.asarray([
-        *range(top_k),
-        *(top_k + i for i in range(top_k)),
-        *(2 * top_k + i for i in range(top_k)),
-        *(3 * top_k + i * n for i in range(top_k)),
-        features.size,
-    ])
-    descrs = (
-        *(f"DMD Strength {i}" for i in range(top_k)),
-        *(f"DMD Eigenvalue.re {i}" for i in range(top_k)),
-        *(f"DMD Eigenvalue.im {i}" for i in range(top_k)),
-        *(f"DMD Mode {i}" for i in range(top_k)),
-    )
+    features = np.concatenate([strengths, np.abs(eigs), np.angle(eigs)])
+    starts = np.cumsum([0, strengths.size, eigs.size, eigs.size])
+    descrs = ("DMD Strengths", "DMD Eig", "DMD Eig Angles")
 
     # }}}
 
