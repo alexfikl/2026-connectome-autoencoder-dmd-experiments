@@ -5,11 +5,11 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Any
+from collections.abc import Sequence
+from typing import Any, Literal, NamedTuple
 
 import numpy as np
 
-import commonlib  # ruff: ignore[unused-import]
 from commonlib import FeatureDataset, load_feature_datasets
 from nneuroutil.helpers import module_logger
 from nneuroutil.typing import Array1D, Array2D
@@ -30,32 +30,38 @@ Example:
     > {SCRIPT_PATH.name} dataset-features-sgraph.npz
 """
 
-EPS = 1.0e-12
-
 
 # {{{ statistics
 
 
+class Scores(NamedTuple):
+    nmi: Array1D[np.floating[Any]]
+    """Normalized Mutual Information."""
+    eta2: Array1D[np.floating[Any]]
+    """ANOVA effect size."""
+    f: Array1D[np.floating[Any]]
+    """ANOVA :math:`f` statistic."""
+
+
 def label_entropy(labels: Array1D[np.integer[Any]]) -> float:
     """Entropy of the class labels in nats."""
+
     counts = np.bincount(labels)
     prob = counts / np.sum(counts)
     prob = prob[prob > 0.0]
-    return float(-np.sum(prob * np.log(prob)))
+
+    return -np.sum(prob * np.log(prob))
 
 
 def compute_scores(
     x: Array2D[np.floating[Any]],
     labels: Array1D[np.integer[Any]],
     *,
+    eps: float = 1.0e-12,
     mi_seeds: int = 32,
     random_state: int = 42,
-) -> dict[str, Array1D[np.floating[Any]]]:
-    """Compute per-feature discriminant scores.
-
-    Returns a dictionary with the normalized mutual information ``"nmi"``, the
-    ANOVA effect size ``"eta2"`` and the ANOVA ``"f"`` statistic.
-    """
+) -> Scores:
+    """Compute per-feature discriminant scores."""
     from sklearn.feature_selection import f_classif, mutual_info_classif
 
     nfeatures = x.shape[1]
@@ -85,7 +91,7 @@ def compute_scores(
         ss_between,
         ss_total,
         out=np.zeros(nfeatures),
-        where=ss_total > EPS,
+        where=ss_total > eps,
     )
 
     f_stat = np.full(nfeatures, np.nan)
@@ -95,7 +101,7 @@ def compute_scores(
     except Exception as exc:
         log.error("Failed to compute feature stats: %s.", exc)
 
-    return {"nmi": nmi, "eta2": eta2, "f": f_stat}
+    return Scores(nmi=nmi, eta2=eta2, f=f_stat)
 
 
 def expand_groups(
@@ -128,7 +134,7 @@ def group_reduce(
     groups: Array1D[np.integer[Any]],
     ngroups: int,
     *,
-    how: str = "mean",
+    how: Literal["mean", "max"] = "mean",
 ) -> Array1D[np.floating[Any]]:
     """Aggregate per-feature *values* over each feature group."""
     reduce_fn = np.max if how == "max" else np.mean
@@ -166,7 +172,7 @@ def plot_top_features(
 ) -> None:
     import matplotlib as mp
 
-    top_k = min(top_k, values.size)
+    top_k = min(top_k, values.size)  # ty: ignore[unresolved-attribute]
     order = np.argsort(-values)[:top_k]
     labels = feature_labels(order, groups, ds.starts, ds.descrs)
 
@@ -182,10 +188,13 @@ def plot_top_features(
 
         y = np.arange(order.size)
         ax.barh(y, values[order], color=colors)
+        ax.set_xlabel(name.upper())
+
         ax.set_yticks(y)
         ax.set_yticklabels(labels, fontsize="small")
         ax.invert_yaxis()
-        ax.set_xlabel(name.upper())
+
+        ax.grid(visible=False, which="both")
 
 
 def plot_groups(
@@ -212,9 +221,11 @@ def plot_groups(
 
         ax.bar(x - width / 2, mean, width, label="mean")
         ax.bar(x + width / 2, maximum, width, label="max")
+
         ax.set_xticks(x)
         ax.set_xticklabels(ds.descrs, rotation=45, ha="right", fontsize="small")
         ax.set_ylabel(name.upper())
+
         ax.legend()
 
 
@@ -230,7 +241,7 @@ def plot_correlation(
 ) -> None:
     from scipy.stats import spearmanr
 
-    order = np.argsort(-values)[: min(top_k, values.size)]
+    order = np.argsort(-values)[: min(top_k, values.size)]  # ty: ignore[unresolved-attribute]
     if order.size < 2:
         return
 
@@ -247,12 +258,14 @@ def plot_correlation(
         ax = fig.gca()
 
         im = ax.imshow(corr, vmin=-1.0, vmax=1.0, cmap="seismic")
+
         idx = np.arange(order.size)
         ax.set_xticks(idx)
         ax.set_yticks(idx)
         ax.set_xticklabels(labels, rotation=90, fontsize="x-small")
         ax.set_yticklabels(labels, fontsize="x-small")
 
+        ax.grid(visible=False, which="both")
         fig.colorbar(im, cax=make_colorbar_axes(ax), label="Spearman")
 
 
@@ -263,7 +276,7 @@ def plot_correlation(
 
 
 def main(
-    filenames: list[pathlib.Path],
+    filenames: Sequence[pathlib.Path],
     *,
     outfile: pathlib.Path | None = None,
     top_k: int = 30,
@@ -285,12 +298,13 @@ def main(
             ret = 1
             continue
 
+        suffix = ""
         if outfile is None:
-            basename = filename.with_suffix("")
+            basename = filename.with_stem(f"{filename.stem}{suffix}").with_suffix("")
         elif len(filenames) == 1:
-            basename = outfile.with_suffix("")
+            basename = outfile.with_stem(f"{outfile.stem}{suffix}").with_suffix("")
         else:
-            basename = outfile.with_stem(f"{outfile.stem}-{filename.stem}")
+            basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}{suffix}")
 
         x = ds.x
         groups = expand_groups(ds.starts, ds.descrs, x.shape[1])
@@ -306,7 +320,7 @@ def main(
 
         # {{{ ranked table
 
-        order = np.argsort(-scores["nmi"])
+        order = np.argsort(-scores.nmi)
         log.info("Top %d features by normalized mutual information:", top_k)
         for rank, j in enumerate(order[:top_k]):
             label = feature_labels(np.array([j]), groups, ds.starts, ds.descrs)[0]
@@ -314,9 +328,9 @@ def main(
                 "[%3d] %-40s NMI %.5e eta2 %.5e F %.5e",
                 rank + 1,
                 label,
-                scores["nmi"][j],
-                scores["eta2"][j],
-                scores["f"][j],
+                scores.nmi[j],
+                scores.eta2[j],
+                scores.f[j],
             )
 
         log.info("Group importance (max):")
@@ -326,8 +340,8 @@ def main(
                 "[%3d] %-40s NMI %.5e eta2 %.5e",
                 i + 1,
                 descr,
-                np.max(scores["nmi"][mask]),
-                np.max(scores["eta2"][mask]),
+                np.max(scores.nmi[mask]),
+                np.max(scores.eta2[mask]),
             )
 
         # }}}
@@ -335,7 +349,7 @@ def main(
         for name in ("nmi", "eta2"):
             plot_top_features(
                 basename,
-                scores[name],
+                getattr(scores, name),
                 ds,
                 groups,
                 name=name,
@@ -344,7 +358,7 @@ def main(
             )
             plot_groups(
                 basename,
-                scores[name],
+                getattr(scores, name),
                 groups,
                 ds,
                 name=name,
@@ -354,7 +368,7 @@ def main(
         plot_correlation(
             basename,
             x,
-            scores["nmi"],
+            scores.nmi,
             ds,
             groups,
             top_k=top_k,
