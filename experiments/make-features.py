@@ -343,15 +343,17 @@ def make_dmd_features(
 
     # {{{ features
 
+    import scipy.linalg as sla
+
     dmd = build_dense_dmdc(X1, U, X2, method="ridge")
     G = xp.conj(X1).T @ X1
 
-    G = np.asarray(G)
-    A = np.asarray(dmd.A)
+    G = np.asarray(array_api_compat.to_device(G, "cpu"))
+    A = np.asarray(array_api_compat.to_device(dmd.A, "cpu"))
 
-    eigs, Phi = np.linalg.eig(A.T)
+    eigs, Phi = sla.eig(A.T)
 
-    P = np.linalg.pinv(Phi)
+    P = sla.pinv(Phi)
     coeff_energy = np.maximum(np.real(np.sum((P @ G) * np.conj(P), axis=1)), 0.0)
     strengths = np.linalg.norm(Phi, axis=0) * np.sqrt(coeff_energy)
 
