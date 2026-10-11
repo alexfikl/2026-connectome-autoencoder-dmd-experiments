@@ -588,9 +588,7 @@ def plot_task_vs_subject_ratio(
         ax1.set_xlabel(r"$\log_{10}(MS_{\text{task}} / MS_{\text{subject}})$")
         ax1.set_ylabel(r"Density")
         task_dom_str = f"{pct_task_dominant:.1f}\\%"
-        ax1.set_title(
-            rf"Task vs Subject Variance (Task Dominant: {task_dom_str})"
-        )
+        ax1.set_title(rf"Task vs Subject Variance (Task Dominant: {task_dom_str})")
         ax1.legend(fontsize="small")
 
         # Panel 2: scatter eta2_subject vs eta2_task
