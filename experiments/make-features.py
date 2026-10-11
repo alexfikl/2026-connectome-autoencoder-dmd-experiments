@@ -408,33 +408,49 @@ def make_fourier_features(
     x = xmin + pts[:, 0] * ((xmax - xmin) / width)
     y = ymin + pts[:, 1] * ((ymax - ymin) / height)
 
-    # 2. resample to equidistant arc-length points
+    # 3. resample to equidistant arc-length points
     z = x + 1j * y
     z = np.append(z, z[0])
     dists = np.insert(np.cumsum(np.abs(np.diff(z))), 0, 0.0)
     target_dists = np.linspace(0.0, dists[-1], nmodes, endpoint=False)
 
-    x = np.interp(target_dists, dists, z.real)
-    y = np.interp(target_dists, dists, z.imag)
-    z = x + 1j * y
+    z = np.interp(target_dists, dists, z.real) + 1j * np.interp(
+        target_dists, dists, z.imag
+    )
 
-    # 4. FFT
-    # NOTE: normalize so that the descriptors are scale invariant.
-    z = z - np.mean(z)
+    # 4. Fourier descriptors
+    # NOTE: we keep the scale (i.e. we do not normalize the contour), since the
+    # size of the fractal is by far its most discriminative property. The
+    # (constant) zero frequency and the first harmonic are dropped.
+    zhat = np.fft.fft(z - np.mean(z))
+    fourier = np.abs(zhat[2:])
 
-    radius = np.sqrt(np.mean(np.abs(z) ** 2))
-    if radius < 1e-12:
-        radius = 1.0
+    # 5. shape and moment descriptors of the region
+    area = cv2.contourArea(c)
+    (_bx, _by, bw, bh) = cv2.boundingRect(c)
+    hull_area = max(cv2.contourArea(cv2.convexHull(c)), 1.0e-12)
+    morphology = np.array([
+        np.log1p(area),
+        np.log1p(perimeter),
+        4.0 * np.pi * area / max(perimeter**2, 1.0e-12),
+        bw / max(bh, 1),
+        area / hull_area,
+        area / max(bw * bh, 1),
+    ])
 
-    zhat = np.fft.fft(z / radius)
+    moments = cv2.moments((binary == 0).astype(np.uint8), binaryImage=True)
+    hu = np.asarray(cv2.HuMoments(moments)).ravel()
+    hu = -np.sign(hu) * np.log10(np.abs(hu) + 1.0e-30)
+
+    x = np.concatenate([fourier, morphology, hu])
+    starts = np.cumsum([0, fourier.size, morphology.size, hu.size])
 
     return FeatureDataset(
-        # NOTE: drop the zero frequency (DC) and the first harmonic
-        x=np.abs(zhat[2:]),
+        x=x,
         labels=np.array(0),
         label_names=(),
-        starts=np.array([0, z.size - 2]),
-        descrs=("Fourier",),
+        starts=starts,
+        descrs=("Fourier", "Morphology", "HuMoments"),
     )
 
 
