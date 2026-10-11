@@ -50,7 +50,6 @@ def main(
         log.error("Output file exists (use --force): '%s'.", outfile)
         return 1
 
-    import cv2  # ty: ignore[unresolved-import]
     from PIL import Image
     from PIL.ExifTags import Base
 
@@ -68,7 +67,11 @@ def main(
             continue
 
         # load images
-        img = cv2.imread(filename)
+        with Image.open(filename) as im:
+            img = np.array(im.convert("RGB"))
+            gray = np.array(im.convert("L"))
+            exif = im.getexif()
+
         if shape is None:
             shape = img.shape[:2]
         elif shape != img.shape[:2]:
@@ -80,7 +83,6 @@ def main(
             )
             return 1
 
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         log.info("[%2d] Loaded image '%s' of size %s.", i, filename, img.shape)
 
         # really clip the values
@@ -94,7 +96,6 @@ def main(
         if bbox is not None:
             bboxs.append(bbox)
         else:
-            exif = Image.open(filename).getexif()
             descr = exif.get(Base.ImageDescription)
             if descr is not None:
                 data = ast.literal_eval(descr)
