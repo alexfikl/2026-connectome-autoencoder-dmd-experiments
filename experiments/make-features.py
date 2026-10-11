@@ -375,12 +375,69 @@ def make_dmd_features(
 # }}}
 
 
+# {{{ make_fourier_features
+
+
+def make_fourier_features(
+    binary: Array2D[np.integer[Any]],
+    bbox: tuple[float, float, float, float],
+    *,
+    eps: float = 5.0e-4,
+) -> FeatureDataset:
+    import cv2  # ty: ignore[unresolved-import]
+
+    xmin, xmax, ymin, ymax = bbox
+    height, width = binary.shape
+    mask = np.where(binary == 0, np.uint8(255), np.uint8(0))
+
+    # 1. retrieve outer contour
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        raise RuntimeError("could not find contours")
+
+    c = max(contours, key=cv2.contourArea)
+    perimeter = cv2.arcLength(c, closed=True)
+
+    # 2. approximate polygon
+    approx = cv2.approxPolyDP(c, perimeter * eps, closed=True)
+    pts = approx[:, 0, :]
+
+    # 3. vectorized coordinate mapping to bbox
+    scale_x = (xmax - xmin) / width
+    scale_y = (ymax - ymin) / height
+    x = xmin + pts[:, 0] * scale_x
+    y = ymin + pts[:, 1] * scale_y
+    z = x + 1j * y
+
+    # 4. phase alignment: find crossing index and roll
+    sign_y0 = np.sign(y[0])
+    if sign_y0 != 0:
+        crossing = np.where(sign_y0 * y <= 0)[0]
+        if crossing.size > 0:
+            shift = len(z) - crossing[-1] - 1
+            if shift != 0:
+                z = np.roll(z, shift)
+
+    # 5. fft
+    zhat = np.fft.fft(z)
+    return FeatureDataset(
+        x=np.hstack([zhat.real, zhat.imag]),
+        labels=np.array(0),
+        label_names=(),
+        starts=np.array([0, z.size, 2 * z.size]),
+        descrs=("Fourier Re", "Fourier Im"),
+    )
+
+
+# }}}
+
+
 def make_features(
     filenames: Sequence[pathlib.Path],
     *,
     outfile: pathlib.Path | None = None,
-    ftype: Literal["sgraph", "ugraph", "matrix", "dmd", "eig"] = "matrix",
-    key: str = "matrices",
+    ftype: Literal["sgraph", "ugraph", "matrix", "dmd", "eig", "fourier"] = "matrix",
+    key: str | None = None,
     eps: float | None = None,
     density: float | None = None,
     overwrite: bool = False,
@@ -395,6 +452,9 @@ def make_features(
     if not overwrite and outfile.exists():
         log.error("File already exists (use --force to overwrite): '%s'.", outfile)
         return 1
+
+    if key is None:
+        key = "images_binary" if ftype == "fourier" else "matrices"
 
     ret = 0
     datasets = {}
@@ -457,6 +517,9 @@ def make_features(
                     features = make_unsigned_graph_features(mat_i)
                 elif ftype == "dmd":
                     features = make_dmd_features(mat_i)
+                elif ftype == "fourier":
+                    xmin, xmax, ymin, ymax = data["images_bbox"][i]
+                    features = make_fourier_features(mat_i, (xmin, xmax, ymin, ymax))
                 else:
                     raise ValueError(f"unknown feature type: {ftype!r}")
             except Exception as exc:
@@ -526,7 +589,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "-k",
         "--key",
-        default="matrices",
+        default=None,
         help="Name of the variable in the file to use",
     )
     parser.add_argument(
