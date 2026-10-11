@@ -382,7 +382,7 @@ def make_fourier_features(
     binary: Array2D[np.integer[Any]],
     bbox: tuple[float, float, float, float],
     *,
-    nmodes: int = 64,
+    nmodes: int = 128,
     eps: float = 5.0e-4,
 ) -> FeatureDataset:
     import cv2  # ty: ignore[unresolved-import]
@@ -419,19 +419,21 @@ def make_fourier_features(
     z = x + 1j * y
 
     # 4. FFT
+    # NOTE: normalize so that the descriptors are scale invariant.
     z = z - np.mean(z)
-    zhat = np.fft.fft(z)
 
-    scale = np.abs(zhat[1])
-    if scale < 1e-12:
-        scale = 1.0
+    radius = np.sqrt(np.mean(np.abs(z) ** 2))
+    if radius < 1e-12:
+        radius = 1.0
+
+    zhat = np.fft.fft(z / radius)
 
     return FeatureDataset(
-        # NOTE: modes decay with about 1/k -- we take a log to normalize that
-        x=np.log1p(np.abs(zhat) / scale),
+        # NOTE: drop the zero frequency (DC) and the first harmonic
+        x=np.abs(zhat[2:]),
         labels=np.array(0),
         label_names=(),
-        starts=np.array([0, z.size]),
+        starts=np.array([0, z.size - 2]),
         descrs=("Fourier",),
     )
 
