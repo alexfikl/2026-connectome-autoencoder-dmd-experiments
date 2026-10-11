@@ -382,6 +382,7 @@ def make_fourier_features(
     binary: Array2D[np.integer[Any]],
     bbox: tuple[float, float, float, float],
     *,
+    nmodes: int = 64,
     eps: float = 5.0e-4,
 ) -> FeatureDataset:
     import cv2  # ty: ignore[unresolved-import]
@@ -397,35 +398,41 @@ def make_fourier_features(
 
     c = max(contours, key=cv2.contourArea)
     perimeter = cv2.arcLength(c, closed=True)
+    if len(c) < 3:
+        raise RuntimeError("invalid contour")
 
     # 2. approximate polygon
     approx = cv2.approxPolyDP(c, perimeter * eps, closed=True)
     pts = approx[:, 0, :]
 
-    # 3. vectorized coordinate mapping to bbox
-    scale_x = (xmax - xmin) / width
-    scale_y = (ymax - ymin) / height
-    x = xmin + pts[:, 0] * scale_x
-    y = ymin + pts[:, 1] * scale_y
+    x = xmin + pts[:, 0] * ((xmax - xmin) / width)
+    y = ymin + pts[:, 1] * ((ymax - ymin) / height)
+
+    # 2. resample to equidistant arc-length points
+    z = x + 1j * y
+    z = np.append(z, z[0])
+    dists = np.insert(np.cumsum(np.abs(np.diff(z))), 0, 0.0)
+    target_dists = np.linspace(0.0, dists[-1], nmodes, endpoint=False)
+
+    x = np.interp(target_dists, dists, z.real)
+    y = np.interp(target_dists, dists, z.imag)
     z = x + 1j * y
 
-    # 4. phase alignment: find crossing index and roll
-    sign_y0 = np.sign(y[0])
-    if sign_y0 != 0:
-        crossing = np.where(sign_y0 * y <= 0)[0]
-        if crossing.size > 0:
-            shift = len(z) - crossing[-1] - 1
-            if shift != 0:
-                z = np.roll(z, shift)
-
-    # 5. fft
+    # 4. FFT
+    z = z - np.mean(z)
     zhat = np.fft.fft(z)
+
+    scale = np.abs(zhat[1])
+    if scale < 1e-12:
+        scale = 1.0
+
     return FeatureDataset(
-        x=np.hstack([zhat.real, zhat.imag]),
+        # NOTE: modes decay with about 1/k -- we take a log to normalize that
+        x=np.log1p(np.abs(zhat) / scale),
         labels=np.array(0),
         label_names=(),
-        starts=np.array([0, z.size, 2 * z.size]),
-        descrs=("Fourier Re", "Fourier Im"),
+        starts=np.array([0, z.size]),
+        descrs=("Fourier",),
     )
 
 
@@ -485,7 +492,10 @@ def make_features(
 
         feps = eps
         if feps is None:
-            feps = 10.0 * np.finfo(matrices.dtype).eps
+            try:
+                feps = 10.0 * np.finfo(matrices.dtype).eps
+            except ValueError:
+                feps = -1.0
 
         log.info("Gathering '%s' features for '%s'.", ftype, filename)
 
@@ -495,16 +505,17 @@ def make_features(
         for i in range(nsamples):
             # ensure no self-connections
             mat_i = matrices[i].copy()
-            np.fill_diagonal(mat_i, 0.0)
+            if ftype != "fourier":
+                np.fill_diagonal(mat_i, 0.0)
 
-            # thresholding
-            amat_i = np.abs(mat_i)
-            if density is not None:
-                cutoff = np.quantile(amat_i[amat_i > feps], 1 - density)
-                mat_i = np.where(amat_i > cutoff, mat_i, 0.0)
+                # thresholding
+                amat_i = np.abs(mat_i)
+                if density is not None:
+                    cutoff = np.quantile(amat_i[amat_i > feps], 1 - density)
+                    mat_i = np.where(amat_i > cutoff, mat_i, 0.0)
 
-            # NOTE: ensure the matrix is symmetric (some algorithms need that)
-            mat_i = (mat_i + mat_i.T) / 2.0
+                # NOTE: ensure the matrix is symmetric (some algorithms need that)
+                mat_i = (mat_i + mat_i.T) / 2.0
 
             try:  # ruff: ignore[too-many-statements-in-try-clause]
                 if ftype == "matrix":
@@ -575,7 +586,7 @@ if __name__ == "__main__":
     parser.add_argument("filenames", nargs="+", type=pathlib.Path)
     parser.add_argument(
         "--features",
-        choices=("sgraph", "matrix", "dmd", "eig", "ugraph"),
+        choices=("sgraph", "matrix", "dmd", "eig", "ugraph", "fourier"),
         default="matrix",
         help="Type of the features to compute",
     )
