@@ -7,14 +7,12 @@ import logging
 import pathlib
 import random
 from collections.abc import Sequence
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 import array_api_compat
 import numpy as np
 import rich.logging
 from typing_extensions import TypeAliasType, TypeVar
-
-from commonlib import FeatureDataset
 
 log = logging.getLogger(pathlib.Path(__file__).stem)
 log.setLevel(logging.ERROR)
@@ -43,6 +41,12 @@ Array2D = TypeAliasType(
 )
 
 
+class FeatureDataset(NamedTuple):
+    x: Array1D[np.floating[Any]]
+    starts: Array1D[np.integer[Any]]
+    descrs: tuple[str, ...]
+
+
 # {{{ make_matrix_features
 
 
@@ -57,9 +61,7 @@ def make_matrix_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     starts = np.array([0, features.size])
     descrs = ("Lower triangular matrix entries",)
 
-    return FeatureDataset(
-        x=features, labels=np.array(0), label_names=(), starts=starts, descrs=descrs
-    )
+    return FeatureDataset(x=features, starts=starts, descrs=descrs)
 
 
 # }}}
@@ -79,11 +81,7 @@ def make_eig_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     eigs, _ = np.linalg.eigh(mat)
 
     return FeatureDataset(
-        x=eigs,
-        labels=np.array(0),
-        label_names=(),
-        starts=np.array([0, eigs.size]),
-        descrs=("Eigenvalues",),
+        x=eigs, starts=np.array([0, eigs.size]), descrs=("Eigenvalues",)
     )
 
 
@@ -175,11 +173,7 @@ def _make_unsigned_graph_features(
     descrs.append("Global Efficiency")
 
     return FeatureDataset(
-        x=np.array(features),
-        labels=np.array(0),
-        label_names=(),
-        starts=np.array(starts),
-        descrs=tuple(descrs),
+        x=np.array(features), starts=np.array(starts), descrs=tuple(descrs)
     )
 
 
@@ -191,8 +185,6 @@ def make_unsigned_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDatas
 
     return FeatureDataset(
         x=np.concatenate([fabs.x, fpos.x]),
-        labels=np.array(0),
-        label_names=(),
         starts=np.concatenate([
             fabs.starts,
             fabs.starts[-1] + fpos.starts[1:],
@@ -255,11 +247,7 @@ def make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset
     descrs.append("Modularity")
 
     return FeatureDataset(
-        x=np.hstack(features),
-        labels=np.array(0),
-        label_names=(),
-        starts=np.array(starts),
-        descrs=tuple(descrs),
+        x=np.hstack(features), starts=np.array(starts), descrs=tuple(descrs)
     )
 
 
@@ -371,13 +359,7 @@ def make_dmd_features(
         starts = np.cumsum([0, strengths.size, eigs.size])
         descrs = ("DMD Strengths", "DMD Eigs")
 
-        ds = FeatureDataset(
-            x=features,
-            labels=np.array(0),
-            label_names=(),
-            starts=starts,
-            descrs=descrs,
-        )
+        ds = FeatureDataset(x=features, starts=starts, descrs=descrs)
 
     # }}}
 
@@ -472,11 +454,7 @@ def make_fourier_features(
     starts = np.cumsum([0, fourier.size, morphology.size, hu.size])
 
     return FeatureDataset(
-        x=x,
-        labels=np.array(0),
-        label_names=(),
-        starts=starts,
-        descrs=("Fourier", "Morphology", "HuMoments"),
+        x=x, starts=starts, descrs=("Fourier", "Morphology", "HuMoments")
     )
 
 
