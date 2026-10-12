@@ -62,12 +62,27 @@ set_matplotlib_style()
 class FeatureDataset(NamedTuple):
     x: Array3D[np.floating[Any]]
     """Feature tensor of shape ``(nsamples, nclasses, nfeatures)``."""
+    labels: Array3D[np.integer[Any]]
+    """Class index for each entry of :attr:`x` of shape ``(nsamples, nclasses, 1)``. """
     class_names: tuple[str, ...]
     """Class name for each entry along the class axis of :attr:`x`."""
     starts: Array1D[np.integer[Any]]
     """Feature group boundaries of length ``ngroups + 1``."""
     descrs: tuple[str, ...]
     """Description of each feature group."""
+
+
+def make_class_labels(
+    x: Array3D[np.floating[Any]],
+    *,
+    xp: Any = None,
+) -> Array3D[np.integer[Any]]:
+    if xp is None:
+        xp = array_api_compat.array_namespace(x)
+
+    nsamples, nclasses, _ = x.shape
+    indices = xp.arange(nclasses, dtype=xp.int64, device=array_api_compat.device(x))
+    return xp.tile(indices[None, :, None], (nsamples, 1, 1))
 
 
 def load_feature_datasets(
@@ -126,8 +141,10 @@ def load_feature_datasets(
 
         xs.append(x)
 
+    x = xp.asarray(np.stack(xs, axis=1), device=device)
     return FeatureDataset(
-        x=xp.asarray(np.stack(xs, axis=1), device=device),
+        x=x,
+        labels=make_class_labels(x),
         class_names=tuple(datasets),
         starts=xp.asarray(data["starts"], device=device),
         descrs=descrs,
