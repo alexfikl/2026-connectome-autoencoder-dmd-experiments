@@ -28,13 +28,13 @@ matplotlib==3.11.2
     #   scienceplots
 mdurl==0.1.2
     # via markdown-it-py
-narwhals==2.26.0
+narwhals==2.27.1
     # via scikit-learn
 networkx==3.6.1 ; python_full_version < '3.12'
     # via fractal-dmd-autoencoder (pyproject.toml)
 networkx==3.7 ; python_full_version >= '3.12'
     # via fractal-dmd-autoencoder (pyproject.toml)
-nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@c096be28c4545bb63136f20c88659a0a954af9bf#egg=nneuroutil
+nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@3e77b29b3643c61368448256f3c0422f8423f638#egg=nneuroutil
     # via fractal-dmd-autoencoder (pyproject.toml)
 numpy==2.4.6 ; python_full_version < '3.12'
     # via
@@ -45,7 +45,7 @@ numpy==2.4.6 ; python_full_version < '3.12'
     #   orbitkit
     #   scikit-learn
     #   scipy
-numpy==2.5.3 ; python_full_version >= '3.12'
+numpy==2.5.4 ; python_full_version >= '3.12'
     # via
     #   fractal-dmd-autoencoder (pyproject.toml)
     #   contourpy
@@ -54,7 +54,7 @@ numpy==2.5.3 ; python_full_version >= '3.12'
     #   orbitkit
     #   scikit-learn
     #   scipy
-orbitkit @ git+https://github.com/alexfikl/orbitkit.git@c590e7a0b81645430fa2219e842e0e14188f3d29#egg=orbitkit
+orbitkit @ git+https://github.com/alexfikl/orbitkit.git@9d7926a526801397aac0dcd418fe2d6f8134f856#egg=orbitkit
     # via fractal-dmd-autoencoder (pyproject.toml)
 packaging==26.3
     # via matplotlib
