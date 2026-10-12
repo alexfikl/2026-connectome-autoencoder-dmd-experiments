@@ -10,9 +10,9 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from commonlib import FeatureDataset, load_feature_datasets
+from commonlib import FeatureDataset, load_feature_datasets, make_class_labels
 from nneuroutil.helpers import module_logger
-from nneuroutil.typing import Array1D, Array2D
+from nneuroutil.typing import Array1D, Array2D, Array3D
 from nneuroutil.visualization import figure, make_colorbar_axes
 
 log = module_logger("lib.visualize_feature_separability")
@@ -47,24 +47,16 @@ class AnovaScores(NamedTuple):
 
 
 def compute_anova_scores(
-    x: Array2D[np.floating[Any]],
-    labels: Array1D[np.integer[Any]],
+    x: Array3D[np.floating[Any]],
 ) -> AnovaScores:
     """Compute vectorized one-way ANOVA effect sizes and F-statistics."""
-    nsamples, nfeatures = x.shape
-    classes = np.unique(labels)
-    nclasses = len(classes)
+    nsubjects, nclasses, nfeatures = x.shape
 
-    grand_mean = np.mean(x, axis=0)
-    ss_total = np.sum((x - grand_mean) ** 2, axis=0)
-    ss_between = np.zeros(nfeatures, dtype=x.dtype)
+    grand_mean = np.mean(x, axis=(0, 1))
+    class_mean = np.mean(x, axis=0)
 
-    for c in classes:
-        mask = labels == c
-        nc = np.sum(mask)
-        mean_c = np.mean(x[mask], axis=0)
-        ss_between += nc * (mean_c - grand_mean) ** 2
-
+    ss_total = np.sum((x - grand_mean) ** 2, axis=(0, 1))
+    ss_between = nsubjects * np.sum((class_mean - grand_mean) ** 2, axis=0)
     ss_within = np.maximum(ss_total - ss_between, 0.0)
 
     eta2 = np.divide(
@@ -75,7 +67,7 @@ def compute_anova_scores(
     )
 
     df_between = max(nclasses - 1, 1)
-    df_within = max(nsamples - nclasses, 1)
+    df_within = max(nclasses * (nsubjects - 1), 1)
 
     ms_between = ss_between / df_between
     ms_within = ss_within / df_within
@@ -91,18 +83,12 @@ def compute_anova_scores(
 
 
 def compute_centroid_rdm(
-    x: Array2D[np.floating[Any]],
-    labels: Array1D[np.integer[Any]],
+    x: Array3D[np.floating[Any]],
 ) -> Array2D[np.floating[Any]]:
     """Compute class centroid correlation distance matrix."""
     from scipy.spatial.distance import cdist
 
-    classes = np.unique(labels)
-    nclasses = len(classes)
-    centroids = np.empty((nclasses, x.shape[1]), dtype=x.dtype)
-
-    for i, c in enumerate(classes):
-        centroids[i] = np.mean(x[labels == c], axis=0)
+    centroids = np.mean(x, axis=0)
 
     # correlation distance: 1 - pearson_r(u, v)
     rdm = cdist(centroids, centroids, metric="correlation")
@@ -198,33 +184,20 @@ class VarianceDecomposition(NamedTuple):
 
 
 def compute_task_subject_variance(
-    x: Array2D[np.floating[Any]],
-    labels: Array1D[np.integer[Any]],
+    x: Array3D[np.floating[Any]],
 ) -> VarianceDecomposition | None:
     """Decompose feature variance into task vs. subject components."""
-    classes = np.unique(labels)
-    nclasses = len(classes)
-    counts = np.bincount(labels)
-
-    # check if dataset has equal sample counts per class (matched subjects)
-    if not np.all(counts == counts[0]) or counts[0] < 2:
+    nsubjects, nclasses, nfeatures = x.shape
+    if nsubjects < 2 or nclasses < 2:
         return None
 
-    nsubjects = counts[0]
-    nfeatures = x.shape[1]
-
-    # reshape to (tasks, subjects, features)
-    tensor = np.empty((nclasses, nsubjects, nfeatures), dtype=x.dtype)
-    for i, c in enumerate(classes):
-        tensor[i] = x[labels == c]
-
-    grand_mean = np.mean(tensor, axis=(0, 1), keepdims=True)
-    task_mean = np.mean(tensor, axis=1, keepdims=True)
-    subject_mean = np.mean(tensor, axis=0, keepdims=True)
+    grand_mean = np.mean(x, axis=(0, 1), keepdims=True)
+    task_mean = np.mean(x, axis=0, keepdims=True)
+    subject_mean = np.mean(x, axis=1, keepdims=True)
 
     ss_task = nsubjects * np.sum((task_mean - grand_mean) ** 2, axis=(0, 1))
     ss_subject = nclasses * np.sum((subject_mean - grand_mean) ** 2, axis=(0, 1))
-    ss_total = np.sum((tensor - grand_mean) ** 2, axis=(0, 1))
+    ss_total = np.sum((x - grand_mean) ** 2, axis=(0, 1))
 
     df_task = max(nclasses - 1, 1)
     df_subject = max(nsubjects - 1, 1)
@@ -267,36 +240,22 @@ def make_baseline_contrast(
     baseline_label: str = "Rest_LR_Task",
 ) -> FeatureDataset:
     """Subtract the subject-matched baseline from all other classes."""
-    if baseline_label not in ds.label_names:
-        raise ValueError(f"baseline '{baseline_label}' not in {ds.label_names}")
+    if baseline_label not in ds.class_names:
+        raise ValueError(f"baseline '{baseline_label}' not in {ds.class_names}")
 
-    baseline_idx = ds.label_names.index(baseline_label)
-    baseline_mask = ds.labels == baseline_idx
-    baseline_x = ds.x[baseline_mask]
+    baseline_idx = ds.class_names.index(baseline_label)
 
-    arrays = []
-    labels = []
-    label_names = []
+    x = ds.x - ds.x[:, baseline_idx : baseline_idx + 1, :]
+    x = np.delete(x, baseline_idx, axis=1)
 
-    for i, label_name in enumerate(ds.label_names):
-        if i == baseline_idx:
-            continue
-
-        mask = ds.labels == i
-        task_x = ds.x[mask]
-        if task_x.shape[0] != baseline_x.shape[0]:
-            raise ValueError(
-                f"sample count mismatch: {task_x.shape[0]} vs {baseline_x.shape[0]}"
-            )
-
-        arrays.append(task_x - baseline_x)
-        labels.append(np.full(task_x.shape[0], len(label_names)))
-        label_names.append(label_name)
+    class_names = tuple(
+        name for i, name in enumerate(ds.class_names) if i != baseline_idx
+    )
 
     return FeatureDataset(
-        x=np.concatenate(arrays, axis=0),
-        labels=np.concatenate(labels),
-        label_names=tuple(label_names),
+        x=x,
+        labels=make_class_labels(x),
+        class_names=class_names,
         starts=ds.starts,
         descrs=ds.descrs,
     )
@@ -385,12 +344,14 @@ def plot_supervised_lda(
 
         # Panel 2: 2D projection
         if lda.coords.shape[1] >= 2:
-            for i, name in enumerate(ds.label_names):
+            nsubjects, nclasses, _ = ds.x.shape
+            coords = np.reshape(lda.coords, (nsubjects, nclasses, lda.coords.shape[-1]))
+
+            for i, name in enumerate(ds.class_names):
                 label = clean_label(name)
-                mask = ds.labels == i
                 ax2.scatter(
-                    lda.coords[mask, 0],
-                    lda.coords[mask, 1],
+                    coords[:, i, 0],
+                    coords[:, i, 1],
                     s=24,
                     alpha=0.75,
                     label=label,
@@ -656,18 +617,17 @@ def main(
         else:
             basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}{suffix}")
 
+        nsubjects, nclasses, nfeatures = ds.x.shape
         log.info(
             "Loaded '%s': %d samples, %d features, %d classes.",
             filename.stem,
-            ds.x.shape[0],
-            ds.x.shape[1],
-            len(ds.label_names),
+            nsubjects * nclasses,
+            nfeatures,
+            nclasses,
         )
 
         # compute task vs subject decomposition on uncontrasted repeated-measures
-        var_decomp = (
-            compute_task_subject_variance(ds.x, ds.labels) if baseline is None else None
-        )
+        var_decomp = compute_task_subject_variance(ds.x) if baseline is None else None
 
         if baseline is not None:
             ds = make_baseline_contrast(ds, baseline_label=baseline)
@@ -675,16 +635,18 @@ def main(
                 "Subtracted baseline '%s': %d samples, %d classes remain.",
                 baseline,
                 ds.x.shape[0],
-                len(ds.label_names),
+                len(ds.class_names),
             )
 
-        x = ds.x
-        labels = ds.labels
+        # flatten the (subjects, classes, features) tensor for the flat estimators
+        nsubjects, nclasses, nfeatures = ds.x.shape
+        x = np.reshape(ds.x, (nsubjects * nclasses, nfeatures))
+        labels = np.reshape(ds.labels, -1)
 
         # 1. RDM
         log.info("Computing Representational Dissimilarity Matrix...")
-        rdm = compute_centroid_rdm(x, labels)
-        plot_rdm(basename, rdm, ds.label_names, overwrite=overwrite)
+        rdm = compute_centroid_rdm(ds.x)
+        plot_rdm(basename, rdm, ds.class_names, overwrite=overwrite)
 
         # 2. Supervised LDA
         log.info("Computing supervised Fisher / LDA projection...")
@@ -693,7 +655,7 @@ def main(
 
         # 3. Effect sizes
         log.info("Computing vectorized ANOVA effect sizes...")
-        scores = compute_anova_scores(x, labels)
+        scores = compute_anova_scores(ds.x)
         plot_effect_size_dist(basename, scores, overwrite=overwrite)
 
         # 4. Cross-validated linear decoding
@@ -703,7 +665,7 @@ def main(
             "Cross-validated balanced accuracy: %.2f%%",
             decoding.overall_accuracy * 100,
         )
-        plot_decoding_cv(basename, decoding, ds.label_names, overwrite=overwrite)
+        plot_decoding_cv(basename, decoding, ds.class_names, overwrite=overwrite)
 
         # 5. Task vs Subject variance
         if var_decomp is not None:

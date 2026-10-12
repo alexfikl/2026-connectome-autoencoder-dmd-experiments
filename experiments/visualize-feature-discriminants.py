@@ -306,16 +306,19 @@ def main(
         else:
             basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}{suffix}")
 
-        x = ds.x
-        groups = expand_groups(ds.starts, ds.descrs, x.shape[1])
-        scores = compute_scores(x, ds.labels, mi_seeds=mi_seeds)
+        nsubjects, nclasses, nfeatures = ds.x.shape
+        x = np.reshape(ds.x, (nsubjects * nclasses, nfeatures))
+        labels = np.reshape(ds.labels, -1)
+
+        groups = expand_groups(ds.starts, ds.descrs, nfeatures)
+        scores = compute_scores(x, labels, mi_seeds=mi_seeds)
 
         log.info(
             "Features '%s': %d samples, %d features, %d classes.",
             filename.stem,
-            x.shape[0],
-            x.shape[1],
-            len(ds.label_names),
+            nsubjects * nclasses,
+            nfeatures,
+            nclasses,
         )
 
         # {{{ ranked table

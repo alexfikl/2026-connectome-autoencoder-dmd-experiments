@@ -10,7 +10,7 @@ from typing import Any, Literal, get_args
 
 import numpy as np
 
-from commonlib import FeatureDataset, load_feature_datasets
+from commonlib import FeatureDataset, load_feature_datasets, make_class_labels
 from nneuroutil.helpers import module_logger
 from nneuroutil.typing import Array1D, Array2D
 from nneuroutil.visualization import figure
@@ -161,9 +161,8 @@ def plot_embedding(
     *,
     overwrite: bool = False,
 ) -> None:
-    nclasses = len(ds.class_names)
-    nsubjects = coords.shape[0] // nclasses
-    labels = np.tile(np.arange(nclasses), nsubjects)
+    nsubjects, nclasses, _ = ds.x.shape
+    labels = np.reshape(ds.labels, -1)
 
     silhouette = compute_silhouette(coords, labels)
     log.info("    Silhouette: %.3f", silhouette)
@@ -216,6 +215,7 @@ def make_baseline_contrast(
 
     return FeatureDataset(
         x=x,
+        labels=make_class_labels(x),
         class_names=class_names,
         starts=ds.starts,
         descrs=ds.descrs,
