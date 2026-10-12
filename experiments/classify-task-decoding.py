@@ -5,11 +5,11 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Literal, cast
+from typing import Literal, cast, get_args
 
-import numpy as np
 import torch
 
+from commonlib import load_feature_datasets
 from nneuroutil.helpers import FuzzyChoiceAction, module_logger
 from nneuroutil.torch_extras import available_device_names, torch_default_device
 
@@ -17,29 +17,36 @@ log = module_logger("lib.autoencoder_network")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
-Classify structural and functional MRI data using standard methods
+Classify tasks using features computed by make-features.py
 
 Example:
 
-    > {SCRIPT_PATH.name} dataset1.npz dataset2.npz dataset3.npz
+    > {SCRIPT_PATH.name} --method lda dataset-features-matrix.npz
 """
+
+ClassificationMethod = Literal["lda", "svm", "mlp"]
 
 
 def main(
-    filenames: tuple[pathlib.Path, ...],
+    filename: pathlib.Path,
     *,
-    method: Literal["lda", "svm", "mlp"] = "svm",
-    datakey: str = "matrices",
+    method: ClassificationMethod = "svm",
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
 ) -> int:
-    if len(filenames) < 2:
-        log.error("Need two or more datasets to do classification.")
-        return 1
-
     ret = 0
     device = torch.get_default_device()
     log.info("Device: %s", device)
+
+    if not filename.exists():
+        log.error("File does not exist: '%s'.", filename)
+        return 1
+
+    try:
+        ds = load_feature_datasets(filename)
+    except Exception as exc:
+        log.error("Failed to load features from '%s': %s", filename, exc)
+        return 1
 
     from nneuroutil.data import random_split
 
@@ -52,39 +59,8 @@ def main(
     idx_train: torch.Tensor | None = None
     idx_test: torch.Tensor | None = None
 
-    for label, filename in enumerate(filenames):
-        if not filename.exists():
-            log.error("File does not exist: '%s'.", filename)
-
-        try:
-            data = np.load(filename)
-        except Exception:
-            log.error("Failed to load data from file: '%s'.", filename)
-            ret += 1
-            continue
-
-        if datakey not in data:
-            log.error("File does not contain '%s' dataset: '%s'.", datakey, filename)
-            ret += 1
-            continue
-
-        matrices = torch.from_numpy(data[datakey]).to(device)
-        if matrices.ndim != 3:
-            log.error("Expected a 3 dimensional array: %s.", matrices.shape)
-            ret += 1
-            continue
-
-        errsym = torch.linalg.norm(matrices - torch.transpose(matrices, 1, 2))
-        if errsym > 1.0e-8:
-            log.error("Matrices do not seem to be symmetric.")
-            ret += 1
-            continue
-
-        # NOTE: matrices are symmetric with zero diagonl, so we use only the
-        # lower triangular values as features for this example
-        _, n, _ = matrices.shape
-        rows, cols = torch.tril_indices(n, n, offset=-1)
-        x = matrices[:, rows, cols]
+    for label in range(len(ds.class_names)):
+        x = torch.from_numpy(ds.x[:, label, :]).to(device)
 
         # split each dataset for training / testing as is tradition
         # NOTE: we only do this once because the various datasets seem to be the
@@ -106,12 +82,13 @@ def main(
 
         lda = classify_linear_discriminant_analysis(x_train, y_train)
 
-        for x_test_i, y_test_i in zip(x_test, y_test, strict=True):
+        for i, (x_test_i, y_test_i) in enumerate(zip(x_test, y_test, strict=True)):
             y_test_lda = lda.predict(x_test_i, metric="l2")
             matched = torch.sum(torch.eq(y_test_lda, y_test_i))  # ty: ignore[no-matching-overload]
 
             log.info(
-                "Match %d out of %d (%.2f%%)",
+                "%20s: Match %d out of %d (%.2f%%)",
+                ds.class_names[i],
                 matched,
                 x_test_i.shape[0],
                 matched / x_test_i.shape[0] * 100,
@@ -121,12 +98,13 @@ def main(
 
         svm = classify_support_vector_machine(x_train, y_train)
 
-        for x_test_i, y_test_i in zip(x_test, y_test, strict=True):
+        for i, (x_test_i, y_test_i) in enumerate(zip(x_test, y_test, strict=True)):
             y_test_lda = svm.predict(x_test_i)
             matched = torch.sum(torch.eq(y_test_lda, y_test_i))  # ty: ignore[no-matching-overload]
 
             log.info(
-                "Match %d out of %d (%.2f%%)",
+                "%20s: Match %d out of %d (%.2f%%)",
+                ds.class_names[i],
                 matched,
                 x_test_i.shape[0],
                 matched / x_test_i.shape[0] * 100,
@@ -134,14 +112,17 @@ def main(
     elif method == "mlp":
         from torchlib import classify_multilayer_perceptron
 
-        mlp = classify_multilayer_perceptron(x_train, y_train)
+        mlp = classify_multilayer_perceptron(
+            x_train, y_train, learning_rate_init=1.0e-2, max_iter=400
+        )
 
-        for x_test_i, y_test_i in zip(x_test, y_test, strict=True):
+        for i, (x_test_i, y_test_i) in enumerate(zip(x_test, y_test, strict=True)):
             y_test_mlp = mlp.predict(x_test_i)
             matched = torch.sum(torch.eq(y_test_mlp, y_test_i))
 
             log.info(
-                "Match %d out of %d (%.2f%%)",
+                "%20s: Match %d out of %d (%.2f%%)",
+                ds.class_names[i],
                 matched,
                 x_test_i.shape[0],
                 matched / x_test_i.shape[0] * 100,
@@ -165,7 +146,7 @@ if __name__ == "__main__":
         formatter_class=HelpFormatter,
         description=SCRIPT_LONG_HELP,
     )
-    parser.add_argument("filenames", nargs="*", type=pathlib.Path)
+    parser.add_argument("filename", type=pathlib.Path)
     parser.add_argument(
         "--device",
         action=FuzzyChoiceAction,
@@ -175,7 +156,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--method",
-        choices=("lda", "svm", "mlp"),
+        choices=get_args(ClassificationMethod),
         default="lda",
         help="The method used to do the classification",
     )
@@ -208,7 +189,7 @@ if __name__ == "__main__":
 
         raise SystemExit(
             main(
-                args.filenames,
+                args.filename,
                 outfile=args.outfile,
                 method=args.method,
                 overwrite=args.force,
