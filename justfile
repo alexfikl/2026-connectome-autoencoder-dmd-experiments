@@ -91,13 +91,24 @@ pin: requirements_txt
 
 # {{{ datasets
 
+[private]
+mat2npz filename *ARGS:
+    {{ PYTHON }} scripts/mat2npz.py --force \
+        --variable-name 'w:matrices' \
+        --transpose \
+        {{ ARGS }} \
+        {{ filename }}
+
 [doc("Convert HPC datasets")]
 dataset:
-    @for mat in data/*.mat; do \
-        {{ PYTHON }} scripts/mat2npz.py --force \
-            --variable-name 'w:matrices' \
-            --transpose \
-            "data/$(basename ${mat})"; \
-    done
+    @just mat2npz data/Emotion_LR_Task.mat
+    @just mat2npz data/Gambling_LR_Task.mat
+    @just mat2npz data/Language_LR_Task.mat
+    @just mat2npz data/Relational_LR_Task.mat
+    @just mat2npz data/Rest_LR_Task.mat
+    @just mat2npz data/Social_LR_Task.mat
+    @just mat2npz data/WM_LR_Task.mat
+    @just mat2npz data/Structural_LR_Task.mat \
+        --normalize 'max' --bbox '-1.0' '0.3' '-0.65' '0.65'
 
 # }}}
