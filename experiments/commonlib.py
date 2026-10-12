@@ -60,12 +60,10 @@ set_matplotlib_style()
 
 
 class FeatureDataset(NamedTuple):
-    x: Array2D[np.floating[Any]]
-    """Feature matrix of shape ``(nsamples, nfeatures)``."""
-    labels: Array1D[np.integer[Any]]
-    """Integer class label for each sample."""
-    label_names: tuple[str, ...]
-    """Class name for each integer label."""
+    x: Array3D[np.floating[Any]]
+    """Feature tensor of shape ``(nsamples, nclasses, nfeatures)``."""
+    class_names: tuple[str, ...]
+    """Class name for each entry along the class axis of :attr:`x`."""
     starts: Array1D[np.integer[Any]]
     """Feature group boundaries of length ``ngroups + 1``."""
     descrs: tuple[str, ...]
@@ -77,6 +75,7 @@ def load_feature_datasets(
     *,
     datakey: str = "datasets",
     drop_nan: bool = True,
+    device: Any = None,
     xp: Any = None,
 ) -> FeatureDataset:
     """Load a feature file written by ``make-features.py``.
@@ -101,6 +100,9 @@ def load_feature_datasets(
     if not isinstance(datasets, dict):
         raise ValueError(f"expected a dictionary in '{datakey}': '{filename}'")
 
+    if len(datasets) <= 1:
+        raise ValueError(f"dataset does not have sufficients classes: {len(datasets)}")
+
     descrs = data["descrs"]
     if descrs.ndim == 0:
         descrs = descrs[()]
@@ -109,41 +111,23 @@ def load_feature_datasets(
     if xp is None:
         xp = array_api_compat.array_namespace(np.array([0]))
 
-    label_names = tuple(datasets)
-    arrays: list[Array2D[np.floating[Any]]] = []
-    labels: list[Array1D[np.integer[Any]]] = []
+    xs: list[Array2D[np.floating[Any]]] = []
+    for name, x in datasets.items():
+        if x.ndim != 2:
+            raise ValueError(f"expected a 2d array for class '{name}': {x.shape}")
 
-    for i, name in enumerate(label_names):
-        array = datasets[name]
-        if array.ndim != 2:
-            raise ValueError(f"expected a 2d array for class '{name}': {array.shape}")
+        if xs and x.shape[1] != xs[-1].shape[1]:
+            raise ValueError(f"class '{name}' has inconsistent feature size: {x.shape}")
 
-        # drop samples that failed to compute any features
-        if drop_nan:
-            valid = ~np.any(np.isnan(array), axis=1)
-            if not np.all(valid):
-                log.info(
-                    "Dropping %d samples with missing features from '%s'.",
-                    np.sum(~valid),
-                    name,
-                )
-                array = array[valid]
+        if xs and x.shape[0] != xs[-1].shape[0]:
+            raise ValueError(f"class '{name}' has inconsistent sample size: {x.shape}")
 
-        arrays.append(xp.asarray(array))
-        labels.append(xp.full(array.shape[0], i))
-
-    if not arrays:
-        raise ValueError(f"no classes found in '{filename}'")
-
-    nfeatures = arrays[0].shape[1]
-    if any(a.shape[1] != nfeatures for a in arrays):
-        raise ValueError(f"feature arrays have inconsistent sizes in '{filename}'")
+        xs.append(x)
 
     return FeatureDataset(
-        x=xp.concatenate(arrays, axis=0),
-        labels=xp.concatenate(labels),
-        label_names=label_names,
-        starts=xp.asarray(data["starts"]),
+        x=xp.asarray(np.stack(xs, axis=1), device=device),
+        class_names=tuple(datasets),
+        starts=xp.asarray(data["starts"], device=device),
         descrs=descrs,
     )
 
