@@ -277,6 +277,7 @@ def make_dmd_features(
     resolution: int = 64,
     maxit: int = 128,
     stride: int = 2,
+    full_matrix: bool = False,
 ) -> FeatureDataset:
     # NOTE: the DMD run is pretty slow, so we try to do it on the GPU
     try:  # ruff: ignore[too-many-statements-in-try-clause]
@@ -346,34 +347,41 @@ def make_dmd_features(
     dmd = build_dense_symmetric_dmdc(X1, U, X2, method="ridge")
     G = xp.conj(X1).T @ X1
 
-    G = np.asarray(array_api_compat.to_device(G, "cpu"))
-    A = np.asarray(array_api_compat.to_device(dmd.A, "cpu"))
+    G = np.asarray(array_api_compat.to_device(G, "cpu"), dtype=mat.dtype)
+    A = np.asarray(array_api_compat.to_device(dmd.A, "cpu"), dtype=mat.dtype)
 
-    from threadpoolctl import threadpool_limits
+    if full_matrix:
+        ds = make_matrix_features(A)
+    else:
+        from threadpoolctl import threadpool_limits
 
-    # NOTE: openmp does not seem to help much here, so we turn it off
-    with threadpool_limits(limits=1):
-        eigs, P = np.linalg.eigh(A.T)
+        # NOTE: openmp does not seem to help much here, so we turn it off
+        with threadpool_limits(limits=1):
+            eigs, P = np.linalg.eigh(A.T)
 
-    coeff_energy = np.maximum(np.real(np.sum((np.conj(P).T @ G) * P.T, axis=1)), 0.0)
-    strengths = np.sqrt(coeff_energy)
+        coeff_energy = np.maximum(
+            np.real(np.sum((np.conj(P).T @ G) * P.T, axis=1)), 0.0
+        )
+        strengths = np.sqrt(coeff_energy)
 
-    order = np.argsort(-strengths)
-    strengths = strengths[order] / np.sum(strengths)
+        order = np.argsort(-strengths)
+        strengths = strengths[order] / np.sum(strengths)
 
-    features = np.concatenate([strengths, eigs])
-    starts = np.cumsum([0, strengths.size, eigs.size])
-    descrs = ("DMD Strengths", "DMD Eigs")
+        features = np.concatenate([strengths, eigs])
+        starts = np.cumsum([0, strengths.size, eigs.size])
+        descrs = ("DMD Strengths", "DMD Eigs")
+
+        ds = FeatureDataset(
+            x=features,
+            labels=np.array(0),
+            label_names=(),
+            starts=starts,
+            descrs=descrs,
+        )
 
     # }}}
 
-    return FeatureDataset(
-        x=np.asarray(features, dtype=mat.dtype),
-        labels=np.array(0),
-        label_names=(),
-        starts=starts,
-        descrs=descrs,
-    )
+    return ds
 
 
 # }}}
@@ -386,7 +394,7 @@ def make_fourier_features(
     binary: Array2D[np.integer[Any]],
     bbox: tuple[float, float, float, float],
     *,
-    nmodes: int = 128,
+    nmodes: int = 32,
     eps: float = 5.0e-4,
     normalize: bool = True,
 ) -> FeatureDataset:
