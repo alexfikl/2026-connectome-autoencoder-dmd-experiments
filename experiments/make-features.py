@@ -388,6 +388,7 @@ def make_fourier_features(
     *,
     nmodes: int = 128,
     eps: float = 5.0e-4,
+    normalize: bool = True,
 ) -> FeatureDataset:
     import cv2  # ty: ignore[unresolved-import]
 
@@ -423,24 +424,37 @@ def make_fourier_features(
     )
 
     # 4. Fourier descriptors
-    # NOTE: we keep the scale (i.e. we do not normalize the contour), since the
-    # size of the fractal is by far its most discriminative property. The
-    # (constant) zero frequency and the first harmonic are dropped.
-    zhat = np.fft.fft(z - np.mean(z))
-    fourier = np.abs(zhat[2:])
+    z = z - np.mean(z)
+    if normalize:
+        scale = np.sqrt(np.mean(np.abs(z) ** 2))
+        if scale < 1.0e-12:
+            scale = 1.0
+        z = z / scale
+
+    fourier = np.abs(np.fft.fft(z)[2:])
 
     # 5. shape and moment descriptors of the region
     area = cv2.contourArea(c)
     (_bx, _by, bw, bh) = cv2.boundingRect(c)
     hull_area = max(cv2.contourArea(cv2.convexHull(c)), 1.0e-12)
-    morphology = np.array([
-        np.log1p(area),
-        np.log1p(perimeter),
-        4.0 * np.pi * area / max(perimeter**2, 1.0e-12),
-        bw / max(bh, 1),
-        area / hull_area,
-        area / max(bw * bh, 1),
-    ])
+
+    circularity = 4.0 * np.pi * area / max(perimeter**2, 1.0e-12)
+    aspect = bw / max(bh, 1)
+    solidity = area / hull_area
+    extent = area / max(bw * bh, 1)
+
+    if normalize:
+        # NOTE: drop the absolute size and keep only scale invariant ratios
+        morphology = np.array([circularity, aspect, solidity, extent])
+    else:
+        morphology = np.array([
+            np.log1p(area),
+            np.log1p(perimeter),
+            circularity,
+            aspect,
+            solidity,
+            extent,
+        ])
 
     moments = cv2.moments((binary == 0).astype(np.uint8), binaryImage=True)
     hu = np.asarray(cv2.HuMoments(moments)).ravel()
