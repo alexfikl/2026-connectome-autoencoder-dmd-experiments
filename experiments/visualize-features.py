@@ -161,8 +161,14 @@ def plot_embedding(
     *,
     overwrite: bool = False,
 ) -> None:
-    silhouette = compute_silhouette(coords, ds.labels)
+    nclasses = len(ds.class_names)
+    nsubjects = coords.shape[0] // nclasses
+    labels = np.tile(np.arange(nclasses), nsubjects)
+
+    silhouette = compute_silhouette(coords, labels)
     log.info("    Silhouette: %.3f", silhouette)
+
+    coords = np.reshape(coords, (nsubjects, nclasses, coords.shape[-1]))
 
     with figure(
         basename.with_stem(f"{basename.stem}-embedding-{method}"),
@@ -171,10 +177,9 @@ def plot_embedding(
     ) as fig:
         ax = fig.gca()
 
-        for i, name in enumerate(ds.label_names):
+        for i, name in enumerate(ds.class_names):
             label = name.split("_")[0]
-            mask = ds.labels == i
-            ax.scatter(coords[mask, 0], coords[mask, 1], s=18, alpha=0.75, label=label)
+            ax.scatter(coords[:, i, 0], coords[:, i, 1], s=18, alpha=0.75, label=label)
 
         ax.set_xlabel("Component 1")
         ax.set_ylabel("Component 2")
@@ -195,39 +200,23 @@ def make_baseline_contrast(
 ) -> FeatureDataset:
     """Subtract the subject-matched baseline from all other classes.
 
-    Assumes all classes have matching sample ordering (row j is subject j).
     The baseline class itself is dropped from the returned dataset.
     """
-    if baseline_label not in ds.label_names:
-        raise ValueError(f"baseline '{baseline_label}' not in {ds.label_names}")
+    if baseline_label not in ds.class_names:
+        raise ValueError(f"baseline '{baseline_label}' not in {ds.class_names}")
 
-    baseline_idx = ds.label_names.index(baseline_label)
-    baseline_mask = ds.labels == baseline_idx
-    baseline_x = ds.x[baseline_mask]
+    baseline_idx = ds.class_names.index(baseline_label)
 
-    arrays = []
-    labels = []
-    label_names = []
+    x = ds.x - ds.x[:, baseline_idx : baseline_idx + 1, :]
+    x = np.delete(x, baseline_idx, axis=1)
 
-    for i, label_name in enumerate(ds.label_names):
-        if i == baseline_idx:
-            continue
-
-        mask = ds.labels == i
-        task_x = ds.x[mask]
-        if task_x.shape[0] != baseline_x.shape[0]:
-            raise ValueError(
-                f"sample count mismatch: {task_x.shape[0]} vs {baseline_x.shape[0]}"
-            )
-
-        arrays.append(task_x - baseline_x)
-        labels.append(np.full(task_x.shape[0], len(label_names)))
-        label_names.append(label_name)
+    class_names = tuple(
+        name for i, name in enumerate(ds.class_names) if i != baseline_idx
+    )
 
     return FeatureDataset(
-        x=np.concatenate(arrays, axis=0),
-        labels=np.concatenate(labels),
-        label_names=tuple(label_names),
+        x=x,
+        class_names=class_names,
         starts=ds.starts,
         descrs=ds.descrs,
     )
@@ -274,18 +263,22 @@ def main(
             ds = make_baseline_contrast(ds, baseline_label=baseline)
 
         x = ds.x
-        keep = np.var(x, axis=0) > eps
+        keep = np.var(x, axis=(0, 1)) > eps
         if not np.all(keep):
             log.info("Dropping %d constant features.", np.sum(~keep))
-            x = x[:, keep]
+            x = x[:, :, keep]
 
+        nsubjects, nclasses, nfeatures = x.shape
         log.info(
             "Features '%s': %d samples, %d features, %d classes.",
             filename.stem,
-            x.shape[0],
-            x.shape[1],
-            len(ds.label_names),
+            nsubjects * nclasses,
+            nfeatures,
+            nclasses,
         )
+
+        # flatten the (subjects, classes, features) tensor for the embeddings
+        x = np.reshape(x, (nsubjects * nclasses, nfeatures))
 
         if standardize_features:
             x = zscore(x, ddof=1)
