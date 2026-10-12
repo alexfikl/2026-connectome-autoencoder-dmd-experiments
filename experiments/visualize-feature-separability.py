@@ -10,7 +10,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from commonlib import FeatureDataset, load_feature_datasets, make_class_labels
+from commonlib import FeatureDataset, load_feature_datasets
 from nneuroutil.helpers import module_logger
 from nneuroutil.typing import Array1D, Array2D, Array3D
 from nneuroutil.visualization import figure, make_colorbar_axes
@@ -106,8 +106,8 @@ class LdaResults(NamedTuple):
 
 
 def compute_supervised_lda(
-    x: Array2D[np.floating[Any]],
-    labels: Array1D[np.integer[Any]],
+    x: Array3D[np.floating[Any]],
+    labels: Array3D[np.integer[Any]],
     *,
     pca_max_components: int = 50,
     random_state: int = 42,
@@ -116,12 +116,15 @@ def compute_supervised_lda(
     from sklearn.decomposition import PCA
     from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 
-    nclasses = len(np.unique(labels))
-    max_components = min(nclasses - 1, x.shape[1])
+    nsamples, nclasses, nfeatures = x.shape
+    x = np.reshape(x, (nsamples * nclasses, nfeatures))
+    labels = np.reshape(labels, -1)
+
+    max_components = min(nclasses - 1, nfeatures)
 
     # When features exceed samples, project with PCA first to avoid singular Sw
-    if x.shape[1] > x.shape[0] - nclasses:
-        pca_dim = min(pca_max_components, x.shape[0] - nclasses, x.shape[1])
+    if nfeatures > x.shape[0] - nclasses:
+        pca_dim = min(pca_max_components, x.shape[0] - nclasses, nfeatures)
         pca = PCA(n_components=pca_dim, random_state=random_state)
         x_in = pca.fit_transform(x)
     else:
@@ -144,8 +147,8 @@ class DecodingResults(NamedTuple):
 
 
 def compute_cross_validated_decoding(
-    x: Array2D[np.floating[Any]],
-    labels: Array1D[np.integer[Any]],
+    x: Array3D[np.floating[Any]],
+    labels: Array3D[np.integer[Any]],
     *,
     cv_folds: int = 5,
     random_state: int = 42,
@@ -154,6 +157,10 @@ def compute_cross_validated_decoding(
     from sklearn.linear_model import RidgeClassifier
     from sklearn.metrics import confusion_matrix
     from sklearn.model_selection import StratifiedKFold, cross_val_predict
+
+    nsamples, nclasses, nfeatures = x.shape
+    x = np.reshape(x, (nsamples * nclasses, nfeatures))
+    labels = np.reshape(labels, -1)
 
     clf = RidgeClassifier(alpha=1.0)
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
@@ -231,33 +238,6 @@ def compute_task_subject_variance(
         eta2_task=eta2_task,
         eta2_subject=eta2_subject,
         ratio=ratio,
-    )
-
-
-def make_baseline_contrast(
-    ds: FeatureDataset,
-    *,
-    baseline_label: str = "Rest_LR_Task",
-) -> FeatureDataset:
-    """Subtract the subject-matched baseline from all other classes."""
-    if baseline_label not in ds.class_names:
-        raise ValueError(f"baseline '{baseline_label}' not in {ds.class_names}")
-
-    baseline_idx = ds.class_names.index(baseline_label)
-
-    x = ds.x - ds.x[:, baseline_idx : baseline_idx + 1, :]
-    x = np.delete(x, baseline_idx, axis=1)
-
-    class_names = tuple(
-        name for i, name in enumerate(ds.class_names) if i != baseline_idx
-    )
-
-    return FeatureDataset(
-        x=x,
-        labels=make_class_labels(x),
-        class_names=class_names,
-        starts=ds.starts,
-        descrs=ds.descrs,
     )
 
 
@@ -590,7 +570,6 @@ def main(
     filenames: Sequence[pathlib.Path],
     *,
     outfile: pathlib.Path | None = None,
-    baseline: str | None = None,
     cv_folds: int = 5,
     overwrite: bool = False,
 ) -> int:
@@ -609,13 +588,12 @@ def main(
             ret = 1
             continue
 
-        suffix = f"-contrast-{clean_label(baseline)}" if baseline is not None else ""
         if outfile is None:
-            basename = filename.with_stem(f"{filename.stem}{suffix}").with_suffix("")
+            basename = filename.with_suffix("")
         elif len(filenames) == 1:
-            basename = outfile.with_stem(f"{outfile.stem}{suffix}").with_suffix("")
+            basename = outfile.with_suffix("")
         else:
-            basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}{suffix}")
+            basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}")
 
         nsubjects, nclasses, nfeatures = ds.x.shape
         log.info(
@@ -626,22 +604,7 @@ def main(
             nclasses,
         )
 
-        # compute task vs subject decomposition on uncontrasted repeated-measures
-        var_decomp = compute_task_subject_variance(ds.x) if baseline is None else None
-
-        if baseline is not None:
-            ds = make_baseline_contrast(ds, baseline_label=baseline)
-            log.info(
-                "Subtracted baseline '%s': %d samples, %d classes remain.",
-                baseline,
-                ds.x.shape[0],
-                len(ds.class_names),
-            )
-
-        # flatten the (subjects, classes, features) tensor for the flat estimators
-        nsubjects, nclasses, nfeatures = ds.x.shape
-        x = np.reshape(ds.x, (nsubjects * nclasses, nfeatures))
-        labels = np.reshape(ds.labels, -1)
+        var_decomp = compute_task_subject_variance(ds.x)
 
         # 1. RDM
         log.info("Computing Representational Dissimilarity Matrix...")
@@ -650,7 +613,7 @@ def main(
 
         # 2. Supervised LDA
         log.info("Computing supervised Fisher / LDA projection...")
-        lda = compute_supervised_lda(x, labels)
+        lda = compute_supervised_lda(ds.x, ds.labels)
         plot_supervised_lda(basename, lda, ds, overwrite=overwrite)
 
         # 3. Effect sizes
@@ -660,7 +623,7 @@ def main(
 
         # 4. Cross-validated linear decoding
         log.info("Evaluating cross-validated decodability (%d-fold)...", cv_folds)
-        decoding = compute_cross_validated_decoding(x, labels, cv_folds=cv_folds)
+        decoding = compute_cross_validated_decoding(ds.x, ds.labels, cv_folds=cv_folds)
         log.info(
             "Cross-validated balanced accuracy: %.2f%%",
             decoding.overall_accuracy * 100,
@@ -700,12 +663,6 @@ if __name__ == "__main__":
         help="Basename for output files (named '{basename}-XX')",
     )
     parser.add_argument(
-        "--baseline",
-        type=str,
-        default=None,
-        help="Subtract subject-matched baseline condition (e.g. 'Rest_LR_Task')",
-    )
-    parser.add_argument(
         "--cv-folds",
         type=int,
         default=5,
@@ -731,7 +688,6 @@ if __name__ == "__main__":
         main(
             args.filenames,
             outfile=args.outfile,
-            baseline=args.baseline,
             cv_folds=args.cv_folds,
             overwrite=args.force,
         )

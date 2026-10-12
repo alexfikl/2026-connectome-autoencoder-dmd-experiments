@@ -10,7 +10,7 @@ from typing import Any, Literal, get_args
 
 import numpy as np
 
-from commonlib import FeatureDataset, load_feature_datasets, make_class_labels
+from commonlib import FeatureDataset, load_feature_datasets
 from nneuroutil.helpers import module_logger
 from nneuroutil.typing import Array1D, Array2D
 from nneuroutil.visualization import figure
@@ -192,42 +192,11 @@ def plot_embedding(
 # {{{ main
 
 
-def make_baseline_contrast(
-    ds: FeatureDataset,
-    *,
-    baseline_label: str = "Rest_LR_Task",
-) -> FeatureDataset:
-    """Subtract the subject-matched baseline from all other classes.
-
-    The baseline class itself is dropped from the returned dataset.
-    """
-    if baseline_label not in ds.class_names:
-        raise ValueError(f"baseline '{baseline_label}' not in {ds.class_names}")
-
-    baseline_idx = ds.class_names.index(baseline_label)
-
-    x = ds.x - ds.x[:, baseline_idx : baseline_idx + 1, :]
-    x = np.delete(x, baseline_idx, axis=1)
-
-    class_names = tuple(
-        name for i, name in enumerate(ds.class_names) if i != baseline_idx
-    )
-
-    return FeatureDataset(
-        x=x,
-        labels=make_class_labels(x),
-        class_names=class_names,
-        starts=ds.starts,
-        descrs=ds.descrs,
-    )
-
-
 def main(
     filenames: Sequence[pathlib.Path],
     *,
     methods: tuple[EmbeddingMethod, ...] = ("pca", "tsne"),
     outfile: pathlib.Path | None = None,
-    baseline: str | None = None,
     pca_components: int = 50,
     perplexity: float = 30.0,
     standardize_features: bool = False,
@@ -258,9 +227,6 @@ def main(
             basename = outfile.with_stem(f"{outfile.stem}{suffix}").with_suffix("")
         else:
             basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}{suffix}")
-
-        if baseline is not None:
-            ds = make_baseline_contrast(ds, baseline_label=baseline)
 
         x = ds.x
         keep = np.var(x, axis=(0, 1)) > eps
@@ -323,12 +289,6 @@ if __name__ == "__main__":
         help="Embedding method(s) to compute",
     )
     parser.add_argument(
-        "--baseline",
-        type=str,
-        default=None,
-        help="Name of baseline class to subtract per subject (e.g. Rest_LR_Task)",
-    )
-    parser.add_argument(
         "--pca-components",
         type=int,
         default=50,
@@ -377,7 +337,6 @@ if __name__ == "__main__":
             args.filenames,
             methods=tuple(method),
             outfile=args.outfile,
-            baseline=args.baseline,
             pca_components=args.pca_components,
             perplexity=args.perplexity,
             standardize_features=args.standardize,
