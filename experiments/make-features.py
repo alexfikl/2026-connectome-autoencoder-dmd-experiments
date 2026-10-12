@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import random
 from collections.abc import Sequence
 from typing import Any, Literal
 
@@ -109,11 +110,7 @@ def _global_efficiency(distances: Array2D[np.floating[Any]]) -> float:
 def _make_unsigned_graph_features(
     mat: Array2D[np.floating[Any]], *, eps: float = 1.0e-12
 ) -> FeatureDataset:
-    import random
-
     import igraph as ig
-
-    import orbitkit.metrics as okm
 
     ig.set_random_number_generator(random.Random(42))  # ruff: ignore[suspicious-non-cryptographic-random-usage]
 
@@ -127,6 +124,8 @@ def _make_unsigned_graph_features(
     features = []
     starts = [0]
     descrs = []
+
+    import orbitkit.metrics as okm
 
     # Strength: average weighted degree
     features.append(np.mean(okm.compute_weighted_degree(mat)))
@@ -187,21 +186,22 @@ def _make_unsigned_graph_features(
 def make_unsigned_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     fabs = _make_unsigned_graph_features(np.abs(mat))
     fpos = _make_unsigned_graph_features(np.maximum(mat, 0.0))
-    fneg = _make_unsigned_graph_features(np.maximum(-mat, 0.0))
+    # NOTE: these do not apply to the structural graphs
+    # fneg = _make_unsigned_graph_features(np.maximum(-mat, 0.0))
 
     return FeatureDataset(
-        x=np.concatenate([fabs.x, fpos.x, fneg.x]),
+        x=np.concatenate([fabs.x, fpos.x]),
         labels=np.array(0),
         label_names=(),
         starts=np.concatenate([
             fabs.starts,
             fabs.starts[-1] + fpos.starts[1:],
-            fabs.starts[-1] + fpos.starts[-1] + fneg.starts[1:],
+            # fabs.starts[-1] + fpos.starts[-1] + fneg.starts[1:],
         ]),
         descrs=(
             *(f"Abs {name}" for name in fabs.descrs),
             *(f"Pos {name}" for name in fpos.descrs),
-            *(f"Neg {name}" for name in fneg.descrs),
+            # *(f"Neg {name}" for name in fneg.descrs),
         ),
     )
 
@@ -226,8 +226,12 @@ def make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset
     descrs.append("Strength")
 
     # Clustering Coefficient
+    # NOTE: this can become nan sometimes when the node has no neighbors
     features.append(
-        okm.compute_weighted_clustering_coefficient_costantini(mat, variant=6)
+        np.nan_to_num(
+            okm.compute_weighted_clustering_coefficient_costantini(mat, variant=6),
+            nan=0.0,
+        )
     )
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Clustering Coefficient")
@@ -303,10 +307,10 @@ def make_dmd_features(
     # {{{ generate data
 
     # NOTE: complex64 is both smaller and faster -- we need some speed here
-    mat = xp.astype(xp.asarray(mat), xp.complex64)
+    cmat = xp.astype(xp.asarray(mat), xp.complex64)
 
     Z, c = generate_dataset(
-        mat,
+        cmat,
         bbox=bbox,
         resolution=resolution,
         escape_radius=escape_radius,
@@ -364,7 +368,7 @@ def make_dmd_features(
     # }}}
 
     return FeatureDataset(
-        x=np.asarray(features),
+        x=np.asarray(features, dtype=mat.dtype),
         labels=np.array(0),
         label_names=(),
         starts=starts,
@@ -535,6 +539,11 @@ def make_features(
                 # NOTE: ensure the matrix is symmetric (some algorithms need that)
                 mat_i = (mat_i + mat_i.T) / 2.0
 
+            if ftype == "fourier":
+                xmin, xmax, ymin, ymax = data["images_bbox"][i]
+            else:
+                xmin, xmax, ymin, ymax = data["images_bbox"]
+
             try:  # ruff: ignore[too-many-statements-in-try-clause]
                 if ftype == "matrix":
                     features = make_matrix_features(mat_i)
@@ -545,9 +554,8 @@ def make_features(
                 elif ftype == "ugraph":
                     features = make_unsigned_graph_features(mat_i)
                 elif ftype == "dmd":
-                    features = make_dmd_features(mat_i)
+                    features = make_dmd_features(mat_i, bbox=(xmin, xmax, ymin, ymax))
                 elif ftype == "fourier":
-                    xmin, xmax, ymin, ymax = data["images_bbox"][i]
                     features = make_fourier_features(mat_i, (xmin, xmax, ymin, ymax))
                 else:
                     raise ValueError(f"unknown feature type: {ftype!r}")
