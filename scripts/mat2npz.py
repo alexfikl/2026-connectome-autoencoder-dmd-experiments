@@ -60,6 +60,7 @@ def convert_matlab(
     filename: pathlib.Path,
     outfile: pathlib.Path | None = None,
     *,
+    bbox: tuple[float, float, float, float] | None = None,
     mat_variable_names: list[str] | None = None,
     clip: tuple[float, float] | None = None,
     transpose: bool = False,
@@ -90,6 +91,15 @@ def convert_matlab(
     if normalize is not None and normalize not in NORMALIZE_TO_ORD:
         log.error("Unknown normalize value '%s'.", normalize)
         return 1
+
+    if bbox is None:
+        bbox = (-0.04, 0.04, -0.04, 0.04)
+
+    if bbox[0] > bbox[1] or bbox[2] > bbox[3]:
+        raise ValueError(f"'bbox' has incorrect order (xmin, xmax, ymin, ymax): {bbox}")
+
+    if bbox[0] > 0 or bbox[1] < 0 or bbox[2] > 0 or bbox[3] < 0:
+        raise ValueError(f"'bbox' must include origin: {bbox}")
 
     # }}}
 
@@ -169,7 +179,7 @@ def convert_matlab(
 
         result[name] = new_mat
 
-    np.savez(outfile, allow_pickle=True, **result)
+    np.savez(outfile, allow_pickle=True, imagex_bbox=bbox, **result)
     log.info("Saved matries to file: '%s'.", outfile)
 
     return int(bool(ret))
@@ -209,6 +219,13 @@ if __name__ == "__main__":
         "--variable-name",
         action="append",
         help="Name of the variable in the file: 'name[:new_name]'",
+    )
+    parser.add_argument(
+        "--bbox",
+        nargs=4,
+        type=float,
+        default=[-0.04, 0.04, -0.04, 0.04],
+        help="Bounding box for the fractals (xmin, xmax, ymin, ymax)",
     )
     parser.add_argument(
         "-t",
@@ -252,6 +269,7 @@ if __name__ == "__main__":
             args.filename,
             mat_variable_names=args.variable_name,
             outfile=args.outfile,
+            bbox=args.bbox,
             transpose=args.transpose,
             normalize=args.normalize,
             absolute=args.abs,
