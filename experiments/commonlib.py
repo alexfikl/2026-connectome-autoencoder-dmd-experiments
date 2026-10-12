@@ -74,7 +74,6 @@ def load_feature_datasets(
     filename: pathlib.Path,
     *,
     datakey: str = "datasets",
-    drop_nan: bool = True,
     device: Any = None,
     xp: Any = None,
 ) -> FeatureDataset:
@@ -101,7 +100,7 @@ def load_feature_datasets(
         raise ValueError(f"expected a dictionary in '{datakey}': '{filename}'")
 
     if len(datasets) <= 1:
-        raise ValueError(f"dataset does not have sufficients classes: {len(datasets)}")
+        raise ValueError(f"dataset does not have sufficient classes: {len(datasets)}")
 
     descrs = data["descrs"]
     if descrs.ndim == 0:
@@ -121,6 +120,9 @@ def load_feature_datasets(
 
         if xs and x.shape[0] != xs[-1].shape[0]:
             raise ValueError(f"class '{name}' has inconsistent sample size: {x.shape}")
+
+        if not np.all(np.isfinite(x)):
+            raise ValueError(f"class '{name}' contains NaN or inf values")
 
         xs.append(x)
 
