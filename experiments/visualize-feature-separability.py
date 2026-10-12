@@ -11,6 +11,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from commonlib import FeatureDataset, load_feature_datasets
+from nneuroutil.classifier import AnovaScores, compute_anova_scores
 from nneuroutil.helpers import module_logger
 from nneuroutil.typing import Array1D, Array2D, Array3D
 from nneuroutil.visualization import figure, make_colorbar_axes
@@ -37,49 +38,6 @@ EPS = 1.0e-12
 
 
 # {{{ statistics
-
-
-class AnovaScores(NamedTuple):
-    eta2: Array1D[np.floating[Any]]
-    """ANOVA effect size (SS_between / SS_total)."""
-    f_stat: Array1D[np.floating[Any]]
-    """One-way ANOVA F-statistic."""
-
-
-def compute_anova_scores(
-    x: Array3D[np.floating[Any]],
-) -> AnovaScores:
-    """Compute vectorized one-way ANOVA effect sizes and F-statistics."""
-    nsubjects, nclasses, nfeatures = x.shape
-
-    grand_mean = np.mean(x, axis=(0, 1))
-    class_mean = np.mean(x, axis=0)
-
-    ss_total = np.sum((x - grand_mean) ** 2, axis=(0, 1))
-    ss_between = nsubjects * np.sum((class_mean - grand_mean) ** 2, axis=0)
-    ss_within = np.maximum(ss_total - ss_between, 0.0)
-
-    eta2 = np.divide(
-        ss_between,
-        ss_total,
-        out=np.zeros(nfeatures, dtype=x.dtype),
-        where=ss_total > EPS,
-    )
-
-    df_between = max(nclasses - 1, 1)
-    df_within = max(nclasses * (nsubjects - 1), 1)
-
-    ms_between = ss_between / df_between
-    ms_within = ss_within / df_within
-
-    f_stat = np.divide(
-        ms_between,
-        ms_within,
-        out=np.zeros(nfeatures, dtype=x.dtype),
-        where=ms_within > EPS,
-    )
-
-    return AnovaScores(eta2=eta2, f_stat=f_stat)
 
 
 def compute_centroid_rdm(
@@ -618,7 +576,8 @@ def main(
 
         # 3. Effect sizes
         log.info("Computing vectorized ANOVA effect sizes...")
-        scores = compute_anova_scores(ds.x)
+        features = [ds.x[:, i, :] for i in range(nclasses)]
+        scores = compute_anova_scores(features, eps=EPS)
         plot_effect_size_dist(basename, scores, overwrite=overwrite)
 
         # 4. Cross-validated linear decoding

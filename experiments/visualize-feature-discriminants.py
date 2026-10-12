@@ -11,6 +11,7 @@ from typing import Any, Literal, NamedTuple
 import numpy as np
 
 from commonlib import FeatureDataset, load_feature_datasets
+from nneuroutil.classifier import compute_anova_scores
 from nneuroutil.helpers import module_logger
 from nneuroutil.typing import Array1D, Array2D
 from nneuroutil.visualization import figure, make_colorbar_axes
@@ -62,9 +63,8 @@ def compute_scores(
     random_state: int = 42,
 ) -> Scores:
     """Compute per-feature discriminant scores."""
-    from sklearn.feature_selection import f_classif, mutual_info_classif
+    from sklearn.feature_selection import mutual_info_classif
 
-    nfeatures = x.shape[1]
     classes = np.unique(labels)
 
     mi = np.mean(
@@ -79,29 +79,11 @@ def compute_scores(
     h_labels = label_entropy(labels)
     nmi = mi / h_labels if h_labels > 0.0 else mi
 
-    # one-way ANOVA decomposition: SS_between / SS_total and the F statistic
-    grand_mean = np.mean(x, axis=0)
-    ss_total = np.sum((x - grand_mean) ** 2, axis=0)
-    ss_between = np.zeros(nfeatures)
-    for c in classes:
-        mask = labels == c
-        ss_between += np.sum(mask) * (np.mean(x[mask], axis=0) - grand_mean) ** 2
+    # one-way ANOVA effect size (SS_between / SS_total) and F statistic
+    features = [x[labels == c] for c in classes]
+    anova = compute_anova_scores(features, eps=eps, xp=np)
 
-    eta2 = np.divide(
-        ss_between,
-        ss_total,
-        out=np.zeros(nfeatures),
-        where=ss_total > eps,
-    )
-
-    f_stat = np.full(nfeatures, np.nan)
-    try:
-        f_stat, _ = f_classif(x, labels)
-        f_stat = np.nan_to_num(f_stat, nan=0.0, posinf=0.0)
-    except Exception as exc:
-        log.error("Failed to compute feature stats: %s.", exc)
-
-    return Scores(nmi=nmi, eta2=eta2, f=f_stat)
+    return Scores(nmi=nmi, eta2=anova.eta2, f=anova.f_stat)
 
 
 def expand_groups(
