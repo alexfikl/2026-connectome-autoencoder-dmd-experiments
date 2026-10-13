@@ -108,7 +108,23 @@ dataset:
     @just mat2npz data/Rest_LR_Task.mat
     @just mat2npz data/Social_LR_Task.mat
     @just mat2npz data/WM_LR_Task.mat
-    @just mat2npz data/Structural_LR_Task.mat \
+    @just mat2npz data/Structural_LR.mat \
         --normalize 'max' --bbox '-1.0' '0.3' '-0.65' '0.65'
+
+[private]
+make_features name *FILES:
+    {{ PYTHON }} experiments/make-features.py --force \
+        --outfile data/dataset-features-{{ name }}.npz \
+        --features {{ name }} \
+        {{ FILES }}
+
+[doc("Construct all features")]
+features:
+    @just make_features matrix data/*_LR_*.npz data/Structural_LR.npz
+    @just make_features eig data/*_LR_*.npz data/Structural_LR.npz
+    @just make_features ugraph data/*_LR_*.npz data/Structural_LR.npz
+    @just make_features sgraph data/*_LR_*.npz data/Structural_LR.npz
+    @just make_features dmd data/*_LR_*.npz data/Structural_LR.npz
+    @just make_features fourier data/task-*-fractal.npz data/structural-fractal.npz
 
 # }}}
