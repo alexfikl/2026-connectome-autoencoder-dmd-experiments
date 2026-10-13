@@ -546,12 +546,13 @@ def main(
             ret = 1
             continue
 
+        suffix = ""
         if outfile is None:
-            basename = filename.with_suffix("")
+            basename = filename.with_stem(f"{filename.stem}{suffix}").with_suffix("")
         elif len(filenames) == 1:
-            basename = outfile.with_suffix("")
+            basename = outfile.with_stem(f"{outfile.stem}{suffix}").with_suffix("")
         else:
-            basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}")
+            basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}{suffix}")
 
         nsubjects, nclasses, nfeatures = ds.x.shape
         log.info(
