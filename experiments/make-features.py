@@ -582,18 +582,33 @@ def make_features(
         if ftype == "fourier":
             result = matrices
         else:
+            # NOTE: ensure no self-connections in any matrix of the batch
             mat = np.array(matrices, copy=True)
-            np.fill_diagonal(mat, 0.0)
+            rows, cols = np.diag_indices(mat.shape[-1])
+            mat[:, rows, cols] = 0.0
 
-            amat = np.abs(mat)
-            valid = amat > eps
-            if density is not None and np.any(valid):
-                cutoff = np.quantile(amat[valid], 1 - density)
-                mat = np.where(amat > cutoff, mat, 0.0)
+            if density is not None:
+                # NOTE: the proportional threshold is applied to each matrix
+                # separately (i.e. cost matching), keeping the top 'density'
+                # fraction of its weights
+                amat = np.abs(mat)
+                irows, icols = np.triu_indices(amat.shape[-1], k=1)
 
-            return (mat + mat.T) / 2.0
+                values = amat[:, irows, icols]
+                with np.errstate(all="ignore"):
+                    cutoff = np.nanquantile(
+                        np.where(values > feps, values, np.nan),
+                        1.0 - density,
+                        axis=1,
+                    )
 
-        assert filename.stem not in matrices
+                cutoff = np.where(np.isnan(cutoff), np.inf, cutoff)
+                mat = np.where(amat > cutoff[:, None, None], mat, 0.0)
+
+            # NOTE: symmetrize each matrix (swap the last two axes only)
+            result = (mat + np.swapaxes(mat, -1, -2)) / 2.0
+
+        assert filename.stem not in inputs
         inputs[filename.stem] = result
 
     # }}}
