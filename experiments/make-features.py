@@ -224,18 +224,35 @@ def make_unsigned_graph_features(
 # {{{ make_signed_graph_features
 
 
-def make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
+def _community_block_means(
+    c: Communities, mat: Array2D[np.floating[Any]]
+) -> Array2D[np.floating[Any]]:
+    """Average a matrix over each pair of communities."""
+    n, _ = mat.shape
+    membership = np.zeros((c.size, n), dtype=mat.dtype)
+    membership[c.indices, np.arange(n)] = 1.0
+
+    counts = np.outer(c.counts, c.counts).astype(mat.dtype)
+    counts[np.diag_indices(c.size)] = c.counts * (c.counts - 1)
+
+    means = membership @ mat @ membership.T
+    return np.where(counts > 0, means / np.maximum(counts, 1), 0.0)
+
+
+def make_signed_graph_features(
+    mat: Array2D[np.floating[Any]], communities: Communities
+) -> FeatureDataset:
     import orbitkit.metrics as okm
-    from orbitkit.clusters import signed_leiden_communities
 
     features = []
     starts = [0]
     descrs = []
 
-    # Strength
-    features.append(okm.compute_weighted_degree(mat))
+    # Block Connectivity: average the matrix over each pair of communities
+    block = _community_block_means(communities, mat)
+    features.append(block[np.triu_indices(communities.size)])
     starts.append(starts[-1] + np.size(features[-1]))
-    descrs.append("Strength")
+    descrs.append("Block Connectivity")
 
     # Clustering Coefficient
     # NOTE: this can become nan sometimes when the node has no neighbors
@@ -261,8 +278,11 @@ def make_signed_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset
     descrs.append("Eigenvector Centrality")
 
     # Modularity
-    communities = signed_leiden_communities(mat)
-    features.append(np.array(okm.compute_modularity(mat, communities)))
+    cs = tuple(
+        set(np.where(communities.indices == k)[0].tolist())
+        for k in range(communities.size)
+    )
+    features.append(np.array(okm.compute_modularity(mat, cs)))
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Modularity")
 
@@ -620,7 +640,7 @@ def make_features(
     # {{{ compute communities
 
     coms = None
-    if ftype == "ugraph":
+    if ftype in {"ugraph", "sgraph"}:
         log.info("Computing the shared community template.")
         coms = make_template_communities(
             inputs,
@@ -656,7 +676,8 @@ def make_features(
                 elif ftype == "eig":
                     features = make_eig_features(mat_i)
                 elif ftype == "sgraph":
-                    features = make_signed_graph_features(mat_i)
+                    assert coms is not None
+                    features = make_signed_graph_features(mat_i, coms)
                 elif ftype == "ugraph":
                     assert coms is not None
                     features = make_unsigned_graph_features(mat_i, communities=coms)
@@ -669,7 +690,7 @@ def make_features(
             except Exception as exc:
                 log.error(
                     "Failed to compute features for '%s' sample %d: %s",
-                    filename,
+                    name,
                     i,
                     exc,
                 )
@@ -688,8 +709,8 @@ def make_features(
 
             result[i] = features.x
 
-        assert filename.stem not in datasets
-        datasets[filename.stem] = result
+        assert name not in datasets
+        datasets[name] = result
 
     # }}}
 
