@@ -5,13 +5,15 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Literal, cast, get_args
+from typing import Any, Literal, cast, get_args
 
+import numpy as np
 import torch
 
 from commonlib import load_feature_datasets
 from nneuroutil.helpers import FuzzyChoiceAction, module_logger
 from nneuroutil.torch_extras import available_device_names, torch_default_device
+from nneuroutil.visualization import figure, make_colorbar_axes
 
 log = module_logger("lib.autoencoder_network")
 
@@ -27,10 +29,71 @@ Example:
 ClassificationMethod = Literal["lda", "svm", "mlp"]
 
 
+# {{{ plot_confusion
+
+
+def plot_confusion(
+    basename: pathlib.Path,
+    y_pred: list[Any],
+    class_names: tuple[str, ...],
+    *,
+    method: str,
+    overwrite: bool = False,
+) -> None:
+    """Plot the per-class confusion matrix of the test predictions."""
+    nclasses = len(class_names)
+    cm = np.zeros((nclasses, nclasses), dtype=int)
+    for i, pred in enumerate(y_pred):
+        for p in pred.tolist():
+            cm[i, int(p)] += 1
+
+    accuracy = float(np.trace(cm)) / max(int(np.sum(cm)), 1)
+    vmax = max(int(np.max(cm)), 1)
+
+    with figure(
+        basename.with_stem(f"{basename.stem}-confusion-{method}"),
+        figsize=(8, 7),
+        overwrite=overwrite,
+    ) as fig:
+        ax = fig.gca()
+        ax.grid(visible=False)
+
+        im = ax.imshow(cm, cmap="Blues", vmin=0, vmax=vmax)
+        ax.set_xticks(range(nclasses))
+        ax.set_yticks(range(nclasses))
+        ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize="medium")
+        ax.set_yticklabels(class_names, fontsize="medium")
+        ax.set_xlabel("Predicted task")
+        ax.set_ylabel("True task")
+        ax.set_title(rf"{method.upper()} (accuracy ${accuracy:.3f}$)")
+
+        for i in range(nclasses):
+            for j in range(nclasses):
+                if cm[i, j] == 0:
+                    continue
+
+                color = "white" if cm[i, j] > 0.5 * vmax else "black"
+                ax.text(
+                    j,
+                    i,
+                    str(cm[i, j]),
+                    ha="center",
+                    va="center",
+                    color=color,
+                    fontsize="small",
+                )
+
+        fig.colorbar(im, cax=make_colorbar_axes(ax), label="Count")
+
+
+# }}}
+
+
 def main(
     filename: pathlib.Path,
     *,
     method: ClassificationMethod = "svm",
+    standardize_features: bool = False,
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
 ) -> int:
@@ -47,6 +110,8 @@ def main(
     except Exception as exc:
         log.error("Failed to load features from '%s': %s", filename, exc)
         return 1
+
+    basename = filename.with_suffix("") if outfile is None else outfile.with_suffix("")
 
     from nneuroutil.data import random_split
 
@@ -77,6 +142,16 @@ def main(
         x_test.append(x[idx_test])
         y_test.append(label)
 
+    if standardize_features:
+        mean = torch.mean(torch.cat(x_train, dim=0), dim=0)
+        std = torch.std(torch.cat(x_train, dim=0), dim=0)
+        std = torch.where(std > 0.0, std, torch.ones_like(std))
+
+        x_train = [(x - mean) / std for x in x_train]
+        x_test = [(x - mean) / std for x in x_test]
+
+    y_pred: list[Any] = []
+
     if method == "lda":
         from nneuroutil.classifier import classify_linear_discriminant_analysis
 
@@ -93,6 +168,7 @@ def main(
                 x_test_i.shape[0],
                 matched / x_test_i.shape[0] * 100,
             )
+            y_pred.append(y_test_lda)
     elif method == "svm":
         from nneuroutil.classifier import classify_support_vector_machine
 
@@ -109,6 +185,7 @@ def main(
                 x_test_i.shape[0],
                 matched / x_test_i.shape[0] * 100,
             )
+            y_pred.append(y_test_lda)
     elif method == "mlp":
         from torchlib import classify_multilayer_perceptron
 
@@ -127,8 +204,15 @@ def main(
                 x_test_i.shape[0],
                 matched / x_test_i.shape[0] * 100,
             )
+            y_pred.append(y_test_mlp)
     else:
         raise ValueError(f"unknown method: {method!r}")
+
+    class_names = [
+        name.split("_")[0] if "_" in name else name.split("-")[1]
+        for name in ds.class_names
+    ]
+    plot_confusion(basename, y_pred, class_names, method=method, overwrite=overwrite)
 
     return ret
 
@@ -159,6 +243,11 @@ if __name__ == "__main__":
         choices=get_args(ClassificationMethod),
         default="lda",
         help="The method used to do the classification",
+    )
+    parser.add_argument(
+        "--standardize",
+        action="store_true",
+        help="Standardize each feature to zero mean and unit variance",
     )
     parser.add_argument(
         "-o",
@@ -192,6 +281,7 @@ if __name__ == "__main__":
                 args.filename,
                 outfile=args.outfile,
                 method=args.method,
+                standardize_features=args.standardize,
                 overwrite=args.force,
             )
         )
