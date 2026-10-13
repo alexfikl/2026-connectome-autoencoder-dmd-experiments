@@ -511,10 +511,10 @@ def make_template_communities(
     communities = signed_leiden_communities(mat, resolution=resolution, seed=seed)
 
     indices = community_labels(communities, mat.shape[0])
-    ncommunities = np.max(indices)
+    ncommunities = int(np.max(indices)) + 1
     counts = np.bincount(indices, minlength=ncommunities)
 
-    return Communities(size=int(ncommunities), indices=indices, counts=counts)
+    return Communities(size=ncommunities, indices=indices, counts=counts)
 
 
 def make_features(
@@ -547,6 +547,7 @@ def make_features(
 
     ret = 0
     inputs = {}
+    bboxes = {}
 
     for filename in filenames:
         if not filename.exists():
@@ -581,6 +582,7 @@ def make_features(
 
         if ftype == "fourier":
             result = matrices
+            bbox = data["images_bbox"][0]
         else:
             # NOTE: ensure no self-connections in any matrix of the batch
             mat = np.array(matrices, copy=True)
@@ -607,9 +609,11 @@ def make_features(
 
             # NOTE: symmetrize each matrix (swap the last two axes only)
             result = (mat + np.swapaxes(mat, -1, -2)) / 2.0
+            bbox = data["images_bbox"]
 
         assert filename.stem not in inputs
         inputs[filename.stem] = result
+        bboxes[filename.stem] = bbox
 
     # }}}
 
@@ -628,7 +632,7 @@ def make_features(
             log.error("Could not compute a community template from the given files.")
             return 1
 
-        log.info("Template has %d communities.", coms.size + 1)
+        log.info("Template has %d communities.", coms.size)
 
     # }}}
 
@@ -644,10 +648,7 @@ def make_features(
 
         for i in range(nsamples):
             mat_i = matrices[i]
-            if ftype == "fourier":
-                xmin, xmax, ymin, ymax = data["images_bbox"][i]
-            else:
-                xmin, xmax, ymin, ymax = data["images_bbox"]
+            xmin, xmax, ymin, ymax = bboxes[name]
 
             try:  # ruff: ignore[too-many-statements-in-try-clause]
                 if ftype == "matrix":
