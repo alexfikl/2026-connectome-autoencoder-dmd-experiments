@@ -181,19 +181,19 @@ def make_unsigned_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDatas
     fabs = _make_unsigned_graph_features(np.abs(mat))
     fpos = _make_unsigned_graph_features(np.maximum(mat, 0.0))
     # NOTE: these do not apply to the structural graphs
-    # fneg = _make_unsigned_graph_features(np.maximum(-mat, 0.0))
+    fneg = _make_unsigned_graph_features(np.maximum(-mat, 0.0))
 
     return FeatureDataset(
-        x=np.concatenate([fabs.x, fpos.x]),
+        x=np.concatenate([fabs.x, fpos.x, np.nan_to_num(fneg.x)]),
         starts=np.concatenate([
             fabs.starts,
             fabs.starts[-1] + fpos.starts[1:],
-            # fabs.starts[-1] + fpos.starts[-1] + fneg.starts[1:],
+            fabs.starts[-1] + fpos.starts[-1] + fneg.starts[1:],
         ]),
         descrs=(
             *(f"Abs {name}" for name in fabs.descrs),
             *(f"Pos {name}" for name in fpos.descrs),
-            # *(f"Neg {name}" for name in fneg.descrs),
+            *(f"Neg {name}" for name in fneg.descrs),
         ),
     )
 
