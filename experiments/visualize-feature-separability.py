@@ -68,11 +68,14 @@ def compute_supervised_lda(
     labels: Array3D[np.integer[Any]],
     *,
     pca_max_components: int = 50,
+    standardize: bool = False,
     random_state: int = 42,
 ) -> LdaResults:
     """Compute supervised Linear Discriminant Analysis."""
     from sklearn.decomposition import PCA
     from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
 
     nsamples, nclasses, nfeatures = x.shape
     x = np.reshape(x, (nsamples * nclasses, nfeatures))
@@ -80,17 +83,20 @@ def compute_supervised_lda(
 
     max_components = min(nclasses - 1, nfeatures)
 
+    estimators = []
+    if standardize:
+        estimators.append(StandardScaler())
+
     # When features exceed samples, project with PCA first to avoid singular Sw
     if nfeatures > x.shape[0] - nclasses:
         pca_dim = min(pca_max_components, x.shape[0] - nclasses, nfeatures)
-        pca = PCA(n_components=pca_dim, random_state=random_state)
-        x_in = pca.fit_transform(x)
-    else:
-        x_in = x
+        estimators.append(PCA(n_components=pca_dim, random_state=random_state))
 
-    lda = LinearDiscriminantAnalysis(n_components=max_components)
-    coords = lda.fit_transform(x_in, labels)
-    evr = lda.explained_variance_ratio_
+    estimators.append(LinearDiscriminantAnalysis(n_components=max_components))
+    lda = make_pipeline(*estimators)
+
+    coords = lda.fit_transform(x, labels)
+    evr = lda[-1].explained_variance_ratio_
 
     return LdaResults(coords=coords, explained_variance_ratio=evr)
 
@@ -109,18 +115,25 @@ def compute_cross_validated_decoding(
     labels: Array3D[np.integer[Any]],
     *,
     cv_folds: int = 5,
+    standardize: bool = False,
     random_state: int = 42,
 ) -> DecodingResults:
     """Evaluate linear decodability using cross-validation."""
     from sklearn.linear_model import RidgeClassifier
     from sklearn.metrics import confusion_matrix
     from sklearn.model_selection import StratifiedKFold, cross_val_predict
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
 
     nsamples, nclasses, nfeatures = x.shape
     x = np.reshape(x, (nsamples * nclasses, nfeatures))
     labels = np.reshape(labels, -1)
 
     clf = RidgeClassifier(alpha=1.0)
+    if standardize:
+        # NOTE: the scaler is fit on the training folds only
+        clf = make_pipeline(StandardScaler(), clf)
+
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
     preds = cross_val_predict(clf, x, labels, cv=cv)
 
@@ -529,6 +542,7 @@ def main(
     *,
     outfile: pathlib.Path | None = None,
     cv_folds: int = 5,
+    standardize: bool = False,
     exclude: tuple[str, ...] | None = None,
     overwrite: bool = False,
 ) -> int:
@@ -573,7 +587,7 @@ def main(
 
         # 2. Supervised LDA
         log.info("Computing supervised Fisher / LDA projection...")
-        lda = compute_supervised_lda(ds.x, ds.labels)
+        lda = compute_supervised_lda(ds.x, ds.labels, standardize=standardize)
         plot_supervised_lda(basename, lda, ds, overwrite=overwrite)
 
         # 3. Effect sizes
@@ -584,7 +598,9 @@ def main(
 
         # 4. Cross-validated linear decoding
         log.info("Evaluating cross-validated decodability (%d-fold)...", cv_folds)
-        decoding = compute_cross_validated_decoding(ds.x, ds.labels, cv_folds=cv_folds)
+        decoding = compute_cross_validated_decoding(
+            ds.x, ds.labels, cv_folds=cv_folds, standardize=standardize
+        )
         log.info(
             "Cross-validated balanced accuracy: %.2f%%",
             decoding.overall_accuracy * 100,
@@ -636,6 +652,11 @@ if __name__ == "__main__":
         help="Number of cross-validation folds for decoding",
     )
     parser.add_argument(
+        "--standardize",
+        action="store_true",
+        help="Standardize each feature to zero mean and unit variance",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Force overwrite of existing files",
@@ -656,6 +677,7 @@ if __name__ == "__main__":
             args.filenames,
             outfile=args.outfile,
             cv_folds=args.cv_folds,
+            standardize=args.standardize,
             exclude=args.exclude,
             overwrite=args.force,
         )
