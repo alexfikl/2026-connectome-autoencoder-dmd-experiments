@@ -11,7 +11,6 @@ from typing import Any, Literal, NamedTuple
 import numpy as np
 
 from commonlib import FeatureDataset, load_feature_datasets
-from nneuroutil.classifier import compute_anova_scores
 from nneuroutil.helpers import module_logger
 from nneuroutil.typing import Array1D, Array2D
 from nneuroutil.visualization import figure, make_colorbar_axes
@@ -78,6 +77,8 @@ def compute_scores(
 
     h_labels = label_entropy(labels)
     nmi = mi / h_labels if h_labels > 0.0 else mi
+
+    from nneuroutil.classifier import compute_anova_scores
 
     # one-way ANOVA effect size (SS_between / SS_total) and F statistic
     features = [x[labels == c] for c in classes]
