@@ -7,6 +7,7 @@ import logging
 import pathlib
 import random
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple
 
 import array_api_compat
@@ -37,6 +38,11 @@ Array1D = TypeAliasType(
 Array2D = TypeAliasType(
     "Array2D",
     np.ndarray[tuple[int, int], np.dtype[ScalarTypeT]],
+    type_params=(ScalarTypeT,),
+)
+Array3D = TypeAliasType(
+    "Array3D",
+    np.ndarray[tuple[int, int, int], np.dtype[ScalarTypeT]],
     type_params=(ScalarTypeT,),
 )
 
@@ -106,7 +112,10 @@ def _global_efficiency(distances: Array2D[np.floating[Any]]) -> float:
 
 
 def _make_unsigned_graph_features(
-    mat: Array2D[np.floating[Any]], *, eps: float = 1.0e-12
+    mat: Array2D[np.floating[Any]],
+    communities: Communities,
+    *,
+    eps: float = 1.0e-12,
 ) -> FeatureDataset:
     import igraph as ig
 
@@ -126,17 +135,17 @@ def _make_unsigned_graph_features(
     import orbitkit.metrics as okm
 
     # Strength: average weighted degree
-    features.append(np.mean(okm.compute_weighted_degree(mat)))
+    features.append(communities.mean(okm.compute_weighted_degree(mat)))
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Strength")
 
     # Strength: average excess weighted degree
-    features.append(np.mean(okm.compute_average_excess_strength(mat)))
+    features.append(communities.mean(okm.compute_average_excess_strength(mat)))
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Excess Strength")
 
     # Disparity
-    features.append(np.mean(okm.compute_disparity_serrano(mat)))
+    features.append(communities.mean(okm.compute_disparity_serrano(mat)))
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Disparity")
 
@@ -158,12 +167,22 @@ def _make_unsigned_graph_features(
     descrs.append("Spectral Entropy")
 
     # Eigenvector Centrality
-    features.append(np.std(okm.compute_eigenvector_centrality(mat).score, ddof=1))
+    features.append(communities.mean(okm.compute_eigenvector_centrality(mat).score))
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Eigenvector Centrality")
 
     # Clustering Coefficient
-    features.append(np.mean(okm.compute_weighted_clustering_coefficient_nx(mat)))
+    max_weight = np.max(mat) if mat.size > 0 else 0.0
+    if max_weight > 0.0:
+        wcc = np.nan_to_num(
+            okm.compute_weighted_clustering_coefficient_costantini(
+                mat / max_weight, variant=7
+            )
+        )
+    else:
+        wcc = np.zeros(mat.shape[0])
+
+    features.append(communities.mean(wcc))
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Clustering Coefficient")
 
@@ -173,15 +192,16 @@ def _make_unsigned_graph_features(
     descrs.append("Global Efficiency")
 
     return FeatureDataset(
-        x=np.array(features), starts=np.array(starts), descrs=tuple(descrs)
+        x=np.hstack(features), starts=np.array(starts), descrs=tuple(descrs)
     )
 
 
-def make_unsigned_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
-    fabs = _make_unsigned_graph_features(np.abs(mat))
-    fpos = _make_unsigned_graph_features(np.maximum(mat, 0.0))
-    # NOTE: these do not apply to the structural graphs
-    fneg = _make_unsigned_graph_features(np.maximum(-mat, 0.0))
+def make_unsigned_graph_features(
+    mat: Array2D[np.floating[Any]], communities: Communities
+) -> FeatureDataset:
+    fabs = _make_unsigned_graph_features(np.abs(mat), communities)
+    fpos = _make_unsigned_graph_features(np.maximum(mat, 0.0), communities)
+    fneg = _make_unsigned_graph_features(np.maximum(-mat, 0.0), communities)
 
     return FeatureDataset(
         x=np.concatenate([fabs.x, fpos.x, np.nan_to_num(fneg.x)]),
@@ -461,6 +481,42 @@ def make_fourier_features(
 # }}}
 
 
+@dataclass(frozen=True)
+class Communities:
+    size: int
+    indices: Array1D[np.integer[Any]]
+    counts: Array1D[np.integer[Any]]
+
+    def mean(self, x: Array1D[np.floating[Any]]) -> Array1D[np.floating[Any]]:
+        xm = np.bincount(self.indices, weights=x, minlength=self.size)
+        return xm / np.maximum(self.counts, 1)
+
+
+def make_template_communities(
+    inputs: dict[str, Array3D[np.floating[Any]]],
+    *,
+    resolution: float = 3.0,
+    seed: int = 42,
+) -> Communities | None:
+    from orbitkit.clusters import community_labels, signed_leiden_communities
+
+    if not inputs:
+        return None
+
+    means = []
+    for matrices in inputs.values():
+        means.append(np.mean(matrices, axis=0))
+
+    mat = np.mean(means, axis=0)
+    communities = signed_leiden_communities(mat, resolution=resolution, seed=seed)
+
+    indices = community_labels(communities, mat.shape[0])
+    ncommunities = np.max(indices)
+    counts = np.bincount(indices, minlength=ncommunities)
+
+    return Communities(size=int(ncommunities), indices=indices, counts=counts)
+
+
 def make_features(
     filenames: Sequence[pathlib.Path],
     *,
@@ -469,6 +525,8 @@ def make_features(
     key: str | None = None,
     eps: float | None = None,
     density: float | None = None,
+    community_resolution: float = 3.0,
+    community_seed: int = 42,
     overwrite: bool = False,
 ) -> int:
     if not filenames:
@@ -485,8 +543,10 @@ def make_features(
     if key is None:
         key = "images_binary" if ftype == "fourier" else "matrices"
 
+    # {{{ load matrices
+
     ret = 0
-    datasets = {}
+    inputs = {}
 
     for filename in filenames:
         if not filename.exists():
@@ -519,26 +579,56 @@ def make_features(
             except ValueError:
                 feps = -1.0
 
-        log.info("Gathering '%s' features for '%s'.", ftype, filename)
+        if ftype == "fourier":
+            result = matrices
+        else:
+            mat = np.array(matrices, copy=True)
+            np.fill_diagonal(mat, 0.0)
+
+            amat = np.abs(mat)
+            valid = amat > eps
+            if density is not None and np.any(valid):
+                cutoff = np.quantile(amat[valid], 1 - density)
+                mat = np.where(amat > cutoff, mat, 0.0)
+
+            return (mat + mat.T) / 2.0
+
+        assert filename.stem not in matrices
+        inputs[filename.stem] = result
+
+    # }}}
+
+    # {{{ compute communities
+
+    coms = None
+    if ftype == "ugraph":
+        log.info("Computing the shared community template.")
+        coms = make_template_communities(
+            inputs,
+            resolution=community_resolution,
+            seed=community_seed,
+        )
+
+        if coms is None:
+            log.error("Could not compute a community template from the given files.")
+            return 1
+
+        log.info("Template has %d communities.", coms.size + 1)
+
+    # }}}
+
+    # {{{ compute features
+
+    datasets = {}
+
+    for name, matrices in inputs.items():
+        log.info("Gathering '%s' features for '%s'.", ftype, name)
 
         nsamples, _, _ = matrices.shape
         result: Array2D | None = None
 
         for i in range(nsamples):
-            # ensure no self-connections
-            mat_i = matrices[i].copy()
-            if ftype != "fourier":
-                np.fill_diagonal(mat_i, 0.0)
-
-                # thresholding
-                amat_i = np.abs(mat_i)
-                if density is not None:
-                    cutoff = np.quantile(amat_i[amat_i > feps], 1 - density)
-                    mat_i = np.where(amat_i > cutoff, mat_i, 0.0)
-
-                # NOTE: ensure the matrix is symmetric (some algorithms need that)
-                mat_i = (mat_i + mat_i.T) / 2.0
-
+            mat_i = matrices[i]
             if ftype == "fourier":
                 xmin, xmax, ymin, ymax = data["images_bbox"][i]
             else:
@@ -552,7 +642,8 @@ def make_features(
                 elif ftype == "sgraph":
                     features = make_signed_graph_features(mat_i)
                 elif ftype == "ugraph":
-                    features = make_unsigned_graph_features(mat_i)
+                    assert coms is not None
+                    features = make_unsigned_graph_features(mat_i, communities=coms)
                 elif ftype == "dmd":
                     features = make_dmd_features(mat_i, bbox=(xmin, xmax, ymin, ymax))
                 elif ftype == "fourier":
@@ -583,6 +674,8 @@ def make_features(
 
         assert filename.stem not in datasets
         datasets[filename.stem] = result
+
+    # }}}
 
     np.savez(
         outfile,
