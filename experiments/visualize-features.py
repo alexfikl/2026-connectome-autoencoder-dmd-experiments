@@ -201,6 +201,7 @@ def main(
     perplexity: float = 30.0,
     standardize_features: bool = False,
     eps: float = 1.0e-12,
+    exclude: tuple[str, ...] | None = None,
     overwrite: bool = False,
 ) -> int:
     from scipy.stats import zscore
@@ -214,7 +215,7 @@ def main(
             continue
 
         try:
-            ds = load_feature_datasets(filename)
+            ds = load_feature_datasets(filename, exclude=exclude)
         except Exception as exc:
             log.error("Failed to load features from '%s': %s", filename, exc)
             ret = 1
@@ -289,6 +290,12 @@ if __name__ == "__main__":
         help="Embedding method(s) to compute",
     )
     parser.add_argument(
+        "--exclude",
+        action="append",
+        default=None,
+        help="Classes to exclude from the visualization",
+    )
+    parser.add_argument(
         "--pca-components",
         type=int,
         default=50,
@@ -340,6 +347,7 @@ if __name__ == "__main__":
             pca_components=args.pca_components,
             perplexity=args.perplexity,
             standardize_features=args.standardize,
+            exclude=args.exclude,
             overwrite=args.force,
         )
     )
