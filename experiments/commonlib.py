@@ -88,6 +88,7 @@ def make_class_labels(
 def load_feature_datasets(
     filename: pathlib.Path,
     *,
+    exclude: tuple[str, ...] | None = None,
     datakey: str = "datasets",
     device: Any = None,
     xp: Any = None,
@@ -117,6 +118,10 @@ def load_feature_datasets(
     if len(datasets) <= 1:
         raise ValueError(f"dataset does not have sufficient classes: {len(datasets)}")
 
+    if exclude is None:
+        exclude = ()
+    excludes = set(exclude)
+
     descrs = data["descrs"]
     if descrs.ndim == 0:
         descrs = descrs[()]
@@ -125,8 +130,12 @@ def load_feature_datasets(
     if xp is None:
         xp = array_api_compat.array_namespace(np.array([0]))
 
+    classes = []
     xs: list[Array2D[np.floating[Any]]] = []
     for name, x in datasets.items():
+        if name in excludes:
+            continue
+
         if x.ndim != 2:
             raise ValueError(f"expected a 2d array for class '{name}': {x.shape}")
 
@@ -140,14 +149,15 @@ def load_feature_datasets(
             raise ValueError(f"class '{name}' contains NaN or inf values")
 
         xs.append(x)
+        classes.append(name)
 
     x = xp.asarray(np.stack(xs, axis=1), device=device)
     return FeatureDataset(
         x=x,
         labels=make_class_labels(x),
-        class_names=tuple(datasets),
+        class_names=tuple(classes),
         starts=xp.asarray(data["starts"], device=device),
-        descrs=descrs,
+        descrs=tuple(descrs),
     )
 
 
