@@ -264,6 +264,7 @@ def main(
     outfile: pathlib.Path | None = None,
     top_k: int = 30,
     mi_seeds: int = 32,
+    exclude: tuple[str, ...] | None = None,
     overwrite: bool = False,
 ) -> int:
     ret = 0
@@ -275,7 +276,7 @@ def main(
             continue
 
         try:
-            ds = load_feature_datasets(filename)
+            ds = load_feature_datasets(filename, exclude=exclude)
         except Exception as exc:
             log.error("Failed to load features from '%s': %s", filename, exc)
             ret = 1
@@ -382,6 +383,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("filenames", nargs="+", type=pathlib.Path)
     parser.add_argument(
+        "--exclude",
+        action="append",
+        default=None,
+        help="Classes to exclude from the visualization",
+    )
+    parser.add_argument(
         "--top-k",
         type=int,
         default=30,
@@ -422,6 +429,7 @@ if __name__ == "__main__":
             outfile=args.outfile,
             top_k=args.top_k,
             mi_seeds=args.mi_seeds,
+            exclude=args.exclude,
             overwrite=args.force,
         )
     )

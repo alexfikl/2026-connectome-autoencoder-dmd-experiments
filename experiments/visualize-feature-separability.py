@@ -529,6 +529,7 @@ def main(
     *,
     outfile: pathlib.Path | None = None,
     cv_folds: int = 5,
+    exclude: tuple[str, ...] | None = None,
     overwrite: bool = False,
 ) -> int:
     ret = 0
@@ -540,7 +541,7 @@ def main(
             continue
 
         try:
-            ds = load_feature_datasets(filename)
+            ds = load_feature_datasets(filename, exclude=exclude)
         except Exception as exc:
             log.error("Failed to load features from '%s': %s", filename, exc)
             ret = 1
@@ -616,6 +617,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("filenames", nargs="+", type=pathlib.Path)
     parser.add_argument(
+        "--exclude",
+        action="append",
+        default=None,
+        help="Classes to exclude from the visualization",
+    )
+    parser.add_argument(
         "-o",
         "--outfile",
         type=pathlib.Path,
@@ -649,6 +656,7 @@ if __name__ == "__main__":
             args.filenames,
             outfile=args.outfile,
             cv_folds=args.cv_folds,
+            exclude=args.exclude,
             overwrite=args.force,
         )
     )
