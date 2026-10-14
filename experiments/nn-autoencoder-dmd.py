@@ -309,6 +309,7 @@ class DMDAutoencoder(nn.Module):
         assert dmd.B.shape == (self.control_size, r)
         return cast("torch.Tensor", dmd.A), cast("torch.Tensor", dmd.B)
 
+    # ty: ignore[invalid-mutable-override]
     def forward(self, x_in: torch.Tensor, c_in: torch.Tensor) -> DMDAutoencoderResult:
         r = self.latent_size
         batch_size, window_size = x_in.shape[:2]
@@ -427,6 +428,7 @@ class DMDLoss(nn.Module):
     def dim(self) -> int:
         return 4
 
+    # ty: ignore[invalid-mutable-override]
     def forward(
         self,
         x_in: torch.Tensor,

@@ -130,6 +130,7 @@ class Autoencoder(nn.Module):
 
         # }}}
 
+    # ty: ignore[invalid-mutable-override]
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.decoder(self.encoder(x))
 
