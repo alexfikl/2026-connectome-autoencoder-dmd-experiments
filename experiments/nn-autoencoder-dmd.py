@@ -14,19 +14,30 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from nneuroutil.helpers import FuzzyChoiceAction, TicTocTimer, module_logger
-from nneuroutil.torch_extras import available_device_names, torch_default_device
+from nneuroutil.helpers import (
+    FuzzyChoiceAction,
+    TicTocTimer,
+    machine_info,
+    module_logger,
+)
+from nneuroutil.torch_extras import (
+    TorchMemoryTracker,
+    available_device_names,
+    torch_default_device,
+)
 from nneuroutil.visualization import figure
 
 log = module_logger("lib.autoencoder_network")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
-Trains a DMD Autoencoder neural network with quadratic activation functions.
+Trains or runs inference with a DMD Autoencoder neural network with quadratic
+activation functions.
 
-Example:
+Examples:
 
-    > {SCRIPT_PATH.name} --device cuda dataset.npz
+    > {SCRIPT_PATH.name} --device cuda train dataset.npz
+    > {SCRIPT_PATH.name} --device cuda infer dataset-ae-dmd-quad.pkl
 """
 
 
@@ -680,287 +691,29 @@ def torch_predict(
 # }}}
 
 
-def main(
-    filename: pathlib.Path,
+# {{{ helpers
+
+
+def _plot_dataset(
+    zmask: torch.Tensor,
     *,
-    outfile: pathlib.Path | None = None,
-    datakey: str = "matrices",
-    dataidx: int = 5,
-    bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
-    escape_radius: float | None = 10.0,
-    resolution: int = 128,
-    maxit: int = 32,
-    epochs: int = 100,
-    batch_size: int = 512,
-    window_size: int = 32,
-    nwindows: int = 1,
-    dmd_warmup_epochs: int = 0,
-    early_stop_patience: int = 0,
-    overwrite: bool = False,
-) -> int:
-    from commonlib import determine_escape_radius, generate_grid
-
-    device = torch.get_default_device()
-    log.info("Device: %s", device)
-
-    # {{{ vallidate inputs
-
-    if not filename.exists():
-        log.error("File does not exist: '%s'.", filename)
-        return 1
-
-    try:
-        data = np.load(filename)
-    except Exception:
-        log.error("Failed to load data from file: '%s'.", filename)
-        return 1
-
-    if datakey not in data:
-        log.error("File does not contain '%s' dataset: '%s'.", datakey, filename)
-        return 1
-
-    matrices = data[datakey]
-    if matrices.ndim != 3:
-        log.error("Expected a 3 dimensional array: %s.", matrices.shape)
-        return 1
-
-    # NOTE: we don't really need complex128 for this example, so save some memory
-    mat = torch.from_numpy(matrices[dataidx]).to(torch.complex64).to(device)
-    if mat.shape[0] != mat.shape[1]:
-        log.error("Expected a square matrix: %s.", mat.shape)
-        return 1
-
-    if escape_radius is None:
-        escape_radius = determine_escape_radius(mat)
-
-    if outfile is None:
-        outfile = filename.parent / f"{filename.stem}-ae-dmd-quad.npz"
-
-    outfile = outfile.with_stem(
-        f"{outfile.stem}-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}-{device.type}"
-    )
-    basename = outfile.with_suffix("")
-
-    # }}}
-
-    # {{{ plot predict
-
-    def plot_predict(epoch: int, m: DMDAutoencoder) -> None:
-        A_dmd = build_latent_dmd(m, x_train)
-        Zpredict = torch_predict(
-            m,
-            A_dmd,
-            bbox=bbox,
-            resolution=2 * resolution,
-            maxit=maxit,
-            norm_factor=norm_factor,
-        )
-        in_set = (
-            torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
-        )
-        log.info("    Converged:    %d/%d", torch.sum(in_set), in_set.numel())
-
-        with figure(
-            basename.with_stem(f"{basename.stem}-predict-{epoch:04d}"),
-            overwrite=overwrite,
-        ) as fig:
-            ax = fig.gca()
-            ax.imshow(in_set.cpu().numpy(), extent=bbox, cmap="binary")
-
-    # }}}
-
-    # {{{ train
-
-    from torch import optim
-
-    d = mat.shape[0]
-    model = DMDAutoencoder(
-        d + 1,
-        encoder_layer_sizes=(d + 1, (d + 1) // 2),
-        decoder_layer_sizes=((d + 1) // 2, d + 1),
-        device=device,
-        dtype=mat.dtype.to_real(),
-    )
-    optimizer = optim.Adam(model.parameters(), lr=1.0e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        patience=3,
-        factor=0.3,
-        min_lr=1.0e-5,
-        cooldown=2,
-    )
-
-    log.info("Network:\n%s", model)
-
-    weightsfile = outfile.with_suffix(".pkl")
-    if weightsfile.exists():
-        checkpoint = torch.load(weightsfile, map_location=device, weights_only=True)
-
-        model.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
-        losses = checkpoint["losses"]
-        loss_test = checkpoint.get("loss_test", 0.0)
-        zmask = checkpoint["zmask"]
-        A_dmd = checkpoint["a_dmd"]
-        norm_factor = checkpoint["norm_factor"]
-
-        model.escape_radius = escape_radius / norm_factor
-        model.eval()
-    else:
-        from commonlib import generate_timeseries_dataset
-        from nneuroutil.data import SlidingWindowDataset, random_split
-
-        # {{{ generate dataset
-
-        min_escape_iters = 1 * (maxit + 1) // 4
-
-        x, _, mask, zmask = cast(
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-            generate_timeseries_dataset(
-                mat,
-                bbox=bbox,
-                resolution=resolution,
-                # NOTE: we add 1 so that x.shape == (n, maxit, 2d)
-                maxit=maxit + 1,
-                escape_radius=escape_radius,
-                min_escape_iters=min_escape_iters,
-            ),
-        )
-
-        c = generate_grid(
-            *bbox,
-            nx=resolution,
-            ny=resolution,
-            dtype=mat.dtype,
-            xp=array_api_compat.array_namespace(mat),
-            device=device,
-        )
-        c = torch.view_as_real(c[mask])
-        c = c.unsqueeze(1).expand(-1, x.shape[1], -1)
-
-        x = torch.concat([x, c], dim=-1)
-
-        norm_factor = 1.0
-
-        x = x / norm_factor
-        # NOTE: the data is scaled by norm_factor, so scale the radius as well
-        model.escape_radius = escape_radius / norm_factor
-        (x_train,), (x_validate,), (x_test,) = cast(
-            tuple[tuple[torch.Tensor], tuple[torch.Tensor], tuple[torch.Tensor]],
-            random_split((x,), (0.8, 0.1, 0.1)),
-        )
-
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-
-        # }}}
-
-        # {{{ train
-
-        target_scale = torch.mean(torch.conj(x_train) * x_train).real.item()
-        criterion = DMDLoss(
-            scale=target_scale, escape_radius=escape_radius / norm_factor
-        )
-
-        _, optimizer, losses = torch_train(
-            model,
-            criterion,
-            optimizer,
-            scheduler,
-            x_train,
-            x_validate,
-            epochs=epochs,
-            batch_size=batch_size,
-            window_size=window_size,
-            nwindows=nwindows,
-            dmd_warmup_epochs=dmd_warmup_epochs,
-            patience_early_stop=early_stop_patience,
-            callback=plot_predict,
-        )
-        A_dmd = build_latent_dmd(model, x_train)
-
-        model.train()
-        with torch.no_grad():
-            test_dataset = SlidingWindowDataset(
-                x_test, window_size=window_size, nwindows=nwindows
-            )
-            test_loader = DataLoader(
-                test_dataset,  # ty: ignore[invalid-argument-type]
-                batch_size=batch_size,
-            )
-
-            loss_test_epoch = torch.zeros(criterion.dim, device=device)
-            num_test_batches = 0
-
-            for (batch_x,) in test_loader:
-                predictions = model(batch_x)
-                loss = criterion(
-                    batch_x,
-                    x_out=predictions.x_out,
-                    y_latent=predictions.y_latent,
-                    yhat_latent=predictions.yhat_latent,
-                    yhat_out=predictions.yhat_out,
-                )
-
-                loss_test_epoch += loss.tensor()
-                num_test_batches += 1
-
-            loss_test = loss_test_epoch / num_test_batches
-            log.info(
-                "[%03d/%03d] test_rec %.5e test_lin %.5e test_pre %.5e",
-                epochs,
-                epochs,
-                loss_test[1].item(),
-                loss_test[2].item(),
-                loss_test[3].item(),
-            )
-
-        # }}}
-
-        # {{{ checkpoint
-
-        num_epochs_trained = len(losses)
-        torch.save(
-            {
-                # model
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "epochs": epochs,
-                "num_epochs_trained": num_epochs_trained,
-                "losses": losses,
-                "loss_test": loss_test,
-                "zmask": zmask,
-                "a_dmd": A_dmd,
-                # parameters
-                "inputfile": str(filename),
-                "dataidx": dataidx,
-                "bbox": bbox,
-                "escape_radius": escape_radius,
-                "resolution": resolution,
-                "maxit": maxit,
-                "dmd_warmup_epochs": dmd_warmup_epochs,
-                "early_stop_patience": early_stop_patience,
-                "norm_factor": norm_factor,
-            },
-            weightsfile,
-        )
-
-        # }}}
-
-    # }}}
-
-    # {{{ plot fractal
-
+    basename: pathlib.Path,
+    bbox: tuple[float, float, float, float],
+    overwrite: bool,
+) -> None:
     with figure(
         basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
     ) as fig:
         ax = fig.gca()
         ax.imshow(zmask.cpu().numpy(), extent=bbox, cmap="binary")
 
-    # }}}
 
-    # {{{ plot loss
-
+def _plot_loss(
+    losses: torch.Tensor,
+    *,
+    basename: pathlib.Path,
+    overwrite: bool,
+) -> None:
     with figure(
         basename.with_stem(f"{basename.stem}-loss"), overwrite=overwrite
     ) as fig:
@@ -982,10 +735,20 @@ def main(
         ax.set_ylabel("Loss")
         ax.legend(fontsize="x-small", ncols=2)
 
-    # }}}
 
-    # {{{ plot prediction
-
+def _plot_predict(
+    model: DMDAutoencoder,
+    A_dmd: torch.Tensor,
+    *,
+    tag: str,
+    basename: pathlib.Path,
+    bbox: tuple[float, float, float, float],
+    resolution: int,
+    maxit: int,
+    norm_factor: float,
+    escape_radius: float,
+    overwrite: bool,
+) -> None:
     Zpredict = torch_predict(
         model,
         A_dmd,
@@ -994,17 +757,479 @@ def main(
         maxit=maxit,
         norm_factor=norm_factor,
     )
-    mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
+    in_set = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
+    log.info("    Converged:    %d/%d", torch.sum(in_set), in_set.numel())
 
     with figure(
-        basename.with_stem(f"{basename.stem}-predict"), overwrite=overwrite
+        basename.with_stem(f"{basename.stem}-predict-{tag}"),
+        overwrite=overwrite,
     ) as fig:
         ax = fig.gca()
-        ax.imshow(mask.cpu().numpy(), extent=bbox, cmap="binary")
+        ax.imshow(in_set.cpu().numpy(), extent=bbox, cmap="binary")
+
+
+# }}}
+
+
+# {{{ train
+
+
+def train(
+    filename: pathlib.Path,
+    *,
+    weights: pathlib.Path | None = None,
+    outfile: pathlib.Path | None = None,
+    datakey: str = "matrices",
+    dataidx: int | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
+    escape_radius: float | None = 10.0,
+    resolution: int | None = None,
+    maxit: int | None = None,
+    epochs: int = 100,
+    batch_size: int | None = None,
+    window_size: int | None = None,
+    nwindows: int | None = None,
+    dmd_warmup_epochs: int | None = None,
+    split: tuple[float, float, float] | None = None,
+    seed: int | None = None,
+    early_stop_patience: int = 0,
+    overwrite: bool = False,
+) -> int:
+    from commonlib import (
+        determine_escape_radius,
+        generate_grid,
+        generate_timeseries_dataset,
+        load_matrix_from_dataset,
+    )
+    from nneuroutil.data import SlidingWindowDataset, random_split
+
+    machine = machine_info(SCRIPT_PATH)
+    log.info("Machine:\n%s", machine.pretty())
+
+    device = torch.get_default_device()
+    log.info("Device: %s", device)
+
+    mem = TorchMemoryTracker(device)
+    mem.add_record("Start")
+
+    provenance = {**machine._asdict(), "device": device}
+
+    # {{{ load parameters
+
+    checkpoint: dict[str, Any] | None = None
+    if weights is not None:
+        if not weights.exists():
+            log.error("Weights file does not exist: '%s'.", weights)
+            return 1
+
+        checkpoint = torch.load(weights, map_location=device, weights_only=True)
+
+        # NOTE: keep the original provenance and record each resume
+        previous = checkpoint["provenance"]
+        previous.setdefault("resumes", []).append(provenance)
+        provenance = previous
+
+        dataidx = checkpoint["dataidx"] if dataidx is None else dataidx
+        bbox = checkpoint["bbox"] if bbox is None else bbox
+        resolution = checkpoint["resolution"] if resolution is None else resolution
+        maxit = checkpoint["maxit"] if maxit is None else maxit
+        batch_size = checkpoint["batch_size"] if batch_size is None else batch_size
+        window_size = checkpoint["window_size"] if window_size is None else window_size
+        nwindows = checkpoint["nwindows"] if nwindows is None else nwindows
+        dmd_warmup_epochs = (
+            checkpoint["dmd_warmup_epochs"]
+            if dmd_warmup_epochs is None
+            else dmd_warmup_epochs
+        )
+        split = checkpoint["split"] if split is None else split
+        seed = checkpoint["seed"] if seed is None else seed
+
+        datakey = checkpoint["datakey"]
+        escape_radius = checkpoint["escape_radius"]
+        lr = checkpoint["lr"]
+        norm_factor = checkpoint["norm_factor"]
+    else:
+        dataidx = 5 if dataidx is None else dataidx
+        bbox = (-0.03, 0.03, -0.03, 0.03) if bbox is None else bbox
+        resolution = 128 if resolution is None else resolution
+        maxit = 32 if maxit is None else maxit
+        batch_size = 512 if batch_size is None else batch_size
+        window_size = 32 if window_size is None else window_size
+        nwindows = 1 if nwindows is None else nwindows
+        dmd_warmup_epochs = 10 if dmd_warmup_epochs is None else dmd_warmup_epochs
+        split = (0.8, 0.1, 0.1) if split is None else split
+        if seed is None:
+            seed = int(np.random.SeedSequence().entropy)  # ty: ignore[invalid-argument-type]
+
+        lr = 1.0e-4
+        norm_factor = 1.0
 
     # }}}
 
+    # {{{ validate inputs
+
+    try:
+        mat = cast(
+            torch.Tensor,
+            load_matrix_from_dataset(
+                filename, dataidx, key=datakey, device=device, xp=torch
+            ),
+        )
+        mat = mat.to(torch.complex64)
+    except Exception as exc:
+        log.error("Failed to load dataset '%s': %s", filename.name, exc)
+        return 1
+
+    if escape_radius is None:
+        escape_radius = determine_escape_radius(mat)
+
+    mem.add_record("After data load")
+
+    if outfile is None:
+        outfile = filename.parent / f"{filename.stem}-ae-dmd-quad.npz"
+
+    outfile = outfile.with_stem(
+        f"{outfile.stem}-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}-{device.type}"
+    )
+    basename = outfile.with_suffix("")
+    weightsfile = outfile.with_suffix(".pkl")
+
+    if not overwrite and weightsfile.exists():
+        log.error(
+            "Weights file already exist (use --force to overwrite): '%s'", weightsfile
+        )
+        return 1
+
+    # }}}
+
+    # {{{ train
+
+    from torch import optim
+
+    d = mat.shape[0]
+
+    # NOTE: when resuming, the stored architecture is used to rebuild the model
+    model_config: dict[str, Any]
+    if checkpoint is not None:
+        model_config = checkpoint["model_config"]
+    else:
+        model_config = {
+            "input_size": d + 1,
+            "encoder_layer_sizes": (d + 1, (d + 1) // 2),
+            "decoder_layer_sizes": ((d + 1) // 2, d + 1),
+            "eps": 1.0e-4,
+            "alpha": None,
+        }
+
+    model = DMDAutoencoder(**model_config, device=device, dtype=mat.dtype.to_real())
+    # NOTE: the data is scaled by norm_factor, so scale the radius as well
+    model.escape_radius = escape_radius / norm_factor
+
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        patience=3,
+        factor=0.3,
+        min_lr=1.0e-5,
+        cooldown=2,
+    )
+
+    log.info("Network:\n%s", model)
+
+    losses_previous: torch.Tensor | None = None
+    if checkpoint is not None:
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        scheduler.load_state_dict(checkpoint["scheduler"])
+
+        losses_previous = checkpoint["losses"]
+        log.info(
+            "Resuming from '%s' (%d epochs trained)",
+            weights,
+            checkpoint["num_epochs_trained"],
+        )
+
+    # {{{ generate dataset
+
+    min_escape_iters = 1 * (maxit + 1) // 4
+
+    x, _, mask, zmask = cast(
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        generate_timeseries_dataset(
+            mat,
+            bbox=bbox,
+            resolution=resolution,
+            # NOTE: we add 1 so that x.shape == (n, maxit, 2d)
+            maxit=maxit + 1,
+            escape_radius=escape_radius,
+            min_escape_iters=min_escape_iters,
+        ),
+    )
+
+    c = generate_grid(
+        *bbox,
+        nx=resolution,
+        ny=resolution,
+        dtype=mat.dtype,
+        xp=array_api_compat.array_namespace(mat),
+        device=device,
+    )
+    c = torch.view_as_real(c[mask])
+    c = c.unsqueeze(1).expand(-1, x.shape[1], -1)
+
+    x = torch.concat([x, c], dim=-1)
+    x = x / norm_factor
+
+    (x_train,), (x_validate,), (x_test,) = cast(
+        tuple[tuple[torch.Tensor], tuple[torch.Tensor], tuple[torch.Tensor]],
+        random_split((x,), split, rng=np.random.default_rng(seed)),
+    )
+
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    mem.add_record("After data generation")
+
+    # }}}
+
+    # {{{ train
+
+    def plot_predict(epoch: int, m: DMDAutoencoder) -> None:
+        A_dmd = build_latent_dmd(m, x_train)
+        _plot_predict(
+            m,
+            A_dmd,
+            tag=f"{epoch:04d}",
+            basename=basename,
+            bbox=bbox,
+            resolution=resolution,
+            maxit=maxit,
+            norm_factor=norm_factor,
+            escape_radius=escape_radius,
+            overwrite=overwrite,
+        )
+
+    target_scale = torch.mean(torch.conj(x_train) * x_train).real.item()
+    criterion = DMDLoss(scale=target_scale, escape_radius=escape_radius / norm_factor)
+
+    _, optimizer, losses = torch_train(
+        model,
+        criterion,
+        optimizer,
+        scheduler,
+        x_train,
+        x_validate,
+        epochs=epochs,
+        batch_size=batch_size,
+        window_size=window_size,
+        nwindows=nwindows,
+        dmd_warmup_epochs=dmd_warmup_epochs,
+        patience_early_stop=early_stop_patience,
+        callback=plot_predict,
+    )
+    A_dmd = build_latent_dmd(model, x_train)
+
+    mem.add_record("After training")
+
+    model.train()
+    with torch.no_grad():
+        test_dataset = SlidingWindowDataset(
+            x_test, window_size=window_size, nwindows=nwindows
+        )
+        test_loader = DataLoader(
+            test_dataset,  # ty: ignore[invalid-argument-type]
+            batch_size=batch_size,
+        )
+
+        loss_test_epoch = torch.zeros(criterion.dim, device=device)
+        num_test_batches = 0
+
+        for (batch_x,) in test_loader:
+            predictions = model(batch_x)
+            loss = criterion(
+                batch_x,
+                x_out=predictions.x_out,
+                y_latent=predictions.y_latent,
+                yhat_latent=predictions.yhat_latent,
+                yhat_out=predictions.yhat_out,
+            )
+
+            loss_test_epoch += loss.tensor()
+            num_test_batches += 1
+
+        loss_test = loss_test_epoch / num_test_batches
+        log.info(
+            "[%03d/%03d] test_rec %.5e test_lin %.5e test_pre %.5e",
+            epochs,
+            epochs,
+            loss_test[1].item(),
+            loss_test[2].item(),
+            loss_test[3].item(),
+        )
+
+    mem.add_record("After test loss")
+
+    # }}}
+
+    # {{{ checkpoint
+
+    if losses_previous is not None:
+        losses = torch.cat((losses_previous.to(losses.device), losses))
+
+    num_epochs_trained = len(losses)
+    torch.save(
+        {
+            # model
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "model_config": model_config,
+            "a_dmd": A_dmd,
+            "norm_factor": norm_factor,
+            # loss
+            "num_epochs_trained": num_epochs_trained,
+            "losses": losses,
+            "loss_test": loss_test,
+            # dataset
+            "inputfile": str(filename),
+            "datakey": datakey,
+            "dataidx": dataidx,
+            "bbox": bbox,
+            "escape_radius": escape_radius,
+            "resolution": resolution,
+            "maxit": maxit,
+            "zmask": zmask,
+            # hyperparameters
+            "epochs": epochs,
+            "early_stop_patience": early_stop_patience,
+            "lr": lr,
+            "batch_size": batch_size,
+            "window_size": window_size,
+            "nwindows": nwindows,
+            "dmd_warmup_epochs": dmd_warmup_epochs,
+            "split": split,
+            "seed": seed,
+            # provenance
+            "provenance": provenance,
+        },
+        weightsfile,
+    )
+    log.info("Saved checkpoint: '%s'.", weightsfile)
+
+    mem.add_record("After checkpoint")
+
+    # }}}
+
+    # }}}
+
+    # {{{ plot
+
+    _plot_dataset(zmask, basename=basename, bbox=bbox, overwrite=overwrite)
+    _plot_loss(losses, basename=basename, overwrite=overwrite)
+    _plot_predict(
+        model,
+        A_dmd,
+        tag="final",
+        basename=basename,
+        bbox=bbox,
+        resolution=resolution,
+        maxit=maxit,
+        norm_factor=norm_factor,
+        escape_radius=escape_radius,
+        overwrite=overwrite,
+    )
+
+    # }}}
+
+    mem.add_record("Finished")
+    log.info("Memory:\n%s", mem)
+
     return 0
+
+
+# }}}
+
+
+# {{{ infer
+
+
+def infer(
+    weightsfile: pathlib.Path,
+    *,
+    outfile: pathlib.Path | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
+    resolution: int | None = None,
+    maxit: int | None = None,
+    overwrite: bool = False,
+) -> int:
+    if not weightsfile.exists():
+        log.error("Weights file does not exist: '%s'.", weightsfile)
+        return 1
+
+    device = torch.get_default_device()
+    log.info("Device: %s", device)
+
+    mem = TorchMemoryTracker(device)
+    mem.add_record("Start")
+
+    checkpoint = torch.load(weightsfile, map_location=device, weights_only=True)
+
+    # NOTE: parameters stored in the checkpoint, overridable from the command line
+    bbox = checkpoint["bbox"] if bbox is None else bbox
+    resolution = checkpoint["resolution"] if resolution is None else resolution
+    maxit = checkpoint["maxit"] if maxit is None else maxit
+    escape_radius = checkpoint["escape_radius"]
+    norm_factor = checkpoint["norm_factor"]
+
+    losses = checkpoint["losses"]
+    zmask = checkpoint["zmask"]
+    A_dmd = checkpoint["a_dmd"]
+
+    if outfile is None:
+        basename = weightsfile.with_suffix("")
+    else:
+        basename = outfile.with_suffix("")
+
+    # {{{ load model
+
+    model = DMDAutoencoder(
+        **checkpoint["model_config"], device=device, dtype=torch.float32
+    )
+    model.load_state_dict(checkpoint["model"])
+    model.escape_radius = escape_radius / norm_factor
+    model.eval()
+
+    mem.add_record("After model load")
+
+    # }}}
+
+    # {{{ plot
+
+    _plot_dataset(zmask, basename=basename, bbox=bbox, overwrite=overwrite)
+    _plot_loss(losses, basename=basename, overwrite=overwrite)
+    _plot_predict(
+        model,
+        A_dmd,
+        tag="final",
+        basename=basename,
+        bbox=bbox,
+        resolution=resolution,
+        maxit=maxit,
+        norm_factor=norm_factor,
+        escape_radius=escape_radius,
+        overwrite=overwrite,
+    )
+
+    # }}}
+
+    mem.add_record("Finished")
+
+    log.info("Memory:\n%s", mem)
+
+    return 0
+
+
+# }}}
 
 
 if __name__ == "__main__":
@@ -1016,30 +1241,18 @@ if __name__ == "__main__":
     ):
         pass
 
+    # {{{ parser
+
     parser = argparse.ArgumentParser(
         formatter_class=HelpFormatter,
         description=SCRIPT_LONG_HELP,
-    )
-    parser.add_argument("filename", type=pathlib.Path)
-    parser.add_argument(
-        "--dataidx",
-        type=int,
-        default=5,
-        help="Index of the matrix to reconstruct",
-    )
-    parser.add_argument(
-        "-r",
-        "--resolution",
-        type=int,
-        default=128,
-        help="Resolution (in the c complex plane) of the images",
     )
     parser.add_argument(
         "--device",
         action=FuzzyChoiceAction,
         choices=sorted(available_device_names()),
         default="cpu",
-        help="The default deviced used by the framework",
+        help="The default device used by the framework",
     )
     parser.add_argument(
         "-o",
@@ -1054,23 +1267,110 @@ if __name__ == "__main__":
         help="Force overwrite of existing files",
     )
     parser.add_argument(
-        "--dmd-warmup-epochs",
-        type=int,
-        default=10,
-        help="Train this many epochs without DMD before enabling it (0 disables)",
-    )
-    parser.add_argument(
-        "--early-stop-patience",
-        type=int,
-        default=0,
-        help="Stop training loss does not improve for this many epochs (0 disables)",
-    )
-    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
         help="Only show error messages",
     )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # {{{ train
+
+    subparser = subparsers.add_parser(
+        "train",
+        formatter_class=HelpFormatter,
+        description="Train a DMD autoencoder network on a dataset.",
+    )
+    subparser.add_argument("filename", type=pathlib.Path)
+    subparser.add_argument(
+        "-w",
+        "--weights",
+        type=pathlib.Path,
+        default=None,
+        help="Checkpoint to resume training from (starts from scratch if not given)",
+    )
+    subparser.add_argument(
+        "--dataidx",
+        type=int,
+        default=None,
+        help="Index of the matrix to reconstruct (from checkpoint when resuming)",
+    )
+    subparser.add_argument(
+        "-r",
+        "--resolution",
+        type=int,
+        default=None,
+        help=(
+            "Resolution (in the c complex plane) of the images "
+            "(from checkpoint when resuming)"
+        ),
+    )
+    subparser.add_argument(
+        "--maxit",
+        type=int,
+        default=None,
+        help="Maximum number of iterations (from checkpoint when resuming)",
+    )
+    subparser.add_argument(
+        "--bbox",
+        type=float,
+        nargs=4,
+        default=None,
+        metavar=("RE_MIN", "RE_MAX", "IM_MIN", "IM_MAX"),
+        help="Bounding box in the complex plane (from checkpoint when resuming)",
+    )
+    subparser.add_argument(
+        "--dmd-warmup-epochs",
+        type=int,
+        default=None,
+        help=(
+            "Train this many epochs without DMD before enabling it "
+            "(from checkpoint when resuming)"
+        ),
+    )
+    subparser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=0,
+        help="Stop training loss does not improve for this many epochs (0 disables)",
+    )
+
+    # }}}
+
+    # {{{ infer
+
+    subparser = subparsers.add_parser(
+        "infer",
+        formatter_class=HelpFormatter,
+        description="Run inference with a trained DMD autoencoder network.",
+    )
+    subparser.add_argument("weightsfile", type=pathlib.Path)
+    subparser.add_argument(
+        "-r",
+        "--resolution",
+        type=int,
+        default=None,
+        help="Override the image resolution stored in the checkpoint",
+    )
+    subparser.add_argument(
+        "--maxit",
+        type=int,
+        default=None,
+        help="Override the maximum number of iterations stored in the checkpoint",
+    )
+    subparser.add_argument(
+        "--bbox",
+        type=float,
+        nargs=4,
+        default=None,
+        metavar=("RE_MIN", "RE_MAX", "IM_MIN", "IM_MAX"),
+        help="Override the bounding box stored in the checkpoint",
+    )
+
+    # }}}
+
+    # }}}
+
     args = parser.parse_args()
 
     if not args.quiet:
@@ -1080,14 +1380,33 @@ if __name__ == "__main__":
         # NOTE: use TF32 for matrix multiplication (should be faster, similar precision)
         torch.set_float32_matmul_precision("high")
 
-        raise SystemExit(
-            main(
-                args.filename,
-                dataidx=args.dataidx,
-                resolution=args.resolution,
-                dmd_warmup_epochs=args.dmd_warmup_epochs,
-                early_stop_patience=args.early_stop_patience,
-                outfile=args.outfile,
-                overwrite=args.force,
+        bbox = None if args.bbox is None else tuple(args.bbox)
+
+        if args.command == "train":
+            raise SystemExit(
+                train(
+                    args.filename,
+                    weights=args.weights,
+                    dataidx=args.dataidx,
+                    resolution=args.resolution,
+                    bbox=bbox,
+                    maxit=args.maxit,
+                    dmd_warmup_epochs=args.dmd_warmup_epochs,
+                    early_stop_patience=args.early_stop_patience,
+                    outfile=args.outfile,
+                    overwrite=args.force,
+                )
             )
-        )
+        elif args.command == "infer":
+            raise SystemExit(
+                infer(
+                    args.weightsfile,
+                    bbox=bbox,
+                    resolution=args.resolution,
+                    maxit=args.maxit,
+                    outfile=args.outfile,
+                    overwrite=args.force,
+                )
+            )
+        else:
+            raise SystemExit(1)
