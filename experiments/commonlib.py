@@ -10,7 +10,7 @@ import pathlib
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, fields
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Self, cast
 
 import array_api_compat
 import numpy as np
@@ -226,13 +226,14 @@ class Config:
     lr: float = 5.0e-3
 
     # cqn dataset
-    bbox: tuple[float, float, float, float] = (-0.3, 0.3, -0.3, 0.3)
+    bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03)
     resolution: int = 128
     maxit: int = 128
     escape_radius: float = 100.0
 
     # train + infer
     dataidx: int = 5
+    datakey: str = "matrices"
     batch_size: int = 4096
     seed: int | None = None
     split: tuple[float, float, float] = (0.8, 0.1, 0.1)
@@ -249,7 +250,7 @@ class Config:
         return f"r{self.resolution}-n{self.maxit}-{digest}"
 
     @classmethod
-    def from_sources(cls, *sources: Mapping[str, Any] | None) -> Config:
+    def from_sources(cls, *sources: Mapping[str, Any] | None) -> Self:
         values: dict[str, Any] = {f.name: f.default for f in fields(cls)}
 
         for source in sources:
@@ -266,6 +267,17 @@ class Config:
             values["seed"] = secrets.randbits(64)
 
         return cls(**values)
+
+
+@dataclass(frozen=True, slots=True)
+class AutoencoderConfig(Config):
+    """Configuration for the (ReLU / quadratic) autoencoder scripts.
+
+    Identical to :class:`Config` except for the learning rate used by those
+    experiments.
+    """
+
+    lr: float = 1.0e-3
 
 
 def make_argument_parser(

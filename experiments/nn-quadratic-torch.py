@@ -231,7 +231,6 @@ def train(
     *,
     weights: pathlib.Path | None = None,
     outfile: pathlib.Path | None = None,
-    datakey: str = "matrices",
     overwrite: bool = False,
 ) -> int:
     from commonlib import (
@@ -269,7 +268,9 @@ def train(
         try:
             matrices = cast(
                 torch.Tensor,
-                load_matrix_datasets(filename, key=datakey, device=device, xp=torch),
+                load_matrix_datasets(
+                    filename, key=config.datakey, device=device, xp=torch
+                ),
             )
             mat = matrices[config.dataidx].to(torch.complex64)
         except Exception as exc:
