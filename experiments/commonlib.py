@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import argparse
 import math
 import os
 import pathlib
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import array_api_compat
@@ -14,7 +16,7 @@ import numpy as np
 
 from nneuroutil.array_api_extras import interleave
 from nneuroutil.data import SlicedDataLoader
-from nneuroutil.helpers import TicTocTimer, module_logger, tictoc
+from nneuroutil.helpers import FuzzyChoiceAction, TicTocTimer, module_logger, tictoc
 from nneuroutil.typing import Array1D, Array2D, Array3D, Array4D
 
 if TYPE_CHECKING:
@@ -208,6 +210,207 @@ def determine_escape_radius(A: Array2D[np.number[Any]]) -> float:
     sigma = xp.linalg.svdvals(A)
 
     return (2.0 * n**0.5 / xp.min(sigma) ** 2).item()
+
+
+# }}}
+
+
+# {{{ configuration
+
+
+@dataclass(frozen=True)
+class Config:
+    device: str
+    epochs: int
+    lr: float
+
+    # cqn
+    bbox: tuple[float, float, float, float]
+    resolution: int
+    maxit: int
+    escape_radius: float
+
+    # train + infer
+    dataidx: int
+    batch_size: int
+    seed: int
+    split: tuple[float, float, float]
+    early_stop_patience: int
+
+    @property
+    def suffix(self) -> pathlib.Path:
+        from hashlib import sha256
+
+        device = self.device.split(":")[0]
+        hashid = sha256(bytes(hash(self)))
+        return f"{device}-r{self.resolution}-n{self.maxit}-{hashid}"
+
+    def with_defaults(self) -> Config:
+        return self.from_checkpoint({
+            # cqn
+            "bbox": (-0.3, 0.3, -0.3, 0.3),
+            "resolution": 128,
+            "maxit": 128,
+            "escape_radius": 100.0,
+            # train+infer
+            "dataidx": 5,
+            "batch_size": 4096,
+            "seed": int(np.random.SeedSequence().entropy),  # ty: ignore[invalid-argument-type]
+            "split": (0.8, 0.1, 0.1),
+            "early_stop_patience": 0,
+        })
+
+    @staticmethod
+    def from_commandline(args: argparse.Namespace) -> Config:
+        bbox = None if args.bbox is None else tuple(args.bbox)
+
+        return Config(
+            device=args.device,
+            # cqn
+            bbox=bbox,  # ty: ignore[invalid-argument-type]
+            resolution=args.resolution,
+            maxit=args.maxit,
+            escape_radius=None,  # ty: ignore[invalid-argument-type]
+            # train + infer
+            dataidx=args.dataidx,
+            epochs=50,
+            lr=1.0e-3,
+            batch_size=args.batch_size,
+            seed=None,  # ty: ignore[invalid-argument-type]
+            split=None,  # ty: ignore[invalid-argument-type]
+            early_stop_patience=args.early_stop_patience,
+        )
+
+    def from_checkpoint(self, checkpoint: dict[str, Any]) -> Config:
+        return Config(
+            device=self.device,
+            # cqn
+            bbox=checkpoint["bbox"] if self.bbox is None else self.bbox,
+            resolution=(
+                checkpoint["resolution"] if self.resolution is None else self.resolution
+            ),
+            maxit=checkpoint["maxit"] if self.maxit is None else self.maxit,
+            escape_radius=(
+                checkpoint["escape_radius"]
+                if self.escape_radius is None
+                else self.escape_radius
+            ),
+            # train + infer
+            dataidx=checkpoint["dataidx"] if self.dataidx is None else self.dataidx,
+            epochs=self.epochs,
+            lr=self.lr,
+            batch_size=(
+                checkpoint["batch_size"] if self.batch_size is None else self.batch_size
+            ),
+            seed=checkpoint["seed"] if self.seed is None else self.seed,
+            split=checkpoint["split"] if self.split is None else self.split,
+            early_stop_patience=(
+                checkpoint["early_stop_patience"]
+                if self.early_stop_patience is None
+                else self.early_stop_patience
+            ),
+        )
+
+
+def make_argument_parser(
+    *,
+    description: str = "",
+    devices: frozenset[str] = frozenset(),
+) -> argparse.ArgumentParser:
+    class HelpFormatter(
+        argparse.ArgumentDefaultsHelpFormatter,
+        argparse.RawDescriptionHelpFormatter,
+    ):
+        pass
+
+    parser = argparse.ArgumentParser(
+        formatter_class=HelpFormatter,
+        description=description,
+    )
+    parser.add_argument(
+        "--device",
+        action=FuzzyChoiceAction,
+        choices=sorted(devices),
+        default="cpu",
+        help="The default device used by the framework",
+    )
+    parser.add_argument(
+        "-o",
+        "--outfile",
+        type=pathlib.Path,
+        default=None,
+        help="Basename for output files (named '{basename}-XX')",
+    )
+    parser.add_argument(
+        "-r",
+        "--resolution",
+        type=int,
+        default=None,
+        help="Resolution (in the c complex plane) of the CQN grid",
+    )
+    parser.add_argument(
+        "--maxit",
+        type=int,
+        default=None,
+        help="Maximum number of iterations for the CQN",
+    )
+    parser.add_argument(
+        "--bbox",
+        type=float,
+        nargs=4,
+        default=None,
+        metavar=("XMIN", "XMAX", "YMIN", "YMAX"),
+        help="Bounding box in the complex plane for the CQN",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force overwrite of existing files",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Only show error messages",
+    )
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparser = subparsers.add_parser(
+        "train",
+        formatter_class=HelpFormatter,
+        description="Train a neural network on a CQN dataset.",
+    )
+
+    subparser.add_argument("filename", type=pathlib.Path)
+    subparser.add_argument(
+        "-w",
+        "--weights",
+        type=pathlib.Path,
+        default=None,
+        help="Checkpoint to resume training from (starts from scratch if not given)",
+    )
+    parser.add_argument(
+        "-b",
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Batch size to use for training",
+    )
+    subparser.add_argument(
+        "--dataidx",
+        type=int,
+        default=None,
+        help="Index of the matrix to train on",
+    )
+
+    subparser = subparsers.add_parser(
+        "infer",
+        formatter_class=HelpFormatter,
+        description="Run inference with a trained neural network.",
+    )
+    subparser.add_argument("filename", type=pathlib.Path)
+
+    return parser
 
 
 # }}}
