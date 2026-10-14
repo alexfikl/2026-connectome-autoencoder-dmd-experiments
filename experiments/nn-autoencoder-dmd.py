@@ -14,6 +14,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
+from nneuroutil.dmdc import build_dense_dmdc
 from nneuroutil.helpers import (
     FuzzyChoiceAction,
     TicTocTimer,
@@ -66,9 +67,9 @@ def compute_masks(
 ) -> TrajectoryMasks:
     """Compute the masks of usable states and transitions in ``x``.
 
-    ``x`` is the augmented state ``[z_n; c]`` in interleaved real format of
-    shape ``(batch, window, 2(d + 1))``. Two kinds of states carry no dynamics
-    and are masked out:
+    ``x`` is the state ``z_n`` in interleaved real format of shape
+    ``(batch, window, 2 d)``. Two kinds of states carry no dynamics and are
+    masked out:
 
     * *pinned* (clipped) states: their squared norm exceeds the escape radius
       (see ``commonlib.generate_dataset``). The transition into the first
@@ -91,7 +92,7 @@ def compute_masks(
             ),
         )
 
-    zx = view_as_complex(x[..., :-2])
+    zx = view_as_complex(x)
     sqr_norm = torch.sum(zx.real**2 + zx.imag**2, dim=-1)
 
     if escape_radius is None:
@@ -181,19 +182,22 @@ def make_layers(
 
 class DMDAutoencoderResult(NamedTuple):
     A_dmd: torch.Tensor
-    """Same-space DMD linear operator on the augmented state ``[z; c]``."""
+    """Same-space DMD linear operator on the latent state."""
+
+    B_dmd: torch.Tensor
+    """DMDc control operator mapping the constant control ``c`` into the latent."""
 
     x_out: torch.Tensor
-    """Output of the autoencoder (decoded augmented state)."""
+    """Output of the autoencoder (decoded state)."""
 
     y_latent: torch.Tensor | None
-    """Encoded augmented trajectory (same as encoder input, for loss_lin)."""
+    """Encoded state trajectory (same as encoder input, for loss_lin)."""
 
     yhat_latent: torch.Tensor | None
-    """DMD one-step prediction of the latent augmented trajectory (steps 1..n)."""
+    """DMDc one-step prediction of the latent trajectory (steps 1..n)."""
 
     yhat_out: torch.Tensor | None
-    """Decoded DMD one-step prediction (back in physical augmented space)."""
+    """Decoded DMDc one-step prediction (back in physical space)."""
 
 
 class DMDAutoencoder(nn.Module):
@@ -206,7 +210,8 @@ class DMDAutoencoder(nn.Module):
         dmd_enabled: bool = False,
         escape_radius: float | None = None,
         settle_tol: float | None = None,
-        eps: float = 1.0e-4,
+        control_size: int = 1,
+        ridge_eps: float = 1.0e-3,
         alpha: float | None = None,
         device: str | torch.device | None = None,
         dtype: Any = None,
@@ -248,7 +253,10 @@ class DMDAutoencoder(nn.Module):
         # relative step size below which a trajectory is considered settled
         # (dimensionless, so no norm_factor scaling needed); None disables it
         self.settle_tol = settle_tol
-        self.eps = eps
+        # number of (complex) control inputs fed to the DMDc operator
+        self.control_size = control_size
+        # ridge regularization for the DMDc least-squares solve
+        self.ridge_eps = ridge_eps
 
         # {{{ construct autoencoder
 
@@ -278,11 +286,23 @@ class DMDAutoencoder(nn.Module):
 
         # }}}
 
-    def fit_dmd(self, cx_latent: torch.Tensor, x_in: torch.Tensor) -> torch.Tensor:
+    def fit_dmd(
+        self,
+        cx_latent: torch.Tensor,
+        x_in: torch.Tensor,
+        c_in: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         r = self.latent_size
+        window_size = cx_latent.shape[1]
 
         X = cx_latent[:, :-1, :].reshape(-1, r)
         Y = cx_latent[:, 1:, :].reshape(-1, r)
+        # the control is constant along a trajectory, so it is simply repeated
+        U = (
+            c_in[:, None, :]
+            .expand(-1, window_size - 1, -1)
+            .reshape(-1, self.control_size)
+        )
 
         # drop pinned -> pinned and settled transitions: the former are
         # artifacts of the clipping in generate_dataset, not actual dynamics
@@ -296,38 +316,43 @@ class DMDAutoencoder(nn.Module):
             if torch.any(w):
                 X = X[w]
                 Y = Y[w]
+                U = U[w]
 
-        A_dmd = Y.T @ torch.linalg.pinv(X.T, rtol=self.eps)
-        assert A_dmd.shape == (r, r)
-        return A_dmd
+        dmd = build_dense_dmdc(X, U, Y, method="ridge", eps=self.ridge_eps)
+        assert dmd.A.shape == (r, r)
+        assert dmd.B.shape == (self.control_size, r)
+        return cast("torch.Tensor", dmd.A), cast("torch.Tensor", dmd.B)
 
-    def forward(self, x_in: torch.Tensor) -> DMDAutoencoderResult:
+    def forward(self, x_in: torch.Tensor, c_in: torch.Tensor) -> DMDAutoencoderResult:
         r = self.latent_size
         batch_size, window_size = x_in.shape[:2]
 
-        # encode the full augmented state [z_n; c]
+        # encode the state trajectory (the control `c` is handled by DMDc below)
         x_latent = self.encoder(x_in)
         assert x_latent.shape == (batch_size, window_size, 2 * r)
 
         if self.training and self.dmd_enabled:
-            # same-space DMD on the encoded augmented trajectory
+            # same-space DMDc on the encoded trajectory
             cx_latent = view_as_complex(x_latent)
 
             with torch.no_grad():
-                A_dmd = self.fit_dmd(cx_latent, x_in)
+                A_dmd, B_dmd = self.fit_dmd(cx_latent, x_in, c_in)
 
-            # evolve with the DMD operator. NOTE: only one-step (teacher-forced)
+            # evolve with the DMDc operator. NOTE: only one-step (teacher-forced)
             # predictions are used for training: a multi-step rollout overflows
             # as soon as A is expansive along the escape directions, which
             # produces inf losses and NaN gradients
-            yhat_latent = cx_latent[:, :-1, :] @ A_dmd.T
+            yhat_latent = cx_latent[:, :-1, :] @ A_dmd + c_in[:, None, :] @ B_dmd
             yhat_latent = view_as_real(yhat_latent)
             assert yhat_latent.shape == (batch_size, window_size - 1, 2 * r)
 
             yhat_out = self.decoder(yhat_latent)
             assert yhat_out.shape == (batch_size, window_size - 1, x_in.shape[-1])
         else:
-            A_dmd = torch.eye(r, r, device=x_in.device, dtype=x_in.dtype)
+            A_dmd = torch.eye(r, r, device=x_in.device, dtype=torch.complex64)
+            B_dmd = torch.zeros(
+                (self.control_size, r), device=x_in.device, dtype=torch.complex64
+            )
             yhat_latent = None
             yhat_out = None
 
@@ -336,6 +361,7 @@ class DMDAutoencoder(nn.Module):
 
         return DMDAutoencoderResult(
             A_dmd=A_dmd,
+            B_dmd=B_dmd,
             x_out=x_out,
             y_latent=x_latent if self.training and self.dmd_enabled else None,
             yhat_latent=yhat_latent,
@@ -467,6 +493,45 @@ class DMDLoss(nn.Module):
 # {{{ torch_train
 
 
+class ControlWindowsDataset:
+    """Sliding windows over ``x`` paired with the per-realization control ``c``.
+
+    The control is constant along a trajectory, so it is fetched by realization
+    index rather than being replicated over the window/time dimension.
+    """
+
+    def __init__(
+        self,
+        x: torch.Tensor,
+        c: torch.Tensor,
+        *,
+        window_size: int,
+        nwindows: int,
+    ) -> None:
+        from nneuroutil.data import SlidingWindowDataset
+
+        self.windows = SlidingWindowDataset(
+            x, window_size=window_size, nwindows=nwindows
+        )
+        if c.shape[0] != self.windows.nrealizations:
+            raise ValueError(
+                f"'c' must have one row per realization: {tuple(c.shape)} vs "
+                f"{self.windows.nrealizations}"
+            )
+
+        self.c = c
+
+    def __len__(self) -> int:
+        return len(self.windows)
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        (window,) = self.windows[index]
+        return (
+            cast("torch.Tensor", window),
+            self.c[index // self.windows.nwindows],
+        )
+
+
 def torch_train(
     model: DMDAutoencoder,
     criterion: DMDLoss,
@@ -475,6 +540,8 @@ def torch_train(
     X_train: torch.Tensor,
     X_validate: torch.Tensor,
     *,
+    c_train: torch.Tensor,
+    c_validate: torch.Tensor,
     max_norm: float = 100.0,
     window_size: int = 32,
     nwindows: int = 16,
@@ -484,17 +551,15 @@ def torch_train(
     patience_early_stop: int = 0,
     callback: Callable[[int, DMDAutoencoder], None] | None = None,
 ) -> tuple[DMDAutoencoder, torch.optim.Optimizer, torch.Tensor]:
-    from nneuroutil.data import SlidingWindowDataset
-
     device = X_train.device
     compiled_model = torch.compile(model)
     # compiled_model = model
 
-    train_dataset = SlidingWindowDataset(
-        X_train, window_size=window_size, nwindows=nwindows
+    train_dataset = ControlWindowsDataset(
+        X_train, c_train, window_size=window_size, nwindows=nwindows
     )
-    validate_dataset = SlidingWindowDataset(
-        X_validate, window_size=window_size, nwindows=nwindows
+    validate_dataset = ControlWindowsDataset(
+        X_validate, c_validate, window_size=window_size, nwindows=nwindows
     )
 
     loader = DataLoader(
@@ -533,10 +598,10 @@ def torch_train(
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats()
 
-        for i, (batch_x,) in enumerate(loader):
+        for i, (batch_x, batch_c) in enumerate(loader):
             optimizer.zero_grad()
 
-            predictions = compiled_model(batch_x)
+            predictions = compiled_model(batch_x, batch_c)
             loss = criterion(
                 batch_x,
                 x_out=predictions.x_out,
@@ -586,8 +651,8 @@ def torch_train(
             loss_val_epoch = torch.zeros(criterion.dim, device=device)
             num_val_batches = 0
 
-            for (batch_x,) in validate_loader:
-                predictions = compiled_model(batch_x)
+            for batch_x, batch_c in validate_loader:
+                predictions = compiled_model(batch_x, batch_c)
                 loss = criterion(
                     batch_x,
                     x_out=predictions.x_out,
@@ -663,27 +728,36 @@ def torch_train(
 def build_latent_dmd(
     model: DMDAutoencoder,
     Z: torch.Tensor,
+    C: torch.Tensor,
     *,
     block_size: int = 256,
-) -> torch.Tensor:
-    r"""Build the DMD operator in the latent space from the full dataset.
+) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""Build the DMDc operators in the latent space from the full dataset.
 
-    ``Z`` has shape ``(ntraj, maxit, 2(d + 1))`` — the augmented state
-    ``[z_n; c]`` in interleaved real format.
+    ``Z`` has shape ``(ntraj, maxit, 2 d)`` — the state ``z_n`` in interleaved
+    real format — and ``C`` has shape ``(ntraj, 1)`` — the constant control.
     """
     r = model.latent_size
+    window_size = Z.shape[1]
 
     with torch.no_grad():
         model.eval()
 
         Xs = []
         Ys = []
+        Us = []
         for start in range(0, Z.shape[0], block_size):
             z_block = Z[start : start + block_size]
+            c_block = C[start : start + block_size]
             cx = view_as_complex(model.encoder(z_block))
 
             X_block = cx[:, :-1, :].reshape(-1, r)
             Y_block = cx[:, 1:, :].reshape(-1, r)
+            U_block = (
+                c_block[:, None, :]
+                .expand(-1, window_size - 1, -1)
+                .reshape(-1, model.control_size)
+            )
 
             # drop pinned -> pinned and settled transitions (see DMDAutoencoder.forward)
             if model.escape_radius is not None or model.settle_tol is not None:
@@ -694,19 +768,24 @@ def build_latent_dmd(
                 if torch.any(w):
                     X_block = X_block[w]
                     Y_block = Y_block[w]
+                    U_block = U_block[w]
 
             Xs.append(X_block)
             Ys.append(Y_block)
+            Us.append(U_block)
 
         X = torch.cat(Xs)
         Y = torch.cat(Ys)
+        U = torch.cat(Us)
 
-        return Y.T @ torch.linalg.pinv(X.T, rtol=model.eps)
+        dmd = build_dense_dmdc(X, U, Y, method="ridge", eps=model.ridge_eps)
+        return cast("torch.Tensor", dmd.A), cast("torch.Tensor", dmd.B)
 
 
 def torch_predict(
     model: DMDAutoencoder,
     A_dmd: torch.Tensor,
+    B_dmd: torch.Tensor,
     *,
     bbox: tuple[float, float, float, float],
     resolution: int = 128,
@@ -718,15 +797,13 @@ def torch_predict(
 
     from commonlib import generate_grid
 
-    d = int(model.input_size) - 1  # original state dim (not counting c)
+    d = int(model.input_size)  # state dim (the control `c` is handled separately)
     dtype = model.dtype
     assert isinstance(dtype, torch.dtype)
     assert dtype.is_floating_point
 
     with torch.no_grad():
-        z = torch.zeros(
-            (resolution, resolution, 2 * (d + 1)), dtype=dtype, device=device
-        )
+        z = torch.zeros((resolution, resolution, 2 * d), dtype=dtype, device=device)
         c = cast(
             "torch.Tensor",
             generate_grid(
@@ -738,21 +815,16 @@ def torch_predict(
                 device=device,
             ),
         )
-        c = torch.view_as_real(c)
-        c = c / norm_factor
-        z[:, :, -2:] = c
+        c = (c / norm_factor)[..., None]
 
         for _ in range(1, maxit):
             # NOTE: the model already learned `A * norm_factor` so no rescaling
             # needed here. We just need it at the end to go back to physical space
             g = model.encoder(z)
-            g_next = view_as_complex(g) @ A_dmd.T
+            g_next = view_as_complex(g) @ A_dmd + c @ B_dmd
             z = model.decoder(view_as_real(g_next))
 
-            # reset c because why not, no point in letting the model go through it
-            z[:, :, -2:] = c
-
-        z = z[:, :, :-2] * norm_factor
+        z = z * norm_factor
 
     return view_as_complex(z)
 
@@ -808,6 +880,7 @@ def _plot_loss(
 def _plot_predict(
     model: DMDAutoencoder,
     A_dmd: torch.Tensor,
+    B_dmd: torch.Tensor,
     *,
     tag: str,
     basename: pathlib.Path,
@@ -821,6 +894,7 @@ def _plot_predict(
     Zpredict = torch_predict(
         model,
         A_dmd,
+        B_dmd,
         bbox=bbox,
         resolution=2 * resolution,
         maxit=maxit,
@@ -853,6 +927,7 @@ def train(
     bbox: tuple[float, float, float, float] | None = None,
     escape_radius: float | None = 10.0,
     settle_tol: float | None = None,
+    ridge_eps: float | None = None,
     resolution: int | None = None,
     maxit: int | None = None,
     epochs: int = 100,
@@ -871,7 +946,7 @@ def train(
         generate_timeseries_dataset,
         load_matrix_from_dataset,
     )
-    from nneuroutil.data import SlidingWindowDataset, random_split
+    from nneuroutil.data import random_split
 
     machine = machine_info(SCRIPT_PATH)
     log.info("Machine:\n%s", machine.pretty())
@@ -921,6 +996,9 @@ def train(
             if settle_tol is not None
             else checkpoint.get("settle_tol", 1.0e-3)
         )
+        ridge_eps = (
+            ridge_eps if ridge_eps is not None else checkpoint.get("ridge_eps", 1.0e-3)
+        )
         lr = checkpoint["lr"]
         norm_factor = checkpoint["norm_factor"]
     else:
@@ -940,6 +1018,8 @@ def train(
         norm_factor = 1.0
         if settle_tol is None:
             settle_tol = 1.0e-3
+        if ridge_eps is None:
+            ridge_eps = 1.0e-3
 
     # }}}
 
@@ -991,10 +1071,10 @@ def train(
         model_config = checkpoint["model_config"]
     else:
         model_config = {
-            "input_size": d + 1,
-            "encoder_layer_sizes": (d + 1, (d + 1) // 2),
-            "decoder_layer_sizes": ((d + 1) // 2, d + 1),
-            "eps": 1.0e-4,
+            "input_size": d,
+            "encoder_layer_sizes": (d, d // 2),
+            "decoder_layer_sizes": (d // 2, d),
+            "control_size": 1,
             "alpha": None,
         }
 
@@ -1003,6 +1083,7 @@ def train(
     model.escape_radius = escape_radius / norm_factor
     # NOTE: settle_tol is a relative step size, so it needs no scaling
     model.settle_tol = settle_tol
+    model.ridge_eps = ridge_eps
 
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -1053,15 +1134,20 @@ def train(
         xp=array_api_compat.array_namespace(mat),
         device=device,
     )
-    c = torch.view_as_real(c[mask])
-    c = c.unsqueeze(1).expand(-1, x.shape[1], -1)
 
-    x = torch.concat([x, c], dim=-1)
+    # NOTE: the control is constant along a trajectory, so it is kept per
+    # realization (shape `(n, 1)`) instead of being replicated over the window;
+    # it is passed to the model separately from the sliding windows
+    c = (c[mask] / norm_factor)[:, None]
     x = x / norm_factor
 
-    (x_train,), (x_validate,), (x_test,) = cast(
-        tuple[tuple[torch.Tensor], tuple[torch.Tensor], tuple[torch.Tensor]],
-        random_split((x,), split, rng=np.random.default_rng(seed)),
+    (x_train, c_train), (x_validate, c_validate), (x_test, c_test) = cast(
+        tuple[
+            tuple[torch.Tensor, torch.Tensor],
+            tuple[torch.Tensor, torch.Tensor],
+            tuple[torch.Tensor, torch.Tensor],
+        ],
+        random_split((x, c), split, rng=np.random.default_rng(seed)),
     )
 
     if device.type == "cuda":
@@ -1074,10 +1160,11 @@ def train(
     # {{{ train
 
     def plot_predict(epoch: int, m: DMDAutoencoder) -> None:
-        A_dmd = build_latent_dmd(m, x_train)
+        A_dmd, B_dmd = build_latent_dmd(m, x_train, c_train)
         _plot_predict(
             m,
             A_dmd,
+            B_dmd,
             tag=f"{epoch:04d}",
             basename=basename,
             bbox=bbox,
@@ -1102,6 +1189,8 @@ def train(
         scheduler,
         x_train,
         x_validate,
+        c_train=c_train,
+        c_validate=c_validate,
         epochs=epochs,
         batch_size=batch_size,
         window_size=window_size,
@@ -1110,14 +1199,14 @@ def train(
         patience_early_stop=early_stop_patience,
         callback=plot_predict,
     )
-    A_dmd = build_latent_dmd(model, x_train)
+    A_dmd, B_dmd = build_latent_dmd(model, x_train, c_train)
 
     mem.add_record("After training")
 
     model.train()
     with torch.no_grad():
-        test_dataset = SlidingWindowDataset(
-            x_test, window_size=window_size, nwindows=nwindows
+        test_dataset = ControlWindowsDataset(
+            x_test, c_test, window_size=window_size, nwindows=nwindows
         )
         test_loader = DataLoader(
             test_dataset,  # ty: ignore[invalid-argument-type]
@@ -1127,8 +1216,8 @@ def train(
         loss_test_epoch = torch.zeros(criterion.dim, device=device)
         num_test_batches = 0
 
-        for (batch_x,) in test_loader:
-            predictions = model(batch_x)
+        for batch_x, batch_c in test_loader:
+            predictions = model(batch_x, batch_c)
             loss = criterion(
                 batch_x,
                 x_out=predictions.x_out,
@@ -1168,6 +1257,8 @@ def train(
             "scheduler": scheduler.state_dict(),
             "model_config": model_config,
             "a_dmd": A_dmd,
+            "b_dmd": B_dmd,
+            "ridge_eps": ridge_eps,
             "norm_factor": norm_factor,
             # loss
             "num_epochs_trained": num_epochs_trained,
@@ -1213,6 +1304,7 @@ def train(
     _plot_predict(
         model,
         A_dmd,
+        B_dmd,
         tag="final",
         basename=basename,
         bbox=bbox,
@@ -1269,6 +1361,8 @@ def infer(
     losses = checkpoint["losses"]
     zmask = checkpoint["zmask"]
     A_dmd = checkpoint["a_dmd"]
+    B_dmd = checkpoint["b_dmd"]
+    ridge_eps = checkpoint.get("ridge_eps", 1.0e-3)
 
     if outfile is None:
         basename = weightsfile.with_suffix("")
@@ -1283,6 +1377,7 @@ def infer(
     model.load_state_dict(checkpoint["model"])
     model.escape_radius = escape_radius / norm_factor
     model.settle_tol = settle_tol
+    model.ridge_eps = ridge_eps
     model.eval()
 
     mem.add_record("After model load")
@@ -1296,6 +1391,7 @@ def infer(
     _plot_predict(
         model,
         A_dmd,
+        B_dmd,
         tag="final",
         basename=basename,
         bbox=bbox,
@@ -1429,6 +1525,15 @@ if __name__ == "__main__":
             "and masked out (default: 1e-3, from checkpoint when resuming)"
         ),
     )
+    subparser.add_argument(
+        "--ridge-eps",
+        type=float,
+        default=None,
+        help=(
+            "Ridge regularization for the DMDc least-squares solve "
+            "(default: 1e-3, from checkpoint when resuming)"
+        ),
+    )
 
     # }}}
 
@@ -1489,6 +1594,7 @@ if __name__ == "__main__":
                     dmd_warmup_epochs=args.dmd_warmup_epochs,
                     early_stop_patience=args.early_stop_patience,
                     settle_tol=args.settle_tol,
+                    ridge_eps=args.ridge_eps,
                     outfile=args.outfile,
                     overwrite=args.force,
                 )
