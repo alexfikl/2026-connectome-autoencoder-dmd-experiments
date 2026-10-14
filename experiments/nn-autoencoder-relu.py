@@ -210,6 +210,7 @@ def train(
 ) -> int:
     from commonlib import (
         generate_timeseries_dataset,
+        load_matrix_datasets,
         split_timeseries_datasets,
         torch_train,
     )
@@ -235,42 +236,21 @@ def train(
 
         checkpoint = torch.load(weights, map_location=device, weights_only=True)
         config = AutoencoderConfig.from_sources(checkpoint["config"], overrides)
-
-        # NOTE: keep the original provenance and record each resume
-        previous = checkpoint["provenance"]
-        previous.setdefault("resumes", []).append(provenance)
-        provenance = previous
+        mat = checkpoint["mat"]
     else:
         config = AutoencoderConfig.from_sources(overrides)
 
-    # }}}
-
-    # {{{ validate inputs
-
-    if not filename.exists():
-        log.error("File does not exist: '%s'.", filename)
-        return 1
-
-    try:
-        data = np.load(filename)
-    except Exception:
-        log.error("Failed to load data from file: '%s'.", filename)
-        return 1
-
-    if config.datakey not in data:
-        log.error("File does not contain '%s' dataset: '%s'.", config.datakey, filename)
-        return 1
-
-    matrices = data[config.datakey]
-    if matrices.ndim != 3:
-        log.error("Expected a 3 dimensional array: %s.", matrices.shape)
-        return 1
-
-    # NOTE: we don't really need complex128 for this example, so save some memory
-    mat = torch.from_numpy(matrices[config.dataidx]).to(torch.complex64).to(device)
-    if mat.shape[0] != mat.shape[1]:
-        log.error("Expected a square matrix: %s.", mat.shape)
-        return 1
+        try:
+            matrices = cast(
+                torch.Tensor,
+                load_matrix_datasets(
+                    filename, key=config.datakey, device=device, xp=torch
+                ),
+            )
+            mat = matrices[config.dataidx].to(torch.complex64)
+        except Exception as exc:
+            log.error("Failed to load dataset '%s': %s", filename.name, exc)
+            return 1
 
     mem.add_record("After data load")
 
@@ -415,6 +395,7 @@ def train(
     torch.save(
         {
             # model
+            "provenance": provenance,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
@@ -425,11 +406,10 @@ def train(
             "loss_test": loss_test,
             # dataset
             "inputfile": str(filename),
+            "mat": mat,
             "zmask": zmask,
             # parameters
             "config": asdict(config),
-            # provenance
-            "provenance": provenance,
         },
         weightsfile,
     )
@@ -541,11 +521,10 @@ if __name__ == "__main__":
     if not args.quiet:
         log.setLevel(logging.INFO)
 
-    overrides = vars(args)
-
     with torch_default_device(args.device):
         # NOTE: use TF32 for matrix multiplication (should be faster, similar precision)
         torch.set_float32_matmul_precision("high")
+        overrides = vars(args)
 
         if args.command == "train":
             raise SystemExit(
