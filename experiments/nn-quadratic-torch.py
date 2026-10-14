@@ -28,8 +28,8 @@ Trains or runs inference with a quadratic neural network: f(z) = (W z)^2 + b.
 
 Examples:
 
-    > {SCRIPT_PATH.name} --device cuda train dataset.npz
-    > {SCRIPT_PATH.name} --device cuda infer dataset-quad.pkl
+    > {SCRIPT_PATH.name} --device cpu train dataset.npz
+    > {SCRIPT_PATH.name} --device cpu infer dataset-quad.pkl
 """
 
 
@@ -599,7 +599,7 @@ if __name__ == "__main__":
         action=FuzzyChoiceAction,
         choices=sorted(available_device_names()),
         default="cpu",
-        help="The default deviced used by the framework",
+        help="The default device used by the framework",
     )
     parser.add_argument(
         "-o",

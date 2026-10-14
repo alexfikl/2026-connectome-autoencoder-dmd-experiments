@@ -436,6 +436,7 @@ def train(
     from commonlib import (
         determine_escape_radius,
         generate_timeseries_dataset,
+        load_matrix_from_dataset,
         make_timeseries_datasets,
     )
 
@@ -474,7 +475,6 @@ def train(
         split = checkpoint["split"] if split is None else split
         seed = checkpoint["seed"] if seed is None else seed
 
-        datakey = checkpoint["datakey"]
         escape_radius = checkpoint["escape_radius"]
         lr = checkpoint["lr"]
         weight_decay = checkpoint["weight_decay"]
@@ -492,28 +492,16 @@ def train(
         lr = 5.0e-3
         weight_decay = 1.0e-2
 
-        if not filename.exists():
-            log.error("File does not exist: '%s'.", filename)
-            return 1
-
         try:
-            data = np.load(filename)
-        except Exception:
-            log.error("Failed to load data from file: '%s'.", filename)
-            return 1
-
-        if datakey not in data:
-            log.error("File does not contain '%s' dataset: '%s'.", datakey, filename)
-            return 1
-
-        matrices = data[datakey]
-        if matrices.ndim != 3:
-            log.error("Expected a 3 dimensional array: %s.", matrices.shape)
-            return 1
-
-        mat = jnp.array(matrices[dataidx], dtype=jnp.complex64).to_device(device)
-        if mat.shape[0] != mat.shape[1]:
-            log.error("Expected a square matrix: %s.", mat.shape)
+            mat = cast(
+                jax.Array,
+                load_matrix_from_dataset(
+                    filename, dataidx, key=datakey, device=device, xp=jnp
+                ),
+            )
+            mat = mat.astype(jnp.complex64)
+        except Exception as exc:
+            log.error("Failed to load dataset '%s': %s", filename.name, exc)
             return 1
 
         if escape_radius is None:
@@ -657,7 +645,6 @@ def train(
                 "loss_test": loss_test,
                 # dataset
                 "inputfile": str(filename),
-                "datakey": datakey,
                 "dataidx": dataidx,
                 "mat": np.asarray(mat),
                 "bbox": bbox,
