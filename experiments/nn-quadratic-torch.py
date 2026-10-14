@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+from collections.abc import Mapping
 from typing import Any, cast
 
 import numpy as np
@@ -82,6 +83,7 @@ class QuadraticNetwork(nn.Module):
             Bias(2 * output_size, device=device, dtype=dtype),
         )
 
+    # ty: ignore[invalid-mutable-override]
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
 
@@ -93,11 +95,11 @@ class QuadraticNetwork(nn.Module):
 
 
 def _plot_predict(
+    filename: pathlib.Path,
     model: QuadraticNetwork,
     config: Config,
     *,
     tag: str,
-    basename: pathlib.Path,
     overwrite: bool,
 ) -> None:
     from commonlib import torch_predict
@@ -113,7 +115,7 @@ def _plot_predict(
     mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
 
     with figure(
-        basename.with_stem(f"{basename.stem}-predict-{tag}"),
+        filename.with_stem(f"{filename.stem}-predict-{tag}"),
         overwrite=overwrite,
     ) as fig:
         ax = fig.gca()
@@ -121,28 +123,28 @@ def _plot_predict(
 
 
 def _plot_dataset(
+    filename: pathlib.Path,
     zmask: torch.Tensor,
     *,
-    basename: pathlib.Path,
     bbox: tuple[float, float, float, float],
     overwrite: bool,
 ) -> None:
     with figure(
-        basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
+        filename.with_stem(f"{filename.stem}-dataset"), overwrite=overwrite
     ) as fig:
         ax = fig.gca()
         ax.imshow(zmask.cpu().numpy(), extent=bbox, cmap="binary")
 
 
 def _plot_loss(
+    filename: pathlib.Path,
     losses: torch.Tensor,
     loss_test: float,
     *,
-    basename: pathlib.Path,
     overwrite: bool,
 ) -> None:
     with figure(
-        basename.with_stem(f"{basename.stem}-loss"), overwrite=overwrite
+        filename.with_stem(f"{filename.stem}-loss"), overwrite=overwrite
     ) as fig:
         ax = fig.gca()
 
@@ -156,10 +158,10 @@ def _plot_loss(
 
 
 def _plot_weights(
+    filename: pathlib.Path,
     model: QuadraticNetwork,
     mat: torch.Tensor,
     *,
-    basename: pathlib.Path,
     overwrite: bool,
 ) -> None:
     # NOTE: the nn is trained to appproximate the trajectory, not the matrix A,
@@ -173,7 +175,7 @@ def _plot_weights(
     A = mat.to(learned_A.dtype)
 
     with figure(
-        basename.with_stem(f"{basename.stem}-weights"),
+        filename.with_stem(f"{filename.stem}-weights"),
         nrows=2,
         ncols=2,
         overwrite=overwrite,
@@ -225,7 +227,7 @@ def _plot_weights(
 
 def train(
     filename: pathlib.Path,
-    config: Config,
+    overrides: Mapping[str, Any],
     *,
     weights: pathlib.Path | None = None,
     outfile: pathlib.Path | None = None,
@@ -259,16 +261,10 @@ def train(
             return 1
 
         checkpoint = torch.load(weights, map_location=device, weights_only=True)
-        config = config.from_checkpoint(checkpoint).with_defaults()
-
-        # NOTE: keep the original provenance and record each resume
-        previous = checkpoint["provenance"]
-        previous.setdefault("resumes", []).append(provenance)
-        provenance = previous
-
+        config = Config.from_sources(checkpoint["config"], overrides)
         mat = checkpoint["mat"]
     else:
-        config = config.with_defaults()
+        config = Config.from_sources(overrides)
 
         try:
             matrices = cast(
@@ -284,9 +280,8 @@ def train(
 
     if outfile is None:
         outfile = filename.parent / f"{filename.stem}-quad.npz"
-    outfile = outfile.with_stem(f"{outfile.stem}-{config.suffix}")
 
-    basename = outfile.with_suffix("")
+    outfile = outfile.with_stem(f"{outfile.stem}-{config.suffix}").with_suffix("")
     weightsfile = outfile.with_suffix(".pkl")
 
     if not overwrite and weightsfile.exists():
@@ -358,10 +353,10 @@ def train(
             return
 
         _plot_predict(
+            outfile,
             m,  # ty: ignore[invalid-argument-type]
             config,
             tag=f"{epoch:04d}",
-            basename=basename,
             overwrite=overwrite,
         )
 
@@ -421,7 +416,7 @@ def train(
             "mat": mat,
             "zmask": zmask,
             # parameters
-            **asdict(config),
+            "config": asdict(config),
         },
         weightsfile,
     )
@@ -435,9 +430,9 @@ def train(
 
     # {{{ plot
 
-    _plot_dataset(zmask, basename=basename, bbox=config.bbox, overwrite=overwrite)
-    _plot_loss(losses, loss_test, basename=basename, overwrite=overwrite)
-    _plot_weights(model, mat, basename=basename, overwrite=overwrite)
+    _plot_dataset(outfile, zmask, bbox=config.bbox, overwrite=overwrite)
+    _plot_loss(outfile, losses, loss_test, overwrite=overwrite)
+    _plot_weights(outfile, model, mat, overwrite=overwrite)
 
     # }}}
 
@@ -455,7 +450,7 @@ def train(
 
 def infer(
     weightsfile: pathlib.Path,
-    config: Config,
+    overrides: Mapping[str, Any],
     *,
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
@@ -471,7 +466,7 @@ def infer(
     mem.add_record("Start")
 
     checkpoint = torch.load(weightsfile, map_location=device, weights_only=True)
-    config = config.from_checkpoint(checkpoint).with_defaults()
+    config = Config.from_sources(checkpoint["config"], overrides)
 
     losses = checkpoint["losses"]
     loss_test = checkpoint["loss_test"]
@@ -479,9 +474,8 @@ def infer(
     mat = cast(torch.Tensor, checkpoint["mat"])
 
     if outfile is None:
-        basename = weightsfile.with_suffix("")
-    else:
-        basename = outfile.with_suffix("")
+        outfile = weightsfile.with_suffix("")
+    outfile = outfile.with_suffix("")
 
     # {{{ load model
 
@@ -497,10 +491,10 @@ def infer(
     # {{{ predict
 
     _plot_predict(
+        outfile,
         model,
         config,
         tag="final",
-        basename=basename,
         overwrite=overwrite,
     )
 
@@ -510,9 +504,9 @@ def infer(
 
     # {{{ plot
 
-    _plot_dataset(zmask, basename=basename, bbox=config.bbox, overwrite=overwrite)
-    _plot_loss(losses, loss_test, basename=basename, overwrite=overwrite)
-    _plot_weights(model, mat, basename=basename, overwrite=overwrite)
+    _plot_dataset(outfile, zmask, bbox=config.bbox, overwrite=overwrite)
+    _plot_loss(outfile, losses, loss_test, overwrite=overwrite)
+    _plot_weights(outfile, model, mat, overwrite=overwrite)
 
     # }}}
 
@@ -536,17 +530,16 @@ if __name__ == "__main__":
     if not args.quiet:
         log.setLevel(logging.INFO)
 
-    config = Config.from_commandline(args)
-
     with torch_default_device(args.device):
         # NOTE: use TF32 for matrix multiplication (should be faster, similar precision)
         torch.set_float32_matmul_precision("high")
+        overrides = vars(args)
 
         if args.command == "train":
             raise SystemExit(
                 train(
                     args.filename,
-                    config,
+                    overrides,
                     weights=args.weights,
                     outfile=args.outfile,
                     overwrite=args.force,
@@ -554,7 +547,12 @@ if __name__ == "__main__":
             )
         elif args.command == "infer":
             raise SystemExit(
-                infer(args.filename, config, outfile=args.outfile, overwrite=args.force)
+                infer(
+                    args.filename,
+                    overrides,
+                    outfile=args.outfile,
+                    overwrite=args.force,
+                )
             )
         else:
             raise SystemExit(1)

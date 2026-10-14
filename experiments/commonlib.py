@@ -7,8 +7,9 @@ import argparse
 import math
 import os
 import pathlib
-from collections.abc import Callable
-from dataclasses import dataclass
+import secrets
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass, fields
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import array_api_compat
@@ -218,98 +219,53 @@ def determine_escape_radius(A: Array2D[np.number[Any]]) -> float:
 # {{{ configuration
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Config:
-    device: str
-    epochs: int
-    lr: float
+    # optimizer
+    epochs: int = 50
+    lr: float = 5.0e-3
 
-    # cqn
-    bbox: tuple[float, float, float, float]
-    resolution: int
-    maxit: int
-    escape_radius: float
+    # cqn dataset
+    bbox: tuple[float, float, float, float] = (-0.3, 0.3, -0.3, 0.3)
+    resolution: int = 128
+    maxit: int = 128
+    escape_radius: float = 100.0
 
     # train + infer
-    dataidx: int
-    batch_size: int
-    seed: int
-    split: tuple[float, float, float]
-    early_stop_patience: int
+    dataidx: int = 5
+    batch_size: int = 4096
+    seed: int | None = None
+    split: tuple[float, float, float] = (0.8, 0.1, 0.1)
+    early_stop_patience: int = 0
 
     @property
-    def suffix(self) -> pathlib.Path:
-        from hashlib import sha256
+    def suffix(self) -> str:
+        import hashlib
+        import json
 
-        device = self.device.split(":")[0]
-        hashid = sha256(bytes(hash(self)))
-        return f"{device}-r{self.resolution}-n{self.maxit}-{hashid}"
+        payload = json.dumps(asdict(self), sort_keys=True, default=str).encode()
+        digest = hashlib.sha256(payload).hexdigest()[:12]
 
-    def with_defaults(self) -> Config:
-        return self.from_checkpoint({
-            # cqn
-            "bbox": (-0.3, 0.3, -0.3, 0.3),
-            "resolution": 128,
-            "maxit": 128,
-            "escape_radius": 100.0,
-            # train+infer
-            "dataidx": 5,
-            "batch_size": 4096,
-            "seed": int(np.random.SeedSequence().entropy),  # ty: ignore[invalid-argument-type]
-            "split": (0.8, 0.1, 0.1),
-            "early_stop_patience": 0,
-        })
+        return f"r{self.resolution}-n{self.maxit}-{digest}"
 
-    @staticmethod
-    def from_commandline(args: argparse.Namespace) -> Config:
-        bbox = None if args.bbox is None else tuple(args.bbox)
+    @classmethod
+    def from_sources(cls, *sources: Mapping[str, Any] | None) -> Config:
+        values: dict[str, Any] = {f.name: f.default for f in fields(cls)}
 
-        return Config(
-            device=args.device,
-            # cqn
-            bbox=bbox,  # ty: ignore[invalid-argument-type]
-            resolution=args.resolution,
-            maxit=args.maxit,
-            escape_radius=None,  # ty: ignore[invalid-argument-type]
-            # train + infer
-            dataidx=args.dataidx,
-            epochs=50,
-            lr=5.0e-3,
-            batch_size=args.batch_size,
-            seed=None,  # ty: ignore[invalid-argument-type]
-            split=None,  # ty: ignore[invalid-argument-type]
-            early_stop_patience=args.early_stop_patience,
-        )
+        for source in sources:
+            if source is None:
+                continue
 
-    def from_checkpoint(self, checkpoint: dict[str, Any]) -> Config:
-        return Config(
-            device=self.device,
-            # cqn
-            bbox=checkpoint["bbox"] if self.bbox is None else self.bbox,
-            resolution=(
-                checkpoint["resolution"] if self.resolution is None else self.resolution
-            ),
-            maxit=checkpoint["maxit"] if self.maxit is None else self.maxit,
-            escape_radius=(
-                checkpoint["escape_radius"]
-                if self.escape_radius is None
-                else self.escape_radius
-            ),
-            # train + infer
-            dataidx=checkpoint["dataidx"] if self.dataidx is None else self.dataidx,
-            epochs=self.epochs,
-            lr=self.lr,
-            batch_size=(
-                checkpoint["batch_size"] if self.batch_size is None else self.batch_size
-            ),
-            seed=checkpoint["seed"] if self.seed is None else self.seed,
-            split=checkpoint["split"] if self.split is None else self.split,
-            early_stop_patience=(
-                checkpoint["early_stop_patience"]
-                if self.early_stop_patience is None
-                else self.early_stop_patience
-            ),
-        )
+            values.update({
+                key: value
+                for key, value in source.items()
+                if key in values and value is not None
+            })
+
+        if values["seed"] is None:
+            values["seed"] = secrets.randbits(64)
+
+        return cls(**values)
 
 
 def make_argument_parser(
@@ -395,6 +351,36 @@ def make_argument_parser(
         type=int,
         default=None,
         help="Batch size to use for training",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Number of epochs to train for",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        help="Learning rate for the optimizer",
+    )
+    parser.add_argument(
+        "--escape-radius",
+        type=float,
+        default=None,
+        help="Escape radius used to clip trajectories",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed (a random one is drawn if not given)",
+    )
+    parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=None,
+        help="Epochs to wait for an improvement before stopping (0 disables)",
     )
     subparser.add_argument(
         "--dataidx",
