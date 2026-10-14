@@ -403,7 +403,7 @@ def train(
         batch_size=batch_size,
         target_scale=target_scale,
         patience_early_stop=early_stop_patience,
-        callback=plot_predict,
+        # callback=plot_predict,
     )
 
     mem.add_record("After training")
@@ -456,6 +456,7 @@ def train(
         },
         weightsfile,
     )
+    log.info("Saved checkpoint: '%s'.", weightsfile)
 
     mem.add_record("After checkpoint")
 
