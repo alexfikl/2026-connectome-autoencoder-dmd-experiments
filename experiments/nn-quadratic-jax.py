@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import pickle
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -15,17 +16,24 @@ import optax
 from flax import nnx
 
 from nneuroutil.flax_extras import JaxMemoryTracker, available_device_names
-from nneuroutil.helpers import FuzzyChoiceAction, module_logger, to_complex
+from nneuroutil.helpers import (
+    FuzzyChoiceAction,
+    machine_info,
+    module_logger,
+    to_complex,
+)
+from nneuroutil.visualization import figure, make_colorbar_axes
 
 log = module_logger("lib.quadratic_network")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
-Trains a quadratic neural network: f(z) = (W z)^2 + b.
+Trains or runs inference with a quadratic neural network: f(z) = (W z)^2 + b.
 
-Example:
+Examples:
 
-    > {SCRIPT_PATH.name} --device cpu dataset.npz
+    > {SCRIPT_PATH.name} --device cpu train dataset.npz
+    > {SCRIPT_PATH.name} --device cpu infer dataset-quad.pkl
 """
 
 
@@ -268,253 +276,83 @@ def flax_predict(
 # }}}
 
 
-def main(
-    filename: pathlib.Path,
+# {{{ helpers
+
+
+def _as_jax(x: Any) -> Any:
+    """Convert NumPy arrays back to JAX arrays (e.g. after unpickling)."""
+    return jnp.asarray(x) if isinstance(x, np.ndarray) else x
+
+
+def _plot_predict(
+    model: QuadraticNetwork,
     *,
-    outfile: pathlib.Path | None = None,
-    datakey: str = "matrices",
-    dataidx: int = 5,
-    bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
-    escape_radius: float | None = 100.0,
-    resolution: int = 128,
-    maxit: int = 128,
-    epochs: int = 50,
-    batch_size: int = 4096,
-    early_stop_patience: int = 0,
-    overwrite: bool = False,
-) -> int:
-    (device,) = jax.devices(jax.default_backend())
-    log.info("Device: %s", device)
-
-    mem = JaxMemoryTracker(device)
-    mem.add_record("Start")
-
-    # {{{ validate inputs
-
-    if not filename.exists():
-        log.error("File does not exist: '%s'.", filename)
-        return 1
-
-    try:
-        data = np.load(filename)
-    except Exception:
-        log.error("Failed to load data from file: '%s'.", filename)
-        return 1
-
-    if datakey not in data:
-        log.error("File does not contain '%s' dataset: '%s'.", datakey, filename)
-        return 1
-
-    matrices = data[datakey]
-    if matrices.ndim != 3:
-        log.error("Expected a 3 dimensional array: %s.", matrices.shape)
-        return 1
-
-    mat = jnp.array(matrices[dataidx], dtype=jnp.complex64).to_device(device)
-    if mat.shape[0] != mat.shape[1]:
-        log.error("Expected a square matrix: %s.", mat.shape)
-        return 1
-
-    if escape_radius is None:
-        from commonlib import determine_escape_radius
-
-        escape_radius = determine_escape_radius(mat)
-
-    mem.add_record("After data load")
-
-    if outfile is None:
-        outfile = filename.parent / f"{filename.stem}-quad.npz"
-
-    outfile = outfile.with_stem(
-        f"{outfile.stem}-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}-{jax.default_backend()}"
-    )
-    basename = outfile.with_suffix("")
-
-    # }}}
-
-    # {{{ plot predict
-
-    import pickle
-
-    from nneuroutil.visualization import figure, make_colorbar_axes
-
-    def plot_predict(epoch: int, m: QuadraticNetwork) -> None:
-        # NOTE: plot 10 epochs and then only every 10th one to save time / memory
-        if epoch > 10 and epoch % 10 != 0:
-            return
-
-        Zpredict = flax_predict(
-            m,
-            bbox=bbox,
-            resolution=2 * resolution,
-            maxit=maxit,
-        )
-        mask = jnp.sum(Zpredict.real**2 + Zpredict.imag**2, axis=-1) < escape_radius**2
-
-        with figure(
-            basename.with_stem(f"{basename.stem}-predict-{epoch:04d}"),
-            overwrite=overwrite,
-        ) as fig:
-            ax = fig.gca()
-            ax.imshow(np.array(mask), extent=bbox, cmap="binary")
-
-    # }}}
-
-    # {{{ train
-
-    d = mat.shape[0]
-    model = QuadraticNetwork(d, d, dtype=mat.real.dtype, rngs=nnx.Rngs(0))
-    criterion = MSELoss()
-    optimizer = nnx.Optimizer(
+    tag: str,
+    basename: pathlib.Path,
+    bbox: tuple[float, float, float, float],
+    resolution: int,
+    maxit: int,
+    escape_radius: float,
+    overwrite: bool,
+) -> None:
+    Zpredict = flax_predict(
         model,
-        optax.adamw(learning_rate=5.0e-3, weight_decay=1.0e-2),
-        wrt=nnx.Param,
+        bbox=bbox,
+        resolution=2 * resolution,
+        maxit=maxit,
     )
+    mask = jnp.sum(Zpredict.real**2 + Zpredict.imag**2, axis=-1) < escape_radius**2
 
-    log.info("Network:\n%r", model, extra={"highlighter": None})
+    with figure(
+        basename.with_stem(f"{basename.stem}-predict-{tag}"),
+        overwrite=overwrite,
+    ) as fig:
+        ax = fig.gca()
+        ax.imshow(np.array(mask), extent=bbox, cmap="binary")
 
-    weightsfile = outfile.with_suffix(".pkl")
-    if weightsfile.exists():
-        with open(weightsfile, "rb") as f:
-            checkpoint = pickle.load(f)
 
-        nnx.update(
-            model,
-            jax.tree.map(
-                lambda x: jnp.asarray(x) if isinstance(x, np.ndarray) else x,
-                checkpoint["model"],
-            ),
-        )
-        losses = checkpoint["losses"]
-        loss_test = checkpoint.get("loss_test", 0.0)
-        zmask = checkpoint["zmask"]
-
-        plot_predict(epochs, model)
-    else:
-        from commonlib import (
-            generate_timeseries_dataset,
-            make_timeseries_datasets,
-        )
-
-        # {{{ generate dataset
-
-        x, y, _, zmask = generate_timeseries_dataset(
-            mat,
-            bbox=bbox,
-            resolution=resolution,
-            maxit=maxit,
-            escape_radius=escape_radius,
-        )
-        xy_train, xy_validate, xy_test = cast(
-            tuple[
-                tuple[jax.Array, jax.Array],
-                tuple[jax.Array, jax.Array],
-                tuple[jax.Array, jax.Array],
-            ],
-            make_timeseries_datasets(
-                x, y, (0.8, 0.1, 0.1), rng=np.random.default_rng(42)
-            ),
-        )
-
-        mem.add_record("After data generation")
-
-        # }}}
-
-        # {{{ train
-
-        _, y_train = xy_train
-        target_scale = jnp.mean(y_train.conj() * y_train).real.item()
-
-        model, _optimizer, losses = flax_train(
-            model,
-            criterion,
-            optimizer,
-            xy_train,
-            xy_validate,
-            epochs=epochs,
-            batch_size=batch_size,
-            target_scale=target_scale,
-            patience_early_stop=early_stop_patience,
-            callback=plot_predict,
-        )
-
-        mem.add_record("After training")
-
-        # }}}
-
-        # {{{ test loss
-
-        x_test, y_test = xy_test
-        predictions = model(x_test)
-        loss_test = float(criterion(predictions, y_test) / target_scale)
-
-        log.info("[%03d/%03d] test %.5e", epochs, epochs, loss_test)
-
-        mem.add_record("After test loss")
-
-        # }}}
-
-        # {{{ checkpoint
-
-        num_epochs_trained = len(losses)
-        with open(weightsfile, "wb") as f:
-            pickle.dump(
-                {
-                    # model
-                    "model": nnx.state(model),
-                    "epochs": epochs,
-                    "num_epochs_trained": num_epochs_trained,
-                    "losses": np.array(losses),
-                    "loss_test": loss_test,
-                    "zmask": zmask,
-                    # parameters
-                    "inputfile": str(filename),
-                    "dataidx": dataidx,
-                    "bbox": bbox,
-                    "escape_radius": escape_radius,
-                    "resolution": resolution,
-                    "maxit": maxit,
-                    "early_stop_patience": early_stop_patience,
-                },
-                f,
-            )
-
-        mem.add_record("After checkpoint")
-
-        # }}}
-
-    # }}}
-
-    # {{{ plot fractal
-
+def _plot_dataset(
+    zmask: jax.Array,
+    *,
+    basename: pathlib.Path,
+    bbox: tuple[float, float, float, float],
+    overwrite: bool,
+) -> None:
     with figure(
         basename.with_stem(f"{basename.stem}-dataset"), overwrite=overwrite
     ) as fig:
         ax = fig.gca()
         ax.imshow(np.array(zmask), extent=bbox, cmap="binary")
 
-    # }}}
 
-    # {{{ plot loss
-
-    losses = np.asarray(losses)
-
+def _plot_loss(
+    losses: jax.Array,
+    loss_test: float,
+    *,
+    basename: pathlib.Path,
+    overwrite: bool,
+) -> None:
     with figure(
         basename.with_stem(f"{basename.stem}-loss"), overwrite=overwrite
     ) as fig:
         ax = fig.gca()
 
-        ax.semilogy(losses[:, 0, 0], label="Train")
-        ax.semilogy(losses[:, 1, 0], label="Validation")
+        losses_np = np.asarray(losses)
+        ax.semilogy(losses_np[:, 0, 0], label="Train")
+        ax.semilogy(losses_np[:, 1, 0], label="Validation")
         ax.axhline(loss_test, color="k", ls="--")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
         ax.legend()
 
-    # }}}
 
-    # {{{ plot weight matrices
-
+def _plot_weights(
+    model: QuadraticNetwork,
+    mat: jax.Array,
+    *,
+    basename: pathlib.Path,
+    overwrite: bool,
+) -> None:
     # NOTE: the nn is trained to approximate the trajectory, not the matrix A,
     # even though the structure is the same (`(W x)^2 + b`). We look at the
     # linear layer to get a sense of what it managed to do here. However,
@@ -570,12 +408,385 @@ def main(
         ax22.set_title("SVD")
         ax22.legend()
 
+
+# }}}
+
+
+# {{{ train
+
+
+def train(
+    filename: pathlib.Path,
+    *,
+    weights: pathlib.Path | None = None,
+    outfile: pathlib.Path | None = None,
+    datakey: str = "matrices",
+    dataidx: int | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
+    escape_radius: float | None = 100.0,
+    resolution: int | None = None,
+    maxit: int | None = None,
+    epochs: int = 50,
+    batch_size: int | None = None,
+    split: tuple[float, float, float] | None = None,
+    seed: int | None = None,
+    early_stop_patience: int = 0,
+    overwrite: bool = False,
+) -> int:
+    from commonlib import (
+        determine_escape_radius,
+        generate_timeseries_dataset,
+        make_timeseries_datasets,
+    )
+
+    machine = machine_info(SCRIPT_PATH)
+    log.info("Machine:\n%s", machine.pretty())
+
+    (device,) = jax.devices(jax.default_backend())
+    log.info("Device: %s", device)
+
+    mem = JaxMemoryTracker(device)
+    mem.add_record("Start")
+
+    provenance = {**machine._asdict(), "device": str(device)}
+
+    # {{{ load parameters
+
+    checkpoint: dict[str, Any] | None = None
+    if weights is not None:
+        if not weights.exists():
+            log.error("Weights file does not exist: '%s'.", weights)
+            return 1
+
+        with open(weights, "rb") as f:
+            checkpoint = pickle.load(f)
+
+        # NOTE: keep the original provenance and record each resume
+        previous = checkpoint["provenance"]
+        previous.setdefault("resumes", []).append(provenance)
+        provenance = previous
+
+        dataidx = checkpoint["dataidx"] if dataidx is None else dataidx
+        bbox = checkpoint["bbox"] if bbox is None else bbox
+        resolution = checkpoint["resolution"] if resolution is None else resolution
+        maxit = checkpoint["maxit"] if maxit is None else maxit
+        batch_size = checkpoint["batch_size"] if batch_size is None else batch_size
+        split = checkpoint["split"] if split is None else split
+        seed = checkpoint["seed"] if seed is None else seed
+
+        datakey = checkpoint["datakey"]
+        escape_radius = checkpoint["escape_radius"]
+        lr = checkpoint["lr"]
+        weight_decay = checkpoint["weight_decay"]
+        mat = jnp.asarray(checkpoint["mat"])
+    else:
+        dataidx = 5 if dataidx is None else dataidx
+        bbox = (-0.03, 0.03, -0.03, 0.03) if bbox is None else bbox
+        resolution = 128 if resolution is None else resolution
+        maxit = 128 if maxit is None else maxit
+        batch_size = 4096 if batch_size is None else batch_size
+        split = (0.8, 0.1, 0.1) if split is None else split
+        if seed is None:
+            seed = int(np.random.SeedSequence().entropy)  # ty: ignore[invalid-argument-type]
+
+        lr = 5.0e-3
+        weight_decay = 1.0e-2
+
+        if not filename.exists():
+            log.error("File does not exist: '%s'.", filename)
+            return 1
+
+        try:
+            data = np.load(filename)
+        except Exception:
+            log.error("Failed to load data from file: '%s'.", filename)
+            return 1
+
+        if datakey not in data:
+            log.error("File does not contain '%s' dataset: '%s'.", datakey, filename)
+            return 1
+
+        matrices = data[datakey]
+        if matrices.ndim != 3:
+            log.error("Expected a 3 dimensional array: %s.", matrices.shape)
+            return 1
+
+        mat = jnp.array(matrices[dataidx], dtype=jnp.complex64).to_device(device)
+        if mat.shape[0] != mat.shape[1]:
+            log.error("Expected a square matrix: %s.", mat.shape)
+            return 1
+
+        if escape_radius is None:
+            escape_radius = determine_escape_radius(mat)
+
+    mem.add_record("After data load")
+
+    if outfile is None:
+        outfile = filename.parent / f"{filename.stem}-quad.npz"
+
+    outfile = outfile.with_stem(
+        f"{outfile.stem}-{dataidx:02d}-r{resolution:04d}"
+        f"-n{maxit:04d}-{jax.default_backend()}"
+    )
+    basename = outfile.with_suffix("")
+    weightsfile = outfile.with_suffix(".pkl")
+
+    if not overwrite and weightsfile.exists():
+        log.error(
+            "Weights file already exist (use --force to overwrite): '%s'", weightsfile
+        )
+        return 1
+
+    # }}}
+
+    # {{{ train
+
+    d = mat.shape[0]
+    model = QuadraticNetwork(d, d, dtype=mat.real.dtype, rngs=nnx.Rngs(0))
+    criterion = MSELoss()
+    optimizer = nnx.Optimizer(
+        model,
+        optax.adamw(learning_rate=lr, weight_decay=weight_decay),
+        wrt=nnx.Param,
+    )
+
+    log.info("Network:\n%r", model, extra={"highlighter": None})
+
+    losses_previous: jax.Array | None = None
+    if checkpoint is not None:
+        nnx.update(model, jax.tree.map(_as_jax, checkpoint["model"]))
+        nnx.update(optimizer, jax.tree.map(_as_jax, checkpoint["optimizer"]))
+
+        losses_previous = checkpoint["losses"]
+        log.info(
+            "Resuming from '%s' (%d epochs trained)",
+            weights,
+            checkpoint["num_epochs_trained"],
+        )
+
+    # {{{ generate dataset
+
+    x, y, _, zmask = cast(
+        tuple[jax.Array, jax.Array, jax.Array, jax.Array],
+        generate_timeseries_dataset(
+            mat,
+            bbox=bbox,
+            resolution=resolution,
+            maxit=maxit,
+            escape_radius=escape_radius,
+        ),
+    )
+    xy_train, xy_validate, xy_test = cast(
+        tuple[
+            tuple[jax.Array, jax.Array],
+            tuple[jax.Array, jax.Array],
+            tuple[jax.Array, jax.Array],
+        ],
+        make_timeseries_datasets(x, y, split, rng=np.random.default_rng(seed)),
+    )
+
+    mem.add_record("After data generation")
+
+    # }}}
+
+    # {{{ train
+
+    def plot_predict(epoch: int, m: QuadraticNetwork) -> None:
+        # NOTE: plot 10 epochs and then only every 10th one to save time / memory
+        if epoch > 10 and epoch % 10 != 0:
+            return
+
+        _plot_predict(
+            m,
+            tag=f"{epoch:04d}",
+            basename=basename,
+            bbox=bbox,
+            resolution=resolution,
+            maxit=maxit,
+            escape_radius=escape_radius,
+            overwrite=overwrite,
+        )
+
+    _, y_train = xy_train
+    target_scale = jnp.mean(y_train.conj() * y_train).real.item()
+
+    model, _optimizer, losses = flax_train(
+        model,
+        criterion,
+        optimizer,
+        xy_train,
+        xy_validate,
+        epochs=epochs,
+        batch_size=batch_size,
+        target_scale=target_scale,
+        patience_early_stop=early_stop_patience,
+        # callback=plot_predict,
+    )
+
+    mem.add_record("After training")
+
+    # }}}
+
+    # {{{ test loss
+
+    x_test, y_test = xy_test
+    predictions = model(x_test)
+    loss_test = float(criterion(predictions, y_test) / target_scale)
+
+    log.info("[%03d/%03d] test %.5e", epochs, epochs, loss_test)
+
+    mem.add_record("After test loss")
+
+    # }}}
+
+    # {{{ checkpoint
+
+    if losses_previous is not None:
+        losses = jnp.concatenate((jnp.asarray(losses_previous), losses))
+
+    num_epochs_trained = len(losses)
+    with open(weightsfile, "wb") as f:
+        pickle.dump(
+            {
+                # model
+                "model": nnx.state(model),
+                "optimizer": nnx.state(optimizer),
+                # loss
+                "num_epochs_trained": num_epochs_trained,
+                "losses": np.array(losses),
+                "loss_test": loss_test,
+                # dataset
+                "inputfile": str(filename),
+                "datakey": datakey,
+                "dataidx": dataidx,
+                "mat": np.asarray(mat),
+                "bbox": bbox,
+                "escape_radius": escape_radius,
+                "resolution": resolution,
+                "maxit": maxit,
+                "zmask": np.asarray(zmask),
+                # hyperparameters
+                "epochs": epochs,
+                "early_stop_patience": early_stop_patience,
+                "lr": lr,
+                "weight_decay": weight_decay,
+                "batch_size": batch_size,
+                "split": split,
+                "seed": seed,
+                # provenance
+                "provenance": provenance,
+            },
+            f,
+        )
+    log.info("Saved checkpoint: '%s'.", weightsfile)
+
+    mem.add_record("After checkpoint")
+
+    # }}}
+
+    # }}}
+
+    # {{{ plot
+
+    _plot_dataset(zmask, basename=basename, bbox=bbox, overwrite=overwrite)
+    _plot_loss(losses, loss_test, basename=basename, overwrite=overwrite)
+    _plot_weights(model, mat, basename=basename, overwrite=overwrite)
+
     # }}}
 
     mem.add_record("Finished")
     log.info("Memory:\n%s", mem)
 
     return 0
+
+
+# }}}
+
+
+# {{{ infer
+
+
+def infer(
+    weightsfile: pathlib.Path,
+    *,
+    outfile: pathlib.Path | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
+    resolution: int | None = None,
+    maxit: int | None = None,
+    overwrite: bool = False,
+) -> int:
+    if not weightsfile.exists():
+        log.error("Weights file does not exist: '%s'.", weightsfile)
+        return 1
+
+    (device,) = jax.devices(jax.default_backend())
+    log.info("Device: %s", device)
+
+    mem = JaxMemoryTracker(device)
+    mem.add_record("Start")
+
+    with open(weightsfile, "rb") as f:
+        checkpoint = pickle.load(f)
+
+    # NOTE: parameters stored in the checkpoint, overridable from the command line
+    bbox = checkpoint["bbox"] if bbox is None else bbox
+    resolution = checkpoint["resolution"] if resolution is None else resolution
+    maxit = checkpoint["maxit"] if maxit is None else maxit
+    escape_radius = checkpoint["escape_radius"]
+
+    losses = checkpoint["losses"]
+    loss_test = checkpoint["loss_test"]
+    zmask = checkpoint["zmask"]
+    mat = jnp.asarray(checkpoint["mat"])
+
+    if outfile is None:
+        basename = weightsfile.with_suffix("")
+    else:
+        basename = outfile.with_suffix("")
+
+    # {{{ load model
+
+    d = mat.shape[0]
+    model = QuadraticNetwork(d, d, dtype=mat.real.dtype, rngs=nnx.Rngs(0))
+    nnx.update(model, jax.tree.map(_as_jax, checkpoint["model"]))
+
+    mem.add_record("After model load")
+
+    # }}}
+
+    # {{{ predict
+
+    _plot_predict(
+        model,
+        tag="final",
+        basename=basename,
+        bbox=bbox,
+        resolution=resolution,
+        maxit=maxit,
+        escape_radius=escape_radius,
+        overwrite=overwrite,
+    )
+
+    mem.add_record("After prediction")
+
+    # }}}
+
+    # {{{ plot
+
+    _plot_dataset(zmask, basename=basename, bbox=bbox, overwrite=overwrite)
+    _plot_loss(losses, loss_test, basename=basename, overwrite=overwrite)
+    _plot_weights(model, mat, basename=basename, overwrite=overwrite)
+
+    # }}}
+
+    mem.add_record("Finished")
+
+    log.info("Memory:\n%s", mem)
+
+    return 0
+
+
+# }}}
 
 
 if __name__ == "__main__":
@@ -587,23 +798,11 @@ if __name__ == "__main__":
     ):
         pass
 
+    # {{{ parser
+
     parser = argparse.ArgumentParser(
         formatter_class=HelpFormatter,
         description=SCRIPT_LONG_HELP,
-    )
-    parser.add_argument("filename", type=pathlib.Path)
-    parser.add_argument(
-        "--dataidx",
-        type=int,
-        default=5,
-        help="Index of the matrix to reconstruct",
-    )
-    parser.add_argument(
-        "-r",
-        "--resolution",
-        type=int,
-        default=128,
-        help="Resolution (in the c complex plane) of the images",
     )
     parser.add_argument(
         "--device",
@@ -625,17 +824,101 @@ if __name__ == "__main__":
         help="Force overwrite of existing files",
     )
     parser.add_argument(
-        "--early-stop-patience",
-        type=int,
-        default=0,
-        help="Stop training loss does not improve for this many epochs (0 disables)",
-    )
-    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
         help="Only show error messages",
     )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # {{{ train
+
+    subparser = subparsers.add_parser(
+        "train",
+        formatter_class=HelpFormatter,
+        description="Train a quadratic network on a dataset.",
+    )
+    subparser.add_argument("filename", type=pathlib.Path)
+    subparser.add_argument(
+        "-w",
+        "--weights",
+        type=pathlib.Path,
+        default=None,
+        help="Checkpoint to resume training from (starts from scratch if not given)",
+    )
+    subparser.add_argument(
+        "--dataidx",
+        type=int,
+        default=None,
+        help="Index of the matrix to reconstruct (from checkpoint when resuming)",
+    )
+    subparser.add_argument(
+        "-r",
+        "--resolution",
+        type=int,
+        default=None,
+        help=(
+            "Resolution (in the c complex plane) of the images "
+            "(from checkpoint when resuming)"
+        ),
+    )
+    subparser.add_argument(
+        "--maxit",
+        type=int,
+        default=None,
+        help="Maximum number of iterations (from checkpoint when resuming)",
+    )
+    subparser.add_argument(
+        "--bbox",
+        type=float,
+        nargs=4,
+        default=None,
+        metavar=("RE_MIN", "RE_MAX", "IM_MIN", "IM_MAX"),
+        help="Bounding box in the complex plane (from checkpoint when resuming)",
+    )
+    subparser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=0,
+        help="Stop training loss does not improve for this many epochs (0 disables)",
+    )
+
+    # }}}
+
+    # {{{ infer
+
+    subparser = subparsers.add_parser(
+        "infer",
+        formatter_class=HelpFormatter,
+        description="Run inference with a trained quadratic network.",
+    )
+    subparser.add_argument("weightsfile", type=pathlib.Path)
+    subparser.add_argument(
+        "-r",
+        "--resolution",
+        type=int,
+        default=None,
+        help="Override the image resolution stored in the checkpoint",
+    )
+    subparser.add_argument(
+        "--maxit",
+        type=int,
+        default=None,
+        help="Override the maximum number of iterations stored in the checkpoint",
+    )
+    subparser.add_argument(
+        "--bbox",
+        type=float,
+        nargs=4,
+        default=None,
+        metavar=("RE_MIN", "RE_MAX", "IM_MIN", "IM_MAX"),
+        help="Override the bounding box stored in the checkpoint",
+    )
+
+    # }}}
+
+    # }}}
+
     args = parser.parse_args()
 
     if not args.quiet:
@@ -648,13 +931,32 @@ if __name__ == "__main__":
         # NOTE: use TF32 for matrix multiplication (should be faster, similar precision)
         jax.config.update("jax_default_matmul_precision", "high")
 
-        raise SystemExit(
-            main(
-                args.filename,
-                dataidx=args.dataidx,
-                resolution=args.resolution,
-                early_stop_patience=args.early_stop_patience,
-                outfile=args.outfile,
-                overwrite=args.force,
+        bbox = None if args.bbox is None else tuple(args.bbox)
+
+        if args.command == "train":
+            raise SystemExit(
+                train(
+                    args.filename,
+                    weights=args.weights,
+                    dataidx=args.dataidx,
+                    resolution=args.resolution,
+                    bbox=bbox,
+                    maxit=args.maxit,
+                    early_stop_patience=args.early_stop_patience,
+                    outfile=args.outfile,
+                    overwrite=args.force,
+                )
             )
-        )
+        elif args.command == "infer":
+            raise SystemExit(
+                infer(
+                    args.weightsfile,
+                    bbox=bbox,
+                    resolution=args.resolution,
+                    maxit=args.maxit,
+                    outfile=args.outfile,
+                    overwrite=args.force,
+                )
+            )
+        else:
+            raise SystemExit(1)
