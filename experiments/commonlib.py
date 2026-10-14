@@ -274,7 +274,7 @@ class Config:
             # train + infer
             dataidx=args.dataidx,
             epochs=50,
-            lr=1.0e-3,
+            lr=5.0e-3,
             batch_size=args.batch_size,
             seed=None,  # ty: ignore[invalid-argument-type]
             split=None,  # ty: ignore[invalid-argument-type]

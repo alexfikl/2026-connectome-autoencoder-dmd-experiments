@@ -230,7 +230,6 @@ def train(
     weights: pathlib.Path | None = None,
     outfile: pathlib.Path | None = None,
     datakey: str = "matrices",
-    epochs: int = 50,
     overwrite: bool = False,
 ) -> int:
     from commonlib import (
@@ -306,8 +305,7 @@ def train(
     model = QuadraticNetwork(d, d, device=device, dtype=mat.dtype.to_real())
     criterion = nn.MSELoss()
 
-    lr = 5.0e-3
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1.0e-2)
+    optimizer = optim.AdamW(model.parameters(), lr=config.lr, weight_decay=1.0e-2)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
     log.info("Network:\n%s", model)
@@ -377,7 +375,7 @@ def train(
         scheduler,
         TensorDataset(*xy_train),
         TensorDataset(*xy_validate),
-        epochs=epochs,
+        epochs=config.epochs,
         batch_size=config.batch_size,
         target_scale=target_scale,
         patience_early_stop=config.early_stop_patience,
@@ -393,7 +391,7 @@ def train(
         loss_test = criterion(predictions, y_test) / target_scale
 
         loss_test = loss_test.cpu().item()
-        log.info("[%03d/%03d] test %.5e", epochs, epochs, loss_test)
+        log.info("[%03d/%03d] test %.5e", config.epochs, config.epochs, loss_test)
 
     mem.add_record("After test loss")
 
