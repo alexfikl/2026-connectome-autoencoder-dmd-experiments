@@ -46,16 +46,78 @@ Examples:
 # {{{ model
 
 
-def compute_active_mask(x: torch.Tensor, escape_radius: float) -> torch.Tensor:
-    """Compute a boolean mask of active (non-pinned) states in ``x``.
+class TrajectoryMasks(NamedTuple):
+    state: torch.Tensor
+    """Boolean mask of shape ``(batch, window)`` selecting the transient,
+    non-pinned states used for the reconstruction loss."""
+
+    transition: torch.Tensor
+    """Boolean mask of shape ``(batch, window - 1)`` selecting the usable
+    (non-pinned, non-settled) transitions used for the DMD fit and the
+    prediction losses."""
+
+
+def compute_masks(
+    x: torch.Tensor,
+    escape_radius: float | None,
+    *,
+    settle_tol: float | None = None,
+    eps: float = 1.0e-8,
+) -> TrajectoryMasks:
+    """Compute the masks of usable states and transitions in ``x``.
 
     ``x`` is the augmented state ``[z_n; c]`` in interleaved real format of
-    shape ``(batch, window, 2(d + 1))``. A state is pinned (clipped) if its
-    squared norm exceeds the escape radius (see ``commonlib.generate_dataset``).
+    shape ``(batch, window, 2(d + 1))``. Two kinds of states carry no dynamics
+    and are masked out:
+
+    * *pinned* (clipped) states: their squared norm exceeds the escape radius
+      (see ``commonlib.generate_dataset``). The transition into the first
+      pinned state (the escape transition) is kept.
+    * *settled* states: the trajectory has converged to a fixed point and only
+      moves by a relative step ``|z_{n + 1} - z_n| / |z_n|`` below *settle_tol*.
+
+    With both *escape_radius* and *settle_tol* unset nothing is masked.
     """
+    batch_size, window_size = x.shape[:2]
+    device = x.device
+
+    if escape_radius is None and settle_tol is None:
+        return TrajectoryMasks(
+            state=torch.ones(
+                (batch_size, window_size), dtype=torch.bool, device=device
+            ),
+            transition=torch.ones(
+                (batch_size, window_size - 1), dtype=torch.bool, device=device
+            ),
+        )
+
     zx = view_as_complex(x[..., :-2])
     sqr_norm = torch.sum(zx.real**2 + zx.imag**2, dim=-1)
-    return sqr_norm <= escape_radius**2
+
+    if escape_radius is None:
+        active = torch.ones_like(sqr_norm, dtype=torch.bool)
+    else:
+        active = sqr_norm <= escape_radius**2
+
+    # a transition is dynamic if the trajectory still moves along it
+    if settle_tol is None:
+        moving = torch.ones(
+            (batch_size, window_size - 1), dtype=torch.bool, device=device
+        )
+    else:
+        step = torch.linalg.vector_norm(zx[:, 1:, :] - zx[:, :-1, :], dim=-1)
+        norm = torch.sqrt(sqr_norm[:, :-1])
+        moving = step > settle_tol * (norm + eps)
+
+    # a state is transient if the trajectory moves into or out of it
+    empty = torch.zeros((batch_size, 1), dtype=torch.bool, device=device)
+    moving_in = torch.cat([empty, moving], dim=1)
+    moving_out = torch.cat([moving, empty], dim=1)
+
+    return TrajectoryMasks(
+        state=active & (moving_in | moving_out),
+        transition=active[:, :-1] & moving,
+    )
 
 
 def make_layers(
@@ -143,6 +205,7 @@ class DMDAutoencoder(nn.Module):
         decoder_layer_sizes: int | tuple[int, ...] | None = None,
         dmd_enabled: bool = False,
         escape_radius: float | None = None,
+        settle_tol: float | None = None,
         eps: float = 1.0e-4,
         alpha: float | None = None,
         device: str | torch.device | None = None,
@@ -182,6 +245,9 @@ class DMDAutoencoder(nn.Module):
         # escape radius (in dataset units, i.e. after norm_factor scaling) used
         # to mask out pinned states; None disables the masking
         self.escape_radius = escape_radius
+        # relative step size below which a trajectory is considered settled
+        # (dimensionless, so no norm_factor scaling needed); None disables it
+        self.settle_tol = settle_tol
         self.eps = eps
 
         # {{{ construct autoencoder
@@ -218,12 +284,15 @@ class DMDAutoencoder(nn.Module):
         X = cx_latent[:, :-1, :].reshape(-1, r)
         Y = cx_latent[:, 1:, :].reshape(-1, r)
 
-        # drop pinned -> pinned transitions: they are artifacts of the
-        # clipping in generate_dataset, not actual dynamics (the escape
-        # transition into the first pinned state is kept)
-        if self.escape_radius is not None:
-            w = compute_active_mask(x_in, self.escape_radius)[:, :-1]
-            w = w.reshape(-1).to(torch.bool)
+        # drop pinned -> pinned and settled transitions: the former are
+        # artifacts of the clipping in generate_dataset, not actual dynamics
+        # (the escape transition into the first pinned state is kept), while
+        # the latter only sit at a fixed point
+        if self.escape_radius is not None or self.settle_tol is not None:
+            w = compute_masks(
+                x_in, self.escape_radius, settle_tol=self.settle_tol
+            ).transition
+            w = w.reshape(-1)
             if torch.any(w):
                 X = X[w]
                 Y = Y[w]
@@ -330,15 +399,17 @@ class DMDLoss(nn.Module):
         gamma_pre: float = 1.0,
         scale: float = 1.0,
         escape_radius: float | None = None,
+        settle_tol: float | None = None,
     ) -> None:
         super().__init__()
 
-        self.mse = nn.MSELoss()
         self.gamma_rec = gamma_rec / scale
         self.gamma_lin = gamma_lin / scale
         self.gamma_pre = gamma_pre / scale
         # escape radius (in dataset units) used to mask out pinned states
         self.escape_radius = escape_radius
+        # relative step size below which a trajectory is considered settled
+        self.settle_tol = settle_tol
 
     @property
     def dim(self) -> int:
@@ -353,29 +424,31 @@ class DMDLoss(nn.Module):
         yhat_latent: torch.Tensor | None = None,
         yhat_out: torch.Tensor | None = None,
     ) -> DMDLossResult:
-        # per-transition weights that mask out pinned -> pinned transitions:
-        # they are artifacts of the clipping, not actual dynamics (the escape
+        # masks that drop pinned (clipped) and settled (fixed-point) states:
+        # they are artifacts of the clipping / carry no dynamics (the escape
         # transition into the first pinned state is kept)
-        if self.escape_radius is None:
-            weight = None
+        if self.escape_radius is None and self.settle_tol is None:
+            state_weight = None
+            transition_weight = None
         else:
-            weight = compute_active_mask(x_in, self.escape_radius)[:, :-1]
-            weight = weight.to(x_in.dtype)
+            masks = compute_masks(x_in, self.escape_radius, settle_tol=self.settle_tol)
+            state_weight = masks.state.to(x_in.dtype)
+            transition_weight = masks.transition.to(x_in.dtype)
 
         # reconstruction loss
-        loss_rec = self.mse(x_in, x_out)
+        loss_rec = masked_mse(x_in, x_out, state_weight)
         loss_rec = self.gamma_rec * loss_rec
 
         # latent space linearity loss (one-step, teacher-forced)
         if y_latent is not None and yhat_latent is not None:
-            loss_lin = masked_mse(y_latent[:, 1:, :], yhat_latent, weight)
+            loss_lin = masked_mse(y_latent[:, 1:, :], yhat_latent, transition_weight)
             loss_lin = self.gamma_lin * loss_lin
         else:
             loss_lin = torch.zeros_like(loss_rec)
 
         # linear reconstruction loss (one-step, teacher-forced)
         if yhat_out is not None:
-            loss_pre = masked_mse(x_in[:, 1:, :], yhat_out, weight)
+            loss_pre = masked_mse(x_in[:, 1:, :], yhat_out, transition_weight)
             loss_pre = self.gamma_pre * loss_pre
         else:
             loss_pre = torch.zeros_like(loss_rec)
@@ -612,10 +685,12 @@ def build_latent_dmd(
             X_block = cx[:, :-1, :].reshape(-1, r)
             Y_block = cx[:, 1:, :].reshape(-1, r)
 
-            # drop pinned -> pinned transitions (see DMDAutoencoder.forward)
-            if model.escape_radius is not None:
-                w = compute_active_mask(z_block, model.escape_radius)[:, :-1]
-                w = w.reshape(-1).to(torch.bool)
+            # drop pinned -> pinned and settled transitions (see DMDAutoencoder.forward)
+            if model.escape_radius is not None or model.settle_tol is not None:
+                w = compute_masks(
+                    z_block, model.escape_radius, settle_tol=model.settle_tol
+                ).transition
+                w = w.reshape(-1)
                 if torch.any(w):
                     X_block = X_block[w]
                     Y_block = Y_block[w]
@@ -777,6 +852,7 @@ def train(
     dataidx: int | None = None,
     bbox: tuple[float, float, float, float] | None = None,
     escape_radius: float | None = 10.0,
+    settle_tol: float | None = None,
     resolution: int | None = None,
     maxit: int | None = None,
     epochs: int = 100,
@@ -840,6 +916,11 @@ def train(
 
         datakey = checkpoint["datakey"]
         escape_radius = checkpoint["escape_radius"]
+        settle_tol = (
+            settle_tol
+            if settle_tol is not None
+            else checkpoint.get("settle_tol", 1.0e-3)
+        )
         lr = checkpoint["lr"]
         norm_factor = checkpoint["norm_factor"]
     else:
@@ -857,6 +938,8 @@ def train(
 
         lr = 1.0e-4
         norm_factor = 1.0
+        if settle_tol is None:
+            settle_tol = 1.0e-3
 
     # }}}
 
@@ -918,6 +1001,8 @@ def train(
     model = DMDAutoencoder(**model_config, device=device, dtype=mat.dtype.to_real())
     # NOTE: the data is scaled by norm_factor, so scale the radius as well
     model.escape_radius = escape_radius / norm_factor
+    # NOTE: settle_tol is a relative step size, so it needs no scaling
+    model.settle_tol = settle_tol
 
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -1004,7 +1089,11 @@ def train(
         )
 
     target_scale = torch.mean(torch.conj(x_train) * x_train).real.item()
-    criterion = DMDLoss(scale=target_scale, escape_radius=escape_radius / norm_factor)
+    criterion = DMDLoss(
+        scale=target_scale,
+        escape_radius=escape_radius / norm_factor,
+        settle_tol=settle_tol,
+    )
 
     _, optimizer, losses = torch_train(
         model,
@@ -1090,6 +1179,7 @@ def train(
             "dataidx": dataidx,
             "bbox": bbox,
             "escape_radius": escape_radius,
+            "settle_tol": settle_tol,
             "resolution": resolution,
             "maxit": maxit,
             "zmask": zmask,
@@ -1173,6 +1263,7 @@ def infer(
     resolution = checkpoint["resolution"] if resolution is None else resolution
     maxit = checkpoint["maxit"] if maxit is None else maxit
     escape_radius = checkpoint["escape_radius"]
+    settle_tol = checkpoint.get("settle_tol")
     norm_factor = checkpoint["norm_factor"]
 
     losses = checkpoint["losses"]
@@ -1191,6 +1282,7 @@ def infer(
     )
     model.load_state_dict(checkpoint["model"])
     model.escape_radius = escape_radius / norm_factor
+    model.settle_tol = settle_tol
     model.eval()
 
     mem.add_record("After model load")
@@ -1328,6 +1420,15 @@ if __name__ == "__main__":
         default=0,
         help="Stop training loss does not improve for this many epochs (0 disables)",
     )
+    subparser.add_argument(
+        "--settle-tol",
+        type=float,
+        default=None,
+        help=(
+            "Relative step size below which a trajectory is considered settled "
+            "and masked out (default: 1e-3, from checkpoint when resuming)"
+        ),
+    )
 
     # }}}
 
@@ -1387,6 +1488,7 @@ if __name__ == "__main__":
                     maxit=args.maxit,
                     dmd_warmup_epochs=args.dmd_warmup_epochs,
                     early_stop_patience=args.early_stop_patience,
+                    settle_tol=args.settle_tol,
                     outfile=args.outfile,
                     overwrite=args.force,
                 )
