@@ -24,6 +24,8 @@ from nneuroutil.torch_extras import (
     TorchMemoryTracker,
     available_device_names,
     torch_default_device,
+    view_as_complex,
+    view_as_real,
 )
 from nneuroutil.visualization import figure
 
@@ -42,14 +44,6 @@ Examples:
 
 
 # {{{ model
-
-
-def view_as_complex(x: torch.Tensor) -> torch.Tensor:
-    return torch.view_as_complex(x.reshape(*x.shape[:-1], -1, 2).contiguous())
-
-
-def view_as_real(x: torch.Tensor) -> torch.Tensor:
-    return torch.view_as_real(x).reshape(*x.shape[:-1], -1)
 
 
 def compute_active_mask(x: torch.Tensor, escape_radius: float) -> torch.Tensor:
