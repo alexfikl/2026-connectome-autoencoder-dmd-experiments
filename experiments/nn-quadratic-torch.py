@@ -265,6 +265,7 @@ def train(
 
         checkpoint = torch.load(weights, map_location=device, weights_only=True)
 
+        dataidx = checkpoint["dataidx"] if dataidx is None else dataidx
         bbox = checkpoint["bbox"] if bbox is None else bbox
         resolution = checkpoint["resolution"] if resolution is None else resolution
         maxit = checkpoint["maxit"] if maxit is None else maxit
@@ -275,6 +276,7 @@ def train(
         mat = checkpoint["mat"]
         escape_radius = checkpoint["escape_radius"]
     else:
+        dataidx = 5 if dataidx is None else dataidx
         bbox = (-0.03, 0.03, -0.03, 0.03) if bbox is None else bbox
         resolution = 128 if resolution is None else resolution
         maxit = 128 if maxit is None else maxit
@@ -284,7 +286,6 @@ def train(
             seed = int(np.random.SeedSequence().entropy)  # ty: ignore[invalid-argument-type]
 
         try:
-            dataidx = 5 if dataidx is None else dataidx
             mat = cast(
                 torch.Tensor,
                 load_matrix_from_dataset(
