@@ -161,6 +161,51 @@ def load_feature_datasets(
     )
 
 
+def load_dataset(
+    filename: pathlib.Path,
+    *,
+    key: str = "matrices",
+    device: Any = None,
+    xp: Any = None,
+) -> Array3D[np.number[Any]]:
+    if not filename.exists():
+        raise FileNotFoundError(filename)
+
+    try:
+        data = np.load(filename)
+    except Exception as exc:
+        raise RuntimeError(f"could not load file '{filename}'") from exc
+
+    if key not in data:
+        raise ValueError(f"'{filename}' does not contain '{key}' dataset")
+
+    matrices = data[key]
+    if matrices.ndim != 3:
+        raise ValueError(f"expected a 3 dimensional array: {matrices.shape}")
+
+    if xp is None:
+        xp = array_api_compat.array_namespace(np.empty(0))
+
+    matrices = xp.asarray(matrices)
+    if device is not None:
+        matrices = array_api_compat.to_device(matrices, device)
+
+    return matrices
+
+
+def load_matrix_from_dataset(
+    filename: pathlib.Path,
+    idx: int,
+    *,
+    key: str = "matrices",
+    device: Any = None,
+    xp: Any = None,
+) -> Array2D[np.number[Any]]:
+    matrices = load_dataset(filename, key=key, device=device, xp=xp)
+
+    return matrices[idx]
+
+
 # }}}
 
 

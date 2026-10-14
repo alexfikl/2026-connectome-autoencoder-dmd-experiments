@@ -105,6 +105,7 @@ def main(
     from commonlib import (
         determine_escape_radius,
         generate_timeseries_dataset,
+        load_matrix_from_dataset,
         make_timeseries_datasets,
         torch_predict,
         torch_train,
@@ -118,29 +119,16 @@ def main(
 
     # {{{ vallidate inputs
 
-    if not filename.exists():
-        log.error("File does not exist: '%s'.", filename)
-        return 1
-
     try:
-        data = np.load(filename)
-    except Exception:
-        log.error("Failed to load data from file: '%s'.", filename)
-        return 1
-
-    if datakey not in data:
-        log.error("File does not contain '%s' dataset: '%s'.", datakey, filename)
-        return 1
-
-    matrices = data[datakey]
-    if matrices.ndim != 3:
-        log.error("Expected a 3 dimensional array: %s.", matrices.shape)
-        return 1
-
-    # NOTE: we don't really need complex128 for this example, so save some memory
-    mat = torch.from_numpy(matrices[dataidx]).to(torch.complex64).to(device)
-    if mat.shape[0] != mat.shape[1]:
-        log.error("Expected a square matrix: %s.", mat.shape)
+        mat = cast(
+            torch.Tensor,
+            load_matrix_from_dataset(
+                filename, dataidx, key=datakey, device=device, xp=torch
+            ),
+        )
+        mat = mat.to(torch.complex64)
+    except Exception as exc:
+        log.error("Failed to load dataset '%s': %s", filename.name, exc)
         return 1
 
     if escape_radius is None:
