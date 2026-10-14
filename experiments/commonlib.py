@@ -269,17 +269,6 @@ class Config:
         return cls(**values)
 
 
-@dataclass(frozen=True, slots=True)
-class AutoencoderConfig(Config):
-    """Configuration for the (ReLU / quadratic) autoencoder scripts.
-
-    Identical to :class:`Config` except for the learning rate used by those
-    experiments.
-    """
-
-    lr: float = 1.0e-3
-
-
 def make_argument_parser(
     *,
     description: str = "",
