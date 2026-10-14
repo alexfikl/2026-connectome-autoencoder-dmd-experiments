@@ -436,8 +436,8 @@ def train(
     from commonlib import (
         determine_escape_radius,
         generate_timeseries_dataset,
-        load_matrix_from_dataset,
-        make_timeseries_datasets,
+        load_matrix_datasets,
+        split_timeseries_datasets,
     )
 
     machine = machine_info(SCRIPT_PATH)
@@ -493,13 +493,11 @@ def train(
         weight_decay = 1.0e-2
 
         try:
-            mat = cast(
+            matrices = cast(
                 jax.Array,
-                load_matrix_from_dataset(
-                    filename, dataidx, key=datakey, device=device, xp=jnp
-                ),
+                load_matrix_datasets(filename, key=datakey, device=device, xp=jnp),
             )
-            mat = mat.astype(jnp.complex64)
+            mat = matrices[dataidx].astype(jnp.complex64)
         except Exception as exc:
             log.error("Failed to load dataset '%s': %s", filename.name, exc)
             return 1
@@ -570,7 +568,7 @@ def train(
             tuple[jax.Array, jax.Array],
             tuple[jax.Array, jax.Array],
         ],
-        make_timeseries_datasets(x, y, split, rng=np.random.default_rng(seed)),
+        split_timeseries_datasets(x, y, split, rng=np.random.default_rng(seed)),
     )
 
     mem.add_record("After data generation")

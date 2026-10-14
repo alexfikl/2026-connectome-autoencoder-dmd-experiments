@@ -161,7 +161,7 @@ def load_feature_datasets(
     )
 
 
-def load_dataset(
+def load_matrix_datasets(
     filename: pathlib.Path,
     *,
     key: str = "matrices",
@@ -191,19 +191,6 @@ def load_dataset(
         matrices = array_api_compat.to_device(matrices, device)
 
     return matrices
-
-
-def load_matrix_from_dataset(
-    filename: pathlib.Path,
-    idx: int,
-    *,
-    key: str = "matrices",
-    device: Any = None,
-    xp: Any = None,
-) -> Array2D[np.number[Any]]:
-    matrices = load_dataset(filename, key=key, device=device, xp=xp)
-
-    return matrices[idx]
 
 
 # }}}
@@ -273,7 +260,7 @@ def generate_grid(
 # {{{ generate_dataset
 
 
-def generate_dataset(
+def generate_timeseries(
     A: Array2D[np.number[Any]],
     *,
     bbox: tuple[float, float, float, float],
@@ -460,7 +447,7 @@ def generate_timeseries_dataset(
 
     log.info("Generating dataset on %s", bbox)
     with tictoc("generate_dataset"):
-        z, c = generate_dataset(
+        z, c = generate_timeseries(
             mat,
             bbox=bbox,
             escape_radius=escape_radius,
@@ -506,7 +493,7 @@ def generate_timeseries_dataset(
     return x, y, mask, in_set
 
 
-def make_timeseries_datasets(
+def split_timeseries_datasets(
     x: Array3D[np.complexfloating[Any]],
     y: Array3D[np.complexfloating[Any]],
     lengths: tuple[float, float, float] | None = None,

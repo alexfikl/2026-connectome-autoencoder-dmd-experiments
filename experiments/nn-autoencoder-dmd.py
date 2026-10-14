@@ -44,71 +44,53 @@ Examples:
 """
 
 
-# {{{ model
+# {{{ masks
 
 
 class TrajectoryMasks(NamedTuple):
     state: torch.Tensor
-    """Boolean mask of shape ``(batch, window)`` selecting the transient,
-    non-pinned states used for the reconstruction loss."""
-
     transition: torch.Tensor
-    """Boolean mask of shape ``(batch, window - 1)`` selecting the usable
-    (non-pinned, non-settled) transitions used for the DMD fit and the
-    prediction losses."""
 
 
 def compute_masks(
     x: torch.Tensor,
-    escape_radius: float | None,
+    escape_radius: float | None = None,
     *,
-    settle_tol: float | None = None,
-    eps: float = 1.0e-8,
+    rtol: float | None = None,
+    atol: float = 1.0e-8,
 ) -> TrajectoryMasks:
     """Compute the masks of usable states and transitions in ``x``.
 
-    ``x`` is the state ``z_n`` in interleaved real format of shape
-    ``(batch, window, 2 d)``. Two kinds of states carry no dynamics and are
-    masked out:
+    Two kinds of states carry no dynamics and are masked out:
 
     * *pinned* (clipped) states: their squared norm exceeds the escape radius
       (see ``commonlib.generate_dataset``). The transition into the first
       pinned state (the escape transition) is kept.
     * *settled* states: the trajectory has converged to a fixed point and only
-      moves by a relative step ``|z_{n + 1} - z_n| / |z_n|`` below *settle_tol*.
+      moves by a relative step ``|z_{n + 1} - z_n| / (|z_n| + atol)`` below *rtol*.
 
-    With both *escape_radius* and *settle_tol* unset nothing is masked.
+    With both *escape_radius* and *rtol* unset nothing is masked.
     """
     batch_size, window_size = x.shape[:2]
     device = x.device
 
-    if escape_radius is None and settle_tol is None:
-        return TrajectoryMasks(
-            state=torch.ones(
-                (batch_size, window_size), dtype=torch.bool, device=device
-            ),
-            transition=torch.ones(
-                (batch_size, window_size - 1), dtype=torch.bool, device=device
-            ),
-        )
-
     zx = view_as_complex(x)
-    sqr_norm = torch.sum(zx.real**2 + zx.imag**2, dim=-1)
+    zn = torch.sum(zx.real**2 + zx.imag**2, dim=-1)
 
     if escape_radius is None:
-        active = torch.ones_like(sqr_norm, dtype=torch.bool)
+        active = torch.ones_like(zn, dtype=torch.bool)
     else:
-        active = sqr_norm <= escape_radius**2
+        active = zn <= escape_radius**2
 
     # a transition is dynamic if the trajectory still moves along it
-    if settle_tol is None:
+    if rtol is None:
         moving = torch.ones(
             (batch_size, window_size - 1), dtype=torch.bool, device=device
         )
     else:
-        step = torch.linalg.vector_norm(zx[:, 1:, :] - zx[:, :-1, :], dim=-1)
-        norm = torch.sqrt(sqr_norm[:, :-1])
-        moving = step > settle_tol * (norm + eps)
+        dz = torch.linalg.vector_norm(zx[:, 1:, :] - zx[:, :-1, :], dim=-1)
+        zn = torch.sqrt(zn[:, :-1])
+        moving = dz > rtol * (zn + atol)
 
     # a state is transient if the trajectory moves into or out of it
     empty = torch.zeros((batch_size, 1), dtype=torch.bool, device=device)
@@ -119,6 +101,12 @@ def compute_masks(
         state=active & (moving_in | moving_out),
         transition=active[:, :-1] & moving,
     )
+
+
+# }}}
+
+
+# {{{ model
 
 
 def make_layers(
@@ -309,9 +297,7 @@ class DMDAutoencoder(nn.Module):
         # (the escape transition into the first pinned state is kept), while
         # the latter only sit at a fixed point
         if self.escape_radius is not None or self.settle_tol is not None:
-            w = compute_masks(
-                x_in, self.escape_radius, settle_tol=self.settle_tol
-            ).transition
+            w = compute_masks(x_in, self.escape_radius, rtol=self.settle_tol).transition
             w = w.reshape(-1)
             if torch.any(w):
                 X = X[w]
@@ -457,7 +443,7 @@ class DMDLoss(nn.Module):
             state_weight = None
             transition_weight = None
         else:
-            masks = compute_masks(x_in, self.escape_radius, settle_tol=self.settle_tol)
+            masks = compute_masks(x_in, self.escape_radius, rtol=self.settle_tol)
             state_weight = masks.state.to(x_in.dtype)
             transition_weight = masks.transition.to(x_in.dtype)
 
@@ -762,7 +748,7 @@ def build_latent_dmd(
             # drop pinned -> pinned and settled transitions (see DMDAutoencoder.forward)
             if model.escape_radius is not None or model.settle_tol is not None:
                 w = compute_masks(
-                    z_block, model.escape_radius, settle_tol=model.settle_tol
+                    z_block, model.escape_radius, rtol=model.settle_tol
                 ).transition
                 w = w.reshape(-1)
                 if torch.any(w):
@@ -944,7 +930,7 @@ def train(
         determine_escape_radius,
         generate_grid,
         generate_timeseries_dataset,
-        load_matrix_from_dataset,
+        load_matrix_datasets,
     )
     from nneuroutil.data import random_split
 
@@ -989,18 +975,13 @@ def train(
         split = checkpoint["split"] if split is None else split
         seed = checkpoint["seed"] if seed is None else seed
 
-        datakey = checkpoint["datakey"]
-        escape_radius = checkpoint["escape_radius"]
-        settle_tol = (
-            settle_tol
-            if settle_tol is not None
-            else checkpoint.get("settle_tol", 1.0e-3)
-        )
-        ridge_eps = (
-            ridge_eps if ridge_eps is not None else checkpoint.get("ridge_eps", 1.0e-3)
-        )
+        settle_tol = checkpoint["settle_tol"] if settle_tol is None else settle_tol
+        ridge_eps = checkpoint["ridge_eps"] if ridge_eps is None else ridge_eps
         lr = checkpoint["lr"]
         norm_factor = checkpoint["norm_factor"]
+
+        datakey = checkpoint["datakey"]
+        escape_radius = checkpoint["escape_radius"]
     else:
         dataidx = 5 if dataidx is None else dataidx
         bbox = (-0.03, 0.03, -0.03, 0.03) if bbox is None else bbox
@@ -1014,25 +995,21 @@ def train(
         if seed is None:
             seed = int(np.random.SeedSequence().entropy)  # ty: ignore[invalid-argument-type]
 
+        settle_tol = 1.0e-3 if settle_tol is None else settle_tol
+        ridge_eps = 1.0e-3 if ridge_eps is None else ridge_eps
         lr = 1.0e-4
         norm_factor = 1.0
-        if settle_tol is None:
-            settle_tol = 1.0e-3
-        if ridge_eps is None:
-            ridge_eps = 1.0e-3
 
     # }}}
 
     # {{{ validate inputs
 
     try:
-        mat = cast(
+        matrices = cast(
             torch.Tensor,
-            load_matrix_from_dataset(
-                filename, dataidx, key=datakey, device=device, xp=torch
-            ),
+            load_matrix_datasets(filename, key=datakey, device=device, xp=torch),
         )
-        mat = mat.to(torch.complex64)
+        mat = matrices[dataidx].to(torch.complex64)
     except Exception as exc:
         log.error("Failed to load dataset '%s': %s", filename.name, exc)
         return 1

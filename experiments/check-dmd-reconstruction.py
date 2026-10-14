@@ -98,11 +98,11 @@ def main(
 
     d = mat.shape[0]
     with tictoc(f"Generated data on {bbox}"):
-        from commonlib import generate_dataset
+        from commonlib import generate_timeseries
 
         Z, c = cast(
             tuple[torch.Tensor, torch.Tensor],
-            generate_dataset(
+            generate_timeseries(
                 mat,
                 bbox=bbox,
                 resolution=resolution,

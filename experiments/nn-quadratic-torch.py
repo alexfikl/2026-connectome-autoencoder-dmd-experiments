@@ -244,8 +244,8 @@ def train(
     from commonlib import (
         determine_escape_radius,
         generate_timeseries_dataset,
-        load_matrix_from_dataset,
-        make_timeseries_datasets,
+        load_matrix_datasets,
+        split_timeseries_datasets,
         torch_train,
     )
 
@@ -296,13 +296,11 @@ def train(
             seed = int(np.random.SeedSequence().entropy)  # ty: ignore[invalid-argument-type]
 
         try:
-            mat = cast(
+            matrices = cast(
                 torch.Tensor,
-                load_matrix_from_dataset(
-                    filename, dataidx, key=datakey, device=device, xp=torch
-                ),
+                load_matrix_datasets(filename, key=datakey, device=device, xp=torch),
             )
-            mat = mat.to(torch.complex64)
+            mat = matrices[dataidx].to(torch.complex64)
         except Exception as exc:
             log.error("Failed to load dataset '%s': %s", filename.name, exc)
             return 1
@@ -374,7 +372,7 @@ def train(
             tuple[torch.Tensor, torch.Tensor],
             tuple[torch.Tensor, torch.Tensor],
         ],
-        make_timeseries_datasets(x, y, split, rng=np.random.default_rng(seed)),
+        split_timeseries_datasets(x, y, split, rng=np.random.default_rng(seed)),
     )
 
     mem.add_record("After data generation")

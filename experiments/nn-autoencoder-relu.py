@@ -206,7 +206,7 @@ def train(
     from commonlib import (
         determine_escape_radius,
         generate_timeseries_dataset,
-        make_timeseries_datasets,
+        split_timeseries_datasets,
         torch_train,
     )
 
@@ -368,7 +368,7 @@ def train(
             tuple[torch.Tensor, torch.Tensor],
             tuple[torch.Tensor, torch.Tensor],
         ],
-        make_timeseries_datasets(x, y, split, rng=np.random.default_rng(seed)),
+        split_timeseries_datasets(x, y, split, rng=np.random.default_rng(seed)),
     )
 
     mem.add_record("After data generation")

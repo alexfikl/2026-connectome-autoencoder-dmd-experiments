@@ -326,7 +326,7 @@ def make_dmd_features(
 
     log.info("Computing DMD modes using '%s' (%s).", xp.__name__, device)
 
-    from commonlib import generate_dataset
+    from commonlib import generate_timeseries
     from nneuroutil.dmdc import build_dense_symmetric_dmdc
 
     n, m = mat.shape
@@ -338,7 +338,7 @@ def make_dmd_features(
     # NOTE: complex64 is both smaller and faster -- we need some speed here
     cmat = xp.astype(xp.asarray(mat), xp.complex64)
 
-    Z, c = generate_dataset(
+    Z, c = generate_timeseries(
         cmat,
         bbox=bbox,
         resolution=resolution,

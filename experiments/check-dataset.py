@@ -50,7 +50,7 @@ def compute_statistics(
     :func:`commonlib.post_process_dataset`.
 
     :arg z: trajectories of shape ``(n_levels, nx, ny, d)`` as returned by
-        :func:`commonlib.generate_dataset`.
+        :func:`commonlib.generate_timeseries`.
     """
     sqr_norm = np.sum(np.real(z) ** 2 + np.imag(z) ** 2, axis=-1)
     escaped = sqr_norm > escape_radius**2
@@ -84,7 +84,7 @@ def main(
     basename: pathlib.Path | None = None,
     overwrite: bool = False,
 ) -> int:
-    from commonlib import generate_dataset, post_process_dataset
+    from commonlib import generate_timeseries, post_process_dataset
     from nneuroutil.visualization import figure, make_colorbar_axes
 
     # {{{ validate inputs
@@ -136,7 +136,7 @@ def main(
     n_levels = maxit + 1
     max_z = (escape_radius + 1) / d**0.5
 
-    z, _c = generate_dataset(
+    z, _c = generate_timeseries(
         mat,
         bbox=bbox,
         escape_radius=escape_radius,
