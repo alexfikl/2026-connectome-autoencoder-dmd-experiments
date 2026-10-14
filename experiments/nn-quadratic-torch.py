@@ -12,7 +12,7 @@ import torch
 from torch import nn
 from torch.utils.data import TensorDataset
 
-from nneuroutil.helpers import FuzzyChoiceAction, module_logger
+from nneuroutil.helpers import FuzzyChoiceAction, machine_info, module_logger
 from nneuroutil.torch_extras import (
     TorchMemoryTracker,
     available_device_names,
@@ -249,11 +249,16 @@ def train(
         torch_train,
     )
 
+    machine = machine_info(SCRIPT_PATH)
+    log.info("Machine:\n%s", machine.pretty())
+
     device = torch.get_default_device()
     log.info("Device: %s", device)
 
     mem = TorchMemoryTracker(device)
     mem.add_record("Start")
+
+    provenance = {**machine._asdict(), "device": device}
 
     # {{{ load parameters
 
@@ -264,6 +269,11 @@ def train(
             return 1
 
         checkpoint = torch.load(weights, map_location=device, weights_only=True)
+
+        # NOTE: keep the original provenance and record each resume
+        previous = checkpoint["provenance"]
+        previous.setdefault("resumes", []).append(provenance)
+        provenance = previous
 
         dataidx = checkpoint["dataidx"] if dataidx is None else dataidx
         bbox = checkpoint["bbox"] if bbox is None else bbox
@@ -453,6 +463,8 @@ def train(
             "batch_size": batch_size,
             "split": split,
             "seed": seed,
+            # provenance
+            "provenance": provenance,
         },
         weightsfile,
     )
