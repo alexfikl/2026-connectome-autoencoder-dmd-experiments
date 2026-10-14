@@ -229,13 +229,15 @@ def train(
     weights: pathlib.Path | None = None,
     outfile: pathlib.Path | None = None,
     datakey: str = "matrices",
-    dataidx: int = 5,
-    bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
+    dataidx: int | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
     escape_radius: float | None = 100.0,
-    resolution: int = 128,
-    maxit: int = 128,
+    resolution: int | None = None,
+    maxit: int | None = None,
     epochs: int = 50,
-    batch_size: int = 4096,
+    batch_size: int | None = None,
+    split: tuple[float, float, float] | None = None,
+    seed: int | None = None,
     early_stop_patience: int = 0,
     overwrite: bool = False,
 ) -> int:
@@ -253,22 +255,49 @@ def train(
     mem = TorchMemoryTracker(device)
     mem.add_record("Start")
 
-    # {{{ validate inputs
+    # {{{ load parameters
 
-    try:
-        mat = cast(
-            torch.Tensor,
-            load_matrix_from_dataset(
-                filename, dataidx, key=datakey, device=device, xp=torch
-            ),
-        )
-        mat = mat.to(torch.complex64)
-    except Exception as exc:
-        log.error("Failed to load dataset '%s': %s", filename.name, exc)
-        return 1
+    checkpoint: dict[str, Any] | None = None
+    if weights is not None:
+        if not weights.exists():
+            log.error("Weights file does not exist: '%s'.", weights)
+            return 1
 
-    if escape_radius is None:
-        escape_radius = determine_escape_radius(mat)
+        checkpoint = torch.load(weights, map_location=device, weights_only=True)
+
+        bbox = checkpoint["bbox"] if bbox is None else bbox
+        resolution = checkpoint["resolution"] if resolution is None else resolution
+        maxit = checkpoint["maxit"] if maxit is None else maxit
+        batch_size = checkpoint["batch_size"] if batch_size is None else batch_size
+        split = checkpoint["split"] if split is None else split
+        seed = checkpoint["seed"] if seed is None else seed
+
+        mat = checkpoint["mat"]
+        escape_radius = checkpoint["escape_radius"]
+    else:
+        bbox = (-0.03, 0.03, -0.03, 0.03) if bbox is None else bbox
+        resolution = 128 if resolution is None else resolution
+        maxit = 128 if maxit is None else maxit
+        batch_size = 4096 if batch_size is None else batch_size
+        split = (0.8, 0.1, 0.1) if split is None else split
+        if seed is None:
+            seed = int(np.random.SeedSequence().entropy)  # ty: ignore[invalid-argument-type]
+
+        try:
+            dataidx = 5 if dataidx is None else dataidx
+            mat = cast(
+                torch.Tensor,
+                load_matrix_from_dataset(
+                    filename, dataidx, key=datakey, device=device, xp=torch
+                ),
+            )
+            mat = mat.to(torch.complex64)
+        except Exception as exc:
+            log.error("Failed to load dataset '%s': %s", filename.name, exc)
+            return 1
+
+        if escape_radius is None:
+            escape_radius = determine_escape_radius(mat)
 
     mem.add_record("After data load")
 
@@ -280,10 +309,6 @@ def train(
     )
     basename = outfile.with_suffix("")
     weightsfile = outfile.with_suffix(".pkl")
-
-    if weights is not None and not weights.exists():
-        log.error("Weights file does not exist: '%s'.", weights)
-        return 1
 
     if not overwrite and weightsfile.exists():
         log.error(
@@ -300,29 +325,24 @@ def train(
     d = mat.shape[0]
     model = QuadraticNetwork(d, d, device=device, dtype=mat.dtype.to_real())
     criterion = nn.MSELoss()
-    optimizer = optim.AdamW(model.parameters(), lr=5.0e-3, weight_decay=1.0e-2)
+
+    lr = 5.0e-3
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1.0e-2)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
     log.info("Network:\n%s", model)
 
     losses_previous: torch.Tensor | None = None
-    if weights is not None:
-        checkpoint = torch.load(weights, map_location=device, weights_only=True)
-
+    if checkpoint is not None:
         model.load_state_dict(checkpoint["model"])
-        try:
-            optimizer.load_state_dict(checkpoint["optimizer"])
-        except (KeyError, ValueError) as exc:
-            log.warning("Could not restore optimizer state: %s", exc)
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        scheduler.load_state_dict(checkpoint["scheduler"])
 
-        losses_previous = checkpoint.get("losses")
+        losses_previous = checkpoint["losses"]
         log.info(
             "Resuming from '%s' (%d epochs trained)",
             weights,
-            checkpoint.get(
-                "num_epochs_trained",
-                0 if losses_previous is None else len(losses_previous),
-            ),
+            checkpoint["num_epochs_trained"],
         )
 
     # {{{ generate dataset
@@ -343,7 +363,7 @@ def train(
             tuple[torch.Tensor, torch.Tensor],
             tuple[torch.Tensor, torch.Tensor],
         ],
-        make_timeseries_datasets(x, y, (0.8, 0.1, 0.1)),
+        make_timeseries_datasets(x, y, split, rng=np.random.default_rng(seed)),
     )
 
     mem.add_record("After data generation")
@@ -411,20 +431,27 @@ def train(
             # model
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
-            "epochs": epochs,
+            "scheduler": scheduler.state_dict(),
+            # loss
             "num_epochs_trained": num_epochs_trained,
             "losses": losses,
             "loss_test": loss_test,
-            "zmask": zmask,
-            "mat": mat,
-            # parameters
+            # dataset
             "inputfile": str(filename),
             "dataidx": dataidx,
+            "mat": mat,
             "bbox": bbox,
             "escape_radius": escape_radius,
             "resolution": resolution,
             "maxit": maxit,
+            "zmask": zmask,
+            # hyperparameters
+            "epochs": epochs,
             "early_stop_patience": early_stop_patience,
+            "lr": lr,
+            "batch_size": batch_size,
+            "split": split,
+            "seed": seed,
         },
         weightsfile,
     )
@@ -483,7 +510,7 @@ def infer(
     escape_radius = checkpoint["escape_radius"]
 
     losses = checkpoint["losses"]
-    loss_test = checkpoint.get("loss_test", 0.0)
+    loss_test = checkpoint["loss_test"]
     zmask = checkpoint["zmask"]
     mat = cast(torch.Tensor, checkpoint["mat"])
 
@@ -598,29 +625,32 @@ if __name__ == "__main__":
     subparser.add_argument(
         "--dataidx",
         type=int,
-        default=5,
-        help="Index of the matrix to reconstruct",
+        default=None,
+        help="Index of the matrix to reconstruct (from checkpoint when resuming)",
     )
     subparser.add_argument(
         "-r",
         "--resolution",
         type=int,
-        default=128,
-        help="Resolution (in the c complex plane) of the images",
+        default=None,
+        help=(
+            "Resolution (in the c complex plane) of the images "
+            "(from checkpoint when resuming)"
+        ),
     )
     subparser.add_argument(
         "--maxit",
         type=int,
-        default=128,
-        help="Maximum number of iterations",
+        default=None,
+        help="Maximum number of iterations (from checkpoint when resuming)",
     )
     subparser.add_argument(
         "--bbox",
         type=float,
         nargs=4,
-        default=(-0.03, 0.03, -0.03, 0.03),
+        default=None,
         metavar=("RE_MIN", "RE_MAX", "IM_MIN", "IM_MAX"),
-        help="Bounding box in the complex plane",
+        help="Bounding box in the complex plane (from checkpoint when resuming)",
     )
     subparser.add_argument(
         "--early-stop-patience",
@@ -674,6 +704,8 @@ if __name__ == "__main__":
         # NOTE: use TF32 for matrix multiplication (should be faster, similar precision)
         torch.set_float32_matmul_precision("high")
 
+        bbox = None if args.bbox is None else tuple(args.bbox)
+
         if args.command == "train":
             raise SystemExit(
                 train(
@@ -681,7 +713,7 @@ if __name__ == "__main__":
                     weights=args.weights,
                     dataidx=args.dataidx,
                     resolution=args.resolution,
-                    bbox=tuple(args.bbox),
+                    bbox=bbox,
                     maxit=args.maxit,
                     early_stop_patience=args.early_stop_patience,
                     outfile=args.outfile,
@@ -692,7 +724,7 @@ if __name__ == "__main__":
             raise SystemExit(
                 infer(
                     args.weightsfile,
-                    bbox=tuple(args.bbox),
+                    bbox=bbox,
                     resolution=args.resolution,
                     maxit=args.maxit,
                     outfile=args.outfile,
