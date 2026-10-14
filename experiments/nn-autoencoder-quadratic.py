@@ -173,6 +173,7 @@ def _plot_predict(
         resolution=2 * config.resolution,
         maxit=config.maxit,
     )
+
     escape_radius = config.escape_radius
     mask = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
 
@@ -298,7 +299,6 @@ def train(
     from torch import optim
 
     d = mat.shape[0]
-    dtype = mat.dtype.to_real()
 
     # NOTE: when resuming, the stored architecture is used to rebuild the model
     model_config: dict[str, Any]
@@ -312,7 +312,7 @@ def train(
             "alpha": 0.5,
         }
 
-    model = Autoencoder(**model_config, device=device, dtype=dtype)
+    model = Autoencoder(**model_config, device=device, dtype=mat.dtype.to_real())
     criterion = nn.MSELoss()
 
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
