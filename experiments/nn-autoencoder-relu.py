@@ -45,7 +45,7 @@ class AutoencoderConfig(Config):
     """Configuration for the standard autoencoder network."""
 
     lr: float = 1.0e-3
-    settle_tol: float = 1.0e-3
+    fixed_point_rtol: float = 1.0e-3
 
 
 # }}}
@@ -339,7 +339,7 @@ def train(
     # NOTE: mask out converged trajectories -- they seem to mostly confuse the
     # training here, unlike for nn-autoencoder-quadratic, where they don't
     # matter much because the network encodes the dynamics a lot better.
-    tmask = compute_trajectory_mask(x, rtol=config.settle_tol)
+    tmask = compute_trajectory_mask(x, rtol=config.fixed_point_rtol)
 
     x = x[:, :-1]
     y = y[:, :-1]
