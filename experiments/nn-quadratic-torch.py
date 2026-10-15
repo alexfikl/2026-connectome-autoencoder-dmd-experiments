@@ -96,7 +96,7 @@ class QuadraticNetwork(nn.Module):
 
 def _plot_predict(
     filename: pathlib.Path,
-    model: QuadraticNetwork,
+    model: nn.Module,
     config: Config,
     *,
     tag: str,
@@ -309,13 +309,11 @@ def train(
 
     log.info("Network:\n%s", model)
 
-    losses_previous: torch.Tensor | None = None
     if checkpoint is not None:
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
 
-        losses_previous = checkpoint["losses"]
         log.info(
             "Resuming from '%s' (%d epochs trained)",
             weights,
@@ -358,7 +356,7 @@ def train(
 
         _plot_predict(
             outfile,
-            m,  # ty: ignore[invalid-argument-type]
+            m,
             config,
             tag=f"{epoch:04d}",
             overwrite=overwrite,
@@ -400,7 +398,8 @@ def train(
 
     from dataclasses import asdict
 
-    if losses_previous is not None:
+    if checkpoint is not None:
+        losses_previous = checkpoint["losses"]
         losses = torch.cat((losses_previous.to(losses.device), losses))
 
     num_epochs_trained = len(losses)
