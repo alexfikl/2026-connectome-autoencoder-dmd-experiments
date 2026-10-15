@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import math
 import os
 import pathlib
@@ -801,7 +802,10 @@ def torch_train(
 
         # }}}
 
-        scheduler.step(loss_validate)
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            scheduler.step(loss_validate)
+        else:
+            scheduler.step()
 
         timer.toc()
 
@@ -822,7 +826,7 @@ def torch_train(
         loss_v = loss_validate.item()
         if loss_v < best_loss:
             best_loss = loss_v
-            best_state = model.state_dict()
+            best_state = copy.deepcopy(model.state_dict())
             best_epoch = epoch + 1
             num_bad_epochs = 0
         elif patience_early_stop > 0:

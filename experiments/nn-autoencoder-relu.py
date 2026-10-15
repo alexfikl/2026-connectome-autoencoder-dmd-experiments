@@ -189,7 +189,7 @@ def _plot_loss(
         losses = losses.cpu().numpy()
         ax.semilogy(losses[:, 0, 0], label="Train")
         ax.semilogy(losses[:, 1, 0], label="Validation")
-        ax.axhline(loss_test, color="k", ls="--")
+        ax.axhline(loss_test, color="k", ls="--", label="Test")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
         ax.legend()
@@ -294,19 +294,17 @@ def train(
     criterion = nn.MSELoss()
 
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, patience=3, factor=0.3, min_lr=1.0e-5, cooldown=2
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=config.epochs, eta_min=1.0e-5
     )
 
     log.info("Network:\n%s", model)
 
-    losses_previous: torch.Tensor | None = None
     if checkpoint is not None:
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
 
-        losses_previous = checkpoint["losses"]
         log.info(
             "Resuming from '%s' (%d epochs trained)",
             weights,
@@ -391,7 +389,8 @@ def train(
 
     from dataclasses import asdict
 
-    if losses_previous is not None:
+    if checkpoint is not None:
+        losses_previous = checkpoint["losses"]
         losses = torch.cat((losses_previous.to(losses.device), losses))
 
     num_epochs_trained = len(losses)

@@ -151,7 +151,7 @@ def _plot_loss(
         losses = losses.cpu().numpy()
         ax.semilogy(losses[:, 0, 0], label="Train")
         ax.semilogy(losses[:, 1, 0], label="Validation")
-        ax.axhline(loss_test, color="k", ls="--")
+        ax.axhline(loss_test, color="k", ls="--", label="Test")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
         ax.legend()
@@ -172,7 +172,7 @@ def _plot_weights(
     #      the general dynamics of the problem)
 
     learned_A = model.model[0].weight.detach()  # ty: ignore[call-non-callable]
-    A = mat.to(learned_A.dtype)
+    A = mat
 
     with figure(
         filename.with_stem(f"{filename.stem}-weights"),
