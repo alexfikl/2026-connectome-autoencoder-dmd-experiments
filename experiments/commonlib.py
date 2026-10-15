@@ -899,3 +899,75 @@ def torch_predict(
 
 
 # }}}
+
+
+# {{{ mask_dataset
+
+
+class TrajectoryMasks(NamedTuple):
+    state: torch.Tensor
+    transition: torch.Tensor
+
+
+def compute_trajectory_mask(
+    x: Array3D[np.floating[Any]],
+    escape_radius: float | None = None,
+    *,
+    rtol: float | None = None,
+    atol: float = 1.0e-8,
+    xp: Any = None,
+) -> TrajectoryMasks:
+    """Compute the masks of usable states and transitions in ``x``.
+
+    Two kinds of states carry no dynamics and are masked out:
+
+    * *pinned* (clipped) states: their squared norm exceeds the escape radius
+      (see ``commonlib.generate_dataset``). The transition into the first
+      pinned state (the escape transition) is kept.
+    * *settled* states: the trajectory has converged to a fixed point and only
+      moves by a relative step ``|z_{n + 1} - z_n| / (|z_n| + atol)`` below *rtol*.
+
+    With both *escape_radius* and *rtol* unset nothing is masked.
+    """
+    from nneuroutil.array_api_extras import deinterleave
+
+    if xp is None:
+        xp = array_api_compat.array_namespace(x)
+
+    batch_size, window_size = x.shape[:2]
+    device = array_api_compat.device(x)
+
+    if array_api_compat.is_torch_array(x):
+        import torch
+
+        zx = torch.view_as_complex(x)
+    else:
+        zx = deinterleave(x)
+
+    zn = xp.sum(xp.real(zx) ** 2 + xp.imag(zx) ** 2, dim=-1)
+
+    if escape_radius is None:
+        active = xp.ones_like(zn, dtype=xp.bool)
+    else:
+        active = zn <= escape_radius**2
+
+    # a transition is dynamic if the trajectory still moves along it
+    if rtol is None:
+        moving = xp.ones((batch_size, window_size - 1), dtype=xp.bool, device=device)
+    else:
+        dz = xp.linalg.vector_norm(zx[:, 1:, :] - zx[:, :-1, :], dim=-1)  # ty: ignore[invalid-argument-type]
+        zn = xp.sqrt(zn[:, :-1])
+        moving = dz > rtol * (zn + atol)
+
+    # a state is transient if the trajectory moves into or out of it
+    empty = xp.zeros((batch_size, 1), dtype=xp.bool, device=device)
+    moving_in = xp.concat([empty, moving], dim=1)
+    moving_out = xp.concat([moving, empty], dim=1)
+
+    return TrajectoryMasks(
+        state=active & (moving_in | moving_out),
+        transition=active[:, :-1] & moving,
+    )
+
+
+# }}}
