@@ -63,7 +63,22 @@ class DMDConfig(Config):
     dmd_warmup_epochs: int = 10
     fixed_point_rtol: float = 1.0e-3
     ridge_eps: float = 1.0e-3
-    norm_factor: float = 1.0
+
+    # latent (complex) dimension of the autoencoder; None defaults to ``2 * d``
+    latent_size: int | None = None
+    # convex blend between the linear and quadratic activation (see
+    # nneuroutil.torch_extras.ComplexBlendedQuadratic)
+    alpha: float = 0.75
+
+    # weights of the reconstruction, latent linearity, and prediction losses
+    gamma_rec: float = 1.0
+    gamma_lin: float = 1.0
+    gamma_pre: float = 1.0
+
+    # scale used to normalize the states; if None, the state RMS is computed
+    # from the generated dataset so that the (quadratic) activation init gains
+    # are valid
+    norm_factor: float | None = None
 
 
 # }}}
@@ -522,8 +537,9 @@ def torch_train(
         batch_size=batch_size,
         shuffle=True,
         # NOTE: this is needed otherwise the DataLoader seems to want to use the
-        # 'cpu' device even when there is another default device..
-        generator=torch.Generator(device),
+        # 'cpu' device even when there is another default device.. it is seeded
+        # explicitly so that shuffling is reproducible
+        generator=torch.Generator(device).manual_seed(torch.initial_seed()),
     )
     validate_loader = DataLoader(
         validate_dataset,  # ty: ignore[invalid-argument-type]
@@ -949,22 +965,26 @@ def train(
 
     d = mat.shape[0]
 
+    # NOTE: `config.seed` already seeds the numpy split generator; seed torch as
+    # well so that the model initialization and shuffling are reproducible
+    log.info("Using seed: %d", config.seed)
+    torch.manual_seed(config.seed)
+
     # NOTE: when resuming, the stored architecture is used to rebuild the model
     model_config: dict[str, Any]
     if checkpoint is not None:
         model_config = checkpoint["model_config"]
     else:
+        latent_size = 2 * d if config.latent_size is None else config.latent_size
         model_config = {
             "input_size": d,
-            "encoder_layer_sizes": (d, d // 2),
-            "decoder_layer_sizes": (d // 2, d),
+            "encoder_layer_sizes": (d, latent_size),
+            "decoder_layer_sizes": (latent_size, d),
             "control_size": 1,
-            "alpha": None,
+            "alpha": config.alpha,
         }
 
     model = DMDAutoencoder(**model_config, device=device, dtype=mat.dtype.to_real())
-    # NOTE: the data is scaled by norm_factor, so scale the radius as well
-    model.escape_radius = config.escape_radius / config.norm_factor
     # NOTE: fixed_point_rtol is a relative step size, so it needs no scaling
     model.fixed_point_rtol = config.fixed_point_rtol
     model.ridge_eps = config.ridge_eps
@@ -1019,6 +1039,17 @@ def train(
         device=device,
     )
 
+    # NOTE: normalize the picked states to unit second moment so that the
+    # kaiming initialization of the quadratic activations is valid; the escape
+    # radius is scaled to match
+    if config.norm_factor is None:
+        from dataclasses import replace
+
+        norm_factor = torch.sqrt(torch.mean(torch.sum(x**2, dim=-1)))
+        config = replace(config, norm_factor=norm_factor.item())
+    model.escape_radius = config.escape_radius / config.norm_factor
+    log.info("State normalization: norm_factor %.5e", config.norm_factor)
+
     # NOTE: the control is constant along a trajectory, so it is kept per
     # realization (shape `(n, 1)`) instead of being replicated over the window;
     # it is passed to the model separately from the sliding windows
@@ -1057,6 +1088,9 @@ def train(
 
     target_scale = torch.mean(torch.conj(x_train) * x_train).real.item()
     criterion = DMDLoss(
+        gamma_rec=config.gamma_rec,
+        gamma_lin=config.gamma_lin,
+        gamma_pre=config.gamma_pre,
         scale=target_scale,
         escape_radius=config.escape_radius / config.norm_factor,
         fixed_point_rtol=config.fixed_point_rtol,
@@ -1298,6 +1332,42 @@ if __name__ == "__main__":
             "Ridge regularization for the DMDc least-squares solve "
             "(default: 1e-3, from checkpoint when resuming)"
         ),
+    )
+    parser.add_argument(
+        "--latent-size",
+        type=int,
+        default=None,
+        help=(
+            "Latent (complex) dimension of the autoencoder "
+            "(default: 2 * d, from checkpoint when resuming)"
+        ),
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=None,
+        help=(
+            "Blend between the linear and quadratic activation, in [0, 1] "
+            "(default: 0.75, from checkpoint when resuming)"
+        ),
+    )
+    parser.add_argument(
+        "--gamma-rec",
+        type=float,
+        default=None,
+        help="Weight of the reconstruction loss (default: 1)",
+    )
+    parser.add_argument(
+        "--gamma-lin",
+        type=float,
+        default=None,
+        help="Weight of the latent linearity loss (default: 1)",
+    )
+    parser.add_argument(
+        "--gamma-pre",
+        type=float,
+        default=None,
+        help="Weight of the prediction loss (default: 1)",
     )
     args = parser.parse_args()
 
