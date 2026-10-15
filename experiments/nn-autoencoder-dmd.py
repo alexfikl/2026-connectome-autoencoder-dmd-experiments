@@ -101,7 +101,9 @@ def make_layers(
     from nneuroutil.torch_extras import (
         Bias,
         ComplexBlendedQuadratic,
+        ComplexExp,
         ComplexLinear,
+        ComplexLog,
         ComplexQuadratic,
         LeakyModReLU,
         kaiming_uniform_,
@@ -124,6 +126,12 @@ def make_layers(
                 alpha=0.1 if alpha is None else alpha,
                 interleaved=True,
             )
+        elif nonlinearity == "clog":
+            activation = ComplexLog(interleaved=True)
+        elif nonlinearity == "cexp":
+            activation = ComplexExp(interleaved=True)
+        elif nonlinearity == "linear":
+            activation = nn.Identity()
         else:
             raise ValueError(f"unsupported nonlinearity: {nonlinearity!r}")
 
@@ -230,8 +238,7 @@ class DMDAutoencoder(nn.Module):
         nlayers = len(encoder_layer_sizes)
         encoder_layers = make_layers(
             (self.input_size, *encoder_layer_sizes),
-            # (*(("cblended_quadratic",) * (nlayers - 1)), "cquadratic"),
-            ("leaky_modrelu",) * nlayers,
+            (*(("linear",) * (nlayers - 1)), "clog"),
             alpha=alpha,
             device=device,
             dtype=dtype,
@@ -242,8 +249,7 @@ class DMDAutoencoder(nn.Module):
         nlayers = len(decoder_layer_sizes)
         decoder_layers = make_layers(
             (self.latent_size, *decoder_layer_sizes),
-            # ("cquadratic", *(("cblended_quadratic",) * (nlayers - 1))),
-            ("leaky_modrelu",) * nlayers,
+            ("cexp", *("linear",) * (nlayers - 1)),
             alpha=alpha,
             device=device,
             dtype=dtype,
@@ -252,13 +258,16 @@ class DMDAutoencoder(nn.Module):
 
         # }}}
 
+    @torch.no_grad()
     def fit_dmd(
         self,
-        cx_latent: torch.Tensor,
+        x_latent: torch.Tensor,
         x_in: torch.Tensor,
         c_in: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         r = self.latent_size
+
+        cx_latent = view_as_complex(x_latent)
         window_size = cx_latent.shape[1]
 
         X = cx_latent[:, :-1, :].reshape(-1, r)
