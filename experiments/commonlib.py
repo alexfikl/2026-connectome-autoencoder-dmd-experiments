@@ -10,7 +10,7 @@ import pathlib
 import secrets
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields
-from typing import TYPE_CHECKING, Any, NamedTuple, Self, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Self
 
 import array_api_compat
 import numpy as np
@@ -599,7 +599,7 @@ def post_process_dataset(
 # }}}
 
 
-# {{{{ generate_timeseries_dataset
+# {{{ generate_timeseries_dataset
 
 
 def generate_timeseries_dataset(
@@ -685,6 +685,7 @@ def split_timeseries_datasets(
     y: Array3D[np.complexfloating[Any]],
     lengths: tuple[float, float, float] | None = None,
     *,
+    mask: Array2D[np.bool] | None = None,
     rng: np.random.Generator | None = None,
     xp: Any = None,
 ) -> tuple[
@@ -700,26 +701,37 @@ def split_timeseries_datasets(
     if xp is None:
         xp = array_api_compat.array_namespace(x, y)
 
-    def flatten(ds: tuple[Array3D, ...]) -> tuple[Array2D, ...]:
-        return tuple(xp.reshape(d, (-1, d.shape[-1])) for d in ds)
+    def flatten_pairs(
+        xs: Array3D, ys: Array3D, ms: Array2D | None
+    ) -> tuple[Array2D, Array2D]:
+        xs = xp.reshape(xs, (-1, xs.shape[-1]))
+        ys = xp.reshape(ys, (-1, ys.shape[-1]))
 
-    training, validation, testing = random_split((x, y), lengths, rng=rng, xp=xp)
+        # NOTE: when given, `mask` drops the (state, next-state) pairs that
+        # carry no dynamics (see `compute_trajectory_mask`)
+        if ms is None:
+            return xs, ys
 
-    training = flatten(training)
-    validation = flatten(validation)
-    testing = flatten(testing)
+        ms = xp.reshape(ms, (-1,))
+        return xs[ms], ys[ms]
+
+    if mask is None:
+        training, validation, testing = (
+            flatten_pairs(xs, ys, None)
+            for xs, ys in random_split((x, y), lengths, rng=rng, xp=xp)
+        )
+    else:
+        training, validation, testing = (
+            flatten_pairs(xs, ys, ms)
+            for xs, ys, ms in random_split((x, y, mask), lengths, rng=rng, xp=xp)
+        )
 
     log.info("Split:")
     log.info("    Training:     %d", len(training[0]))
     log.info("    Validation:   %d", len(validation[0]))
     log.info("    Testing:      %d", len(testing[0]))
 
-    return cast(
-        tuple[
-            tuple[Array2D, Array2D], tuple[Array2D, Array2D], tuple[Array2D, Array2D]
-        ],
-        (training, validation, testing),
-    )
+    return training, validation, testing
 
 
 # }}}
