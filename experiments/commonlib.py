@@ -751,6 +751,7 @@ def compute_trajectory_mask(
     escape_radius: float | None = None,
     rtol: float | None = None,
     atol: float = 1.0e-8,
+    keep_escape_transition: bool = False,
     xp: Any = None,
 ) -> TrajectoryMasks:
     """Compute the masks of usable states and transitions in ``x``.
@@ -758,8 +759,9 @@ def compute_trajectory_mask(
     Two kinds of states carry no dynamics and are masked out:
 
     * *pinned* (clipped) states: their squared norm exceeds the escape radius
-      (see ``commonlib.generate_dataset``). The transition into the first
-      pinned state (the escape transition) is kept.
+      (see ``commonlib.generate_dataset``). If *keep_escape_transition* is
+      *False* (default), transitions into the pinned state are also dropped,
+      preventing constant clipping artifacts from corrupting linear fits.
     * *settled* states: the trajectory has converged to a fixed point and only
       moves by a relative step ``|z_{n + 1} - z_n| / (|z_n| + atol)`` below *rtol*.
 
@@ -801,9 +803,13 @@ def compute_trajectory_mask(
     moving_in = xp.concat([empty, moving], axis=1)
     moving_out = xp.concat([moving, empty], axis=1)
 
+    trans_active = (
+        active[:, :-1] if keep_escape_transition else (active[:, :-1] & active[:, 1:])
+    )
+
     return TrajectoryMasks(
         state=active & (moving_in | moving_out),
-        transition=active[:, :-1] & moving,
+        transition=trans_active & moving,
     )
 
 
