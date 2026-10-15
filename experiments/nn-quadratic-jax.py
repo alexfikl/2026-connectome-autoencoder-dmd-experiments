@@ -412,8 +412,8 @@ def _plot_weights(
 
 def train(
     filename: pathlib.Path,
-    overrides: Mapping[str, Any],
     *,
+    overrides: Mapping[str, Any] | None = None,
     weights: pathlib.Path | None = None,
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
@@ -436,6 +436,9 @@ def train(
     provenance = {**machine._asdict(), "device": str(device)}
 
     # {{{ load parameters
+
+    if overrides is None:
+        overrides = {}
 
     checkpoint: dict[str, Any] | None = None
     if weights is not None:
@@ -636,8 +639,8 @@ def train(
 
 def infer(
     weightsfile: pathlib.Path,
-    overrides: Mapping[str, Any],
     *,
+    overrides: Mapping[str, Any] | None = None,
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
 ) -> int:
@@ -651,6 +654,11 @@ def infer(
     mem = JaxMemoryTracker(device)
     mem.add_record("Start")
 
+    # {{{ load parameters
+
+    if overrides is None:
+        overrides = {}
+
     with open(weightsfile, "rb") as f:
         checkpoint = pickle.load(f)
     config = Config.from_sources(checkpoint["config"], overrides)
@@ -663,6 +671,8 @@ def infer(
     if outfile is None:
         outfile = weightsfile.with_suffix("")
     outfile = outfile.with_suffix("")
+
+    # }}}
 
     # {{{ load model
 
@@ -722,13 +732,12 @@ if __name__ == "__main__":
         set_jax_config()
         # NOTE: use TF32 for matrix multiplication (should be faster, similar precision)
         jax.config.update("jax_default_matmul_precision", "high")
-        overrides = vars(args)
 
         if args.command == "train":
             raise SystemExit(
                 train(
                     args.filename,
-                    overrides,
+                    overrides=vars(args),
                     weights=args.weights,
                     outfile=args.outfile,
                     overwrite=args.force,
@@ -738,7 +747,7 @@ if __name__ == "__main__":
             raise SystemExit(
                 infer(
                     args.filename,
-                    overrides,
+                    overrides=vars(args),
                     outfile=args.outfile,
                     overwrite=args.force,
                 )
