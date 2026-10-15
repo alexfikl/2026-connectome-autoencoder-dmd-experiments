@@ -309,17 +309,21 @@ class DMDAutoencoder(nn.Module):
 
         if self.training and self.dmd_enabled:
             # same-space DMDc on the encoded trajectory
+            A_dmd, B_dmd = self.fit_dmd(x_latent, x_in, c_in)
+
+            # evolve with the DMDc operator. NOTE: we use a multi-step rollout of
+            # the linear (DMDc) operator from the initial latent state, i.e.
+            # `y_k = A y_{k - 1} + B c`, rather than one-step teacher forcing, so
+            # that the latent trajectory is optimized to be *linearly*
+            # predictable over the whole window (see the DMD autoencoder of
+            # Lusch, Kutz and Brunton). The control is constant along the window
             cx_latent = view_as_complex(x_latent)
 
-            with torch.no_grad():
-                A_dmd, B_dmd = self.fit_dmd(cx_latent, x_in, c_in)
+            yhat_steps = [cx_latent[:, :1, :]]
+            for _ in range(int(window_size) - 1):
+                yhat_steps.append(yhat_steps[-1] @ A_dmd + c_in[:, None, :] @ B_dmd)
 
-            # evolve with the DMDc operator. NOTE: only one-step (teacher-forced)
-            # predictions are used for training: a multi-step rollout overflows
-            # as soon as A is expansive along the escape directions, which
-            # produces inf losses and NaN gradients
-            yhat_latent = cx_latent[:, :-1, :] @ A_dmd + c_in[:, None, :] @ B_dmd
-            yhat_latent = view_as_real(yhat_latent)
+            yhat_latent = view_as_real(torch.cat(yhat_steps[1:], dim=1))
             assert yhat_latent.shape == (batch_size, window_size - 1, 2 * r)
 
             yhat_out = self.decoder(yhat_latent)
