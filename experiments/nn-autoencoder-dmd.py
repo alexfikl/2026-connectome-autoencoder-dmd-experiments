@@ -261,7 +261,7 @@ class DMDAutoencoder(nn.Module):
         # the latter only sit at a fixed point
         if self.escape_radius is not None or self.settle_tol is not None:
             mask = compute_trajectory_mask(
-                x_in, self.escape_radius, rtol=self.settle_tol
+                x_in, escape_radius=self.escape_radius, rtol=self.settle_tol
             )
             w = mask.transition.reshape(-1)
             if torch.any(w):
@@ -411,7 +411,7 @@ class DMDLoss(nn.Module):
             transition_weight = None
         else:
             mask = compute_trajectory_mask(
-                x_in, self.escape_radius, rtol=self.settle_tol
+                x_in, escape_radius=self.escape_radius, rtol=self.settle_tol
             )
             state_weight = mask.state.to(x_in.dtype)
             transition_weight = mask.transition.to(x_in.dtype)
@@ -717,7 +717,7 @@ def build_latent_dmd(
             # drop pinned -> pinned and settled transitions (see DMDAutoencoder.forward)
             if model.escape_radius is not None or model.settle_tol is not None:
                 mask = compute_trajectory_mask(
-                    z_block, model.escape_radius, rtol=model.settle_tol
+                    z_block, escape_radius=model.escape_radius, rtol=model.settle_tol
                 )
                 w = mask.transition.reshape(-1)
                 if torch.any(w):

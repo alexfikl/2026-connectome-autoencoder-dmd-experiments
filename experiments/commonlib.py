@@ -747,8 +747,8 @@ class TrajectoryMasks(NamedTuple):
 
 def compute_trajectory_mask(
     x: Array3D[np.floating[Any]],
-    escape_radius: float | None = None,
     *,
+    escape_radius: float | None = None,
     rtol: float | None = None,
     atol: float = 1.0e-8,
     xp: Any = None,

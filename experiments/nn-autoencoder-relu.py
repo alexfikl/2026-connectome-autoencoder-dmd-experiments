@@ -45,6 +45,7 @@ class AutoencoderConfig(Config):
     """Configuration for the standard autoencoder network."""
 
     lr: float = 1.0e-3
+    settle_tol: float = 1.0e-3
 
 
 # }}}
@@ -221,6 +222,7 @@ def train(
     overwrite: bool = False,
 ) -> int:
     from commonlib import (
+        compute_trajectory_mask,
         generate_timeseries_dataset,
         load_matrix_datasets,
         split_timeseries_datasets,
@@ -333,6 +335,14 @@ def train(
             escape_radius=config.escape_radius,
         ),
     )
+
+    # NOTE: mask out converged trajectories -- they seem to mostly confuse the
+    # training here, unlike for nn-autoencoder-quadratic, where they don't
+    # matter much because the network encodes the dynamics a lot better.
+    tmask = compute_trajectory_mask(x, rtol=config.settle_tol)
+
+    x = x[:, :-1]
+    y = y[:, :-1]
     xy_train, xy_validate, xy_test = cast(
         tuple[
             tuple[torch.Tensor, torch.Tensor],
@@ -340,7 +350,11 @@ def train(
             tuple[torch.Tensor, torch.Tensor],
         ],
         split_timeseries_datasets(
-            x, y, config.split, rng=np.random.default_rng(config.seed)
+            x,
+            y,
+            config.split,
+            rng=np.random.default_rng(config.seed),
+            mask=tmask.transition,
         ),
     )
 
