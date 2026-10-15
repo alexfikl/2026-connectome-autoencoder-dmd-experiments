@@ -4,12 +4,11 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import math
 import os
 import pathlib
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields
 from typing import TYPE_CHECKING, Any, NamedTuple, Self, cast
 
@@ -17,14 +16,11 @@ import array_api_compat
 import numpy as np
 
 from nneuroutil.array_api_extras import interleave
-from nneuroutil.data import SlicedDataLoader
-from nneuroutil.helpers import FuzzyChoiceAction, TicTocTimer, module_logger, tictoc
+from nneuroutil.helpers import FuzzyChoiceAction, module_logger, tictoc
 from nneuroutil.typing import Array1D, Array2D, Array3D, Array4D
 
 if TYPE_CHECKING:
     import torch
-    from torch import nn
-    from torch.utils.data import TensorDataset
 
 log = module_logger("lib")
 
@@ -724,178 +720,6 @@ def split_timeseries_datasets(
         ],
         (training, validation, testing),
     )
-
-
-# }}}
-
-
-# {{{ torch_train
-
-
-def torch_train(
-    model: nn.Module,
-    criterion: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
-    xy_train: TensorDataset,
-    xy_validate: TensorDataset,
-    *,
-    epochs: int = 50,
-    batch_size: int = 4096,
-    target_scale: float = 1.0,
-    callback: Callable[[int, nn.Module], None] | None = None,
-    verbose: bool = False,
-    patience_early_stop: int = 0,
-) -> tuple[nn.Module, torch.optim.Optimizer, torch.Tensor]:
-    import torch
-
-    # FIXME: not very nice to just split these?
-    x_train, y_train = xy_train.tensors
-    x_validate, y_validate = xy_validate.tensors
-    device = x_train.device
-
-    compiled_model = torch.compile(model)
-    loader = SlicedDataLoader(x_train, y_train, batch_size=batch_size, shuffle=True)
-
-    best_loss = float("inf")
-    best_state = None
-    best_epoch = -1
-    num_bad_epochs = 0
-
-    timer = TicTocTimer()
-    losses = torch.empty((epochs, 2, 1), device=device)
-
-    for epoch in range(epochs):
-        # {{{ training
-
-        model.train()
-        loss_epoch = torch.tensor(0.0, device=device)
-        num_batches = 0
-
-        timer.tic()
-
-        for i, (batch_x, batch_y) in enumerate(loader):
-            optimizer.zero_grad()
-
-            predictions = compiled_model(batch_x)
-            loss = criterion(predictions, batch_y) / target_scale
-
-            loss.backward()
-            optimizer.step()
-
-            loss_epoch += loss.detach()
-            num_batches += 1
-
-            if verbose:
-                log.info(r"    \[batch %03d] loss %.5e", i, loss.item())
-
-        loss_train = loss_epoch / num_batches
-
-        # }}}
-
-        # {{{ validation
-
-        model.eval()
-        with torch.no_grad():
-            predictions = compiled_model(x_validate)
-            loss_validate = criterion(predictions, y_validate) / target_scale
-
-        # }}}
-
-        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-            scheduler.step(loss_validate)
-        else:
-            scheduler.step()
-
-        timer.toc()
-
-        log.info(
-            "[%03d/%03d] train %.5e validate %.5e (%s)",
-            epoch + 1,
-            epochs,
-            loss_train,
-            loss_validate,
-            timer.short(),
-        )
-
-        losses[epoch, 0] = loss_train.item()
-        losses[epoch, 1] = loss_validate.item()
-
-        # {{{ best model and early stopping
-
-        loss_v = loss_validate.item()
-        if loss_v < best_loss:
-            best_loss = loss_v
-            best_state = copy.deepcopy(model.state_dict())
-            best_epoch = epoch + 1
-            num_bad_epochs = 0
-        elif patience_early_stop > 0:
-            num_bad_epochs += 1
-            if num_bad_epochs >= patience_early_stop:
-                log.info(
-                    "Early stopping at epoch %03d (best %03d, loss %.5e)",
-                    epoch + 1,
-                    best_epoch,
-                    best_loss,
-                )
-                losses = losses[: epoch + 1]
-                break
-
-        # }}}
-
-        if callback is not None:
-            with torch.no_grad():
-                callback(epoch, compiled_model)  # ty: ignore[invalid-argument-type]
-
-    if best_state is not None:
-        model.load_state_dict(best_state)
-        log.info(
-            "Restored best model from epoch %03d (loss %.5e)", best_epoch, best_loss
-        )
-
-    return model, optimizer, losses
-
-
-# }}}
-
-
-# {{{ torch_predict
-
-
-def torch_predict(
-    model: nn.Module,
-    *,
-    bbox: tuple[float, float, float, float],
-    resolution: int = 128,
-    maxit: int = 128,
-    device: Any = None,
-) -> torch.Tensor:
-    import array_api_compat
-    import torch
-
-    d = int(model.input_size)  # ty: ignore[invalid-argument-type]
-    dtype = model.dtype
-    assert isinstance(dtype, torch.dtype)
-    assert dtype.is_floating_point
-
-    with torch.no_grad():
-        z = torch.zeros((resolution, resolution, 2 * d), dtype=dtype, device=device)
-        c = generate_grid(
-            *bbox,
-            nx=resolution,
-            ny=resolution,
-            dtype=dtype.to_complex(),
-            xp=array_api_compat.array_namespace(z),
-            device=device,
-        )
-        c = c[:, :, None]
-
-        for _ in range(1, maxit):
-            Az = model(z)
-            z[:, :, ::2] = Az[:, :, ::2] + c.real
-            z[:, :, 1::2] = Az[:, :, 1::2] + c.imag
-
-    return torch.view_as_complex(z.reshape(*z.shape[:-1], -1, 2))
 
 
 # }}}

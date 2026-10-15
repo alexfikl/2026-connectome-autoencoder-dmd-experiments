@@ -102,7 +102,7 @@ def _plot_predict(
     tag: str,
     overwrite: bool,
 ) -> None:
-    from commonlib import torch_predict
+    from torchlib import torch_predict
 
     Zpredict = torch_predict(
         model,
@@ -237,7 +237,6 @@ def train(
         generate_timeseries_dataset,
         load_matrix_datasets,
         split_timeseries_datasets,
-        torch_train,
     )
 
     machine = machine_info(SCRIPT_PATH)
@@ -364,6 +363,8 @@ def train(
 
     _, y_train = xy_train
     target_scale = torch.mean(y_train.conj() * y_train).real.item()
+
+    from torchlib import torch_train
 
     _, optimizer, losses = torch_train(
         model,
