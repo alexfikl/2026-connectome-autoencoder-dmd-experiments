@@ -15,7 +15,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from commonlib import Config, make_argument_parser
+from commonlib import Config, compute_trajectory_mask, make_argument_parser
 from nneuroutil.dmdc import build_dense_dmdc
 from nneuroutil.helpers import (
     TicTocTimer,
@@ -64,68 +64,6 @@ class DMDConfig(Config):
     settle_tol: float = 1.0e-3
     ridge_eps: float = 1.0e-3
     norm_factor: float = 1.0
-
-
-# }}}
-
-
-# {{{ masks
-
-
-class TrajectoryMasks(NamedTuple):
-    state: torch.Tensor
-    transition: torch.Tensor
-
-
-def compute_masks(
-    x: torch.Tensor,
-    escape_radius: float | None = None,
-    *,
-    rtol: float | None = None,
-    atol: float = 1.0e-8,
-) -> TrajectoryMasks:
-    """Compute the masks of usable states and transitions in ``x``.
-
-    Two kinds of states carry no dynamics and are masked out:
-
-    * *pinned* (clipped) states: their squared norm exceeds the escape radius
-      (see ``commonlib.generate_dataset``). The transition into the first
-      pinned state (the escape transition) is kept.
-    * *settled* states: the trajectory has converged to a fixed point and only
-      moves by a relative step ``|z_{n + 1} - z_n| / (|z_n| + atol)`` below *rtol*.
-
-    With both *escape_radius* and *rtol* unset nothing is masked.
-    """
-    batch_size, window_size = x.shape[:2]
-    device = x.device
-
-    zx = view_as_complex(x)
-    zn = torch.sum(zx.real**2 + zx.imag**2, dim=-1)
-
-    if escape_radius is None:
-        active = torch.ones_like(zn, dtype=torch.bool)
-    else:
-        active = zn <= escape_radius**2
-
-    # a transition is dynamic if the trajectory still moves along it
-    if rtol is None:
-        moving = torch.ones(
-            (batch_size, window_size - 1), dtype=torch.bool, device=device
-        )
-    else:
-        dz = torch.linalg.vector_norm(zx[:, 1:, :] - zx[:, :-1, :], dim=-1)
-        zn = torch.sqrt(zn[:, :-1])
-        moving = dz > rtol * (zn + atol)
-
-    # a state is transient if the trajectory moves into or out of it
-    empty = torch.zeros((batch_size, 1), dtype=torch.bool, device=device)
-    moving_in = torch.cat([empty, moving], dim=1)
-    moving_out = torch.cat([moving, empty], dim=1)
-
-    return TrajectoryMasks(
-        state=active & (moving_in | moving_out),
-        transition=active[:, :-1] & moving,
-    )
 
 
 # }}}
@@ -322,8 +260,10 @@ class DMDAutoencoder(nn.Module):
         # (the escape transition into the first pinned state is kept), while
         # the latter only sit at a fixed point
         if self.escape_radius is not None or self.settle_tol is not None:
-            w = compute_masks(x_in, self.escape_radius, rtol=self.settle_tol).transition
-            w = w.reshape(-1)
+            mask = compute_trajectory_mask(
+                x_in, self.escape_radius, rtol=self.settle_tol
+            )
+            w = mask.transition.reshape(-1)
             if torch.any(w):
                 X = X[w]
                 Y = Y[w]
@@ -470,9 +410,11 @@ class DMDLoss(nn.Module):
             state_weight = None
             transition_weight = None
         else:
-            masks = compute_masks(x_in, self.escape_radius, rtol=self.settle_tol)
-            state_weight = masks.state.to(x_in.dtype)
-            transition_weight = masks.transition.to(x_in.dtype)
+            mask = compute_trajectory_mask(
+                x_in, self.escape_radius, rtol=self.settle_tol
+            )
+            state_weight = mask.state.to(x_in.dtype)
+            transition_weight = mask.transition.to(x_in.dtype)
 
         # reconstruction loss
         loss_rec = masked_mse(x_in, x_out, state_weight)
@@ -774,10 +716,10 @@ def build_latent_dmd(
 
             # drop pinned -> pinned and settled transitions (see DMDAutoencoder.forward)
             if model.escape_radius is not None or model.settle_tol is not None:
-                w = compute_masks(
+                mask = compute_trajectory_mask(
                     z_block, model.escape_radius, rtol=model.settle_tol
-                ).transition
-                w = w.reshape(-1)
+                )
+                w = mask.transition.reshape(-1)
                 if torch.any(w):
                     X_block = X_block[w]
                     Y_block = Y_block[w]

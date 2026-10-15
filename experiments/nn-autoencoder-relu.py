@@ -60,6 +60,7 @@ class Autoencoder(nn.Module):
         latent_size: int,
         *,
         alpha: float = 0.1,
+        nonlinearity: str = "gelu",
         use_complex_linear: bool = True,
         device: str | torch.device | None = None,
         dtype: Any = None,
@@ -82,7 +83,7 @@ class Autoencoder(nn.Module):
             n_in: int,
             n_out: int,
             *,
-            nonlinearity="leaky_relu",
+            nonlinearity: str = "gelu",
             bias: bool = True,
         ) -> nn.Module:
             if use_complex_linear:
@@ -97,22 +98,32 @@ class Autoencoder(nn.Module):
             kaiming_uniform_(layer.weight, nonlinearity=nonlinearity, param=alpha)
             return layer
 
+        def make_activation(nonlinearity: str = "gelu") -> nn.Module:
+            if nonlinearity == "relu":
+                return nn.ReLU()
+            elif nonlinearity == "leaky_relu":
+                return nn.LeakyReLU(alpha)
+            elif nonlinearity == "gelu":
+                return nn.GELU()
+            else:
+                raise ValueError(f"unknown nonlinearity: {nonlinearity}")
+
         self.encoder = nn.Sequential(
-            make_linear_layer(self.input_size, 256),
-            nn.LeakyReLU(alpha),
-            make_linear_layer(256, 128),
-            nn.LeakyReLU(alpha),
-            make_linear_layer(128, 64),
-            nn.LeakyReLU(alpha),
+            make_linear_layer(self.input_size, 256, nonlinearity=nonlinearity),
+            make_activation(nonlinearity),
+            make_linear_layer(256, 128, nonlinearity=nonlinearity),
+            make_activation(nonlinearity),
+            make_linear_layer(128, 64, nonlinearity=nonlinearity),
+            make_activation(nonlinearity),
             make_linear_layer(64, self.latent_size, nonlinearity="linear"),
         )
         self.decoder = nn.Sequential(
-            make_linear_layer(self.latent_size, 64),
-            nn.LeakyReLU(alpha),
-            make_linear_layer(64, 128),
-            nn.LeakyReLU(alpha),
-            make_linear_layer(128, 256),
-            nn.LeakyReLU(alpha),
+            make_linear_layer(self.latent_size, 64, nonlinearity=nonlinearity),
+            make_activation(nonlinearity),
+            make_linear_layer(64, 128, nonlinearity=nonlinearity),
+            make_activation(nonlinearity),
+            make_linear_layer(128, 256, nonlinearity=nonlinearity),
+            make_activation(nonlinearity),
             # NOTE: setting bias=False here to stop the network from trying to
             # ignore everything that came before it. This should allow it to
             # learn a non-trivial solution.. hopefully
