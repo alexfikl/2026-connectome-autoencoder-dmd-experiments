@@ -762,13 +762,14 @@ def compute_trajectory_mask(
     device = array_api_compat.device(x)
 
     if array_api_compat.is_torch_array(x):
-        import torch
+        from nneuroutil.torch_extras import view_as_complex
 
-        zx = torch.view_as_complex(x)
+        zx = view_as_complex(x)
     else:
-        zx = deinterleave(x)
+        zx_re, zx_im = deinterleave(x)
+        zx = zx_re + 1j * zx_im
 
-    zn = xp.sum(xp.real(zx) ** 2 + xp.imag(zx) ** 2, dim=-1)
+    zn = xp.sum(xp.real(zx) ** 2 + xp.imag(zx) ** 2, axis=-1)
 
     if escape_radius is None:
         active = xp.ones_like(zn, dtype=xp.bool)
@@ -779,14 +780,14 @@ def compute_trajectory_mask(
     if rtol is None:
         moving = xp.ones((batch_size, window_size - 1), dtype=xp.bool, device=device)
     else:
-        dz = xp.linalg.vector_norm(zx[:, 1:, :] - zx[:, :-1, :], dim=-1)  # ty: ignore[invalid-argument-type]
+        dz = xp.linalg.vector_norm(zx[:, 1:, :] - zx[:, :-1, :], axis=-1)
         zn = xp.sqrt(zn[:, :-1])
         moving = dz > rtol * (zn + atol)
 
     # a state is transient if the trajectory moves into or out of it
     empty = xp.zeros((batch_size, 1), dtype=xp.bool, device=device)
-    moving_in = xp.concat([empty, moving], dim=1)
-    moving_out = xp.concat([moving, empty], dim=1)
+    moving_in = xp.concat([empty, moving], axis=1)
+    moving_out = xp.concat([moving, empty], axis=1)
 
     return TrajectoryMasks(
         state=active & (moving_in | moving_out),
