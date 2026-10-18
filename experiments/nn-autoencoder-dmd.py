@@ -793,7 +793,7 @@ def torch_predict(
         )
         c = (c / norm_factor)[..., None]
 
-        for _ in range(1, maxit):
+        for _ in range(maxit):
             # NOTE: the model already learned `A * norm_factor` so no rescaling
             # needed here. We just need it at the end to go back to physical space
             g = model.encoder(z)
@@ -840,17 +840,17 @@ def _plot_loss(
         labels = ("Rec", "Lin", "Pre")
 
         for k, label in enumerate(labels):
-            (line,) = ax.semilogy(losses_np[:, 0, 1 + k], label=f"Train {label}")
+            (line,) = ax.semilogy(losses_np[:, 0, 1 + k], label=f"Train. {label}")
             ax.semilogy(
                 losses_np[:, 1, 1 + k],
-                label=f"Val {label}",
+                label=f"Valid. {label}",
                 color=line.get_color(),
                 ls="--",
             )
 
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
-        ax.legend(fontsize="x-small", ncols=2)
+        ax.legend(ncols=2)
 
 
 def _plot_predict(
@@ -871,14 +871,17 @@ def _plot_predict(
         A_dmd,
         B_dmd,
         bbox=config.bbox,
-        resolution=2 * config.resolution,
+        resolution=config.resolution,
         maxit=config.maxit,
         norm_factor=config.norm_factor,
     )
 
+    from nneuroutil.scores import jaccard_index
+
     escape_radius = config.escape_radius
     in_set = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
     log.info("    Converged:    %d/%d", torch.sum(in_set), in_set.numel())
+    log.info("    IoU:          %.8e", jaccard_index(in_set, zmask))
 
     with figure(
         filename.with_stem(f"{filename.stem}-predict-{tag}"),
