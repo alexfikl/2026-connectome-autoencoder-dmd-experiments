@@ -54,21 +54,21 @@ class DMDConfig(Config):
     """Configuration for the DMD autoencoder network."""
 
     epochs: int = 100
-    lr: float = 1.0e-4
+    lr: float = 5.0e-3
     maxit: int = 32
     batch_size: int = 512
     escape_radius: float = 10.0
 
     window_size: int = 32
     nwindows: int = 1
-    dmd_warmup_epochs: int = 0
+    dmd_warmup_epochs: int = 10
     fixed_point_rtol: float = 1.0e-3
     ridge_eps: float = 1.0e-3
 
     # NOTE: None values get defaults from the data
     latent_size: int | None = None
     alpha: float = 0.75
-    norm_factor: float | None = 1.0
+    norm_factor: float | None = None
 
     dmd_method: Literal["pinv", "ridge"] = "pinv"
     hidden_size: int | None = None
@@ -659,23 +659,27 @@ def torch_train(
 
         # {{{ best model and early stopping
 
-        loss_v = loss_validate[0].item()
-        if loss_v < best_loss:
-            best_loss = loss_v
-            best_state = copy.deepcopy(model.state_dict())
-            best_epoch = epoch + 1
-            num_bad_epochs = 0
-        elif patience_early_stop > 0:
-            num_bad_epochs += 1
-            if num_bad_epochs >= patience_early_stop:
-                log.info(
-                    "Early stopping at epoch %03d (best %03d, loss %.5e)",
-                    epoch + 1,
-                    best_epoch,
-                    best_loss,
-                )
-                losses = losses[: epoch + 1]
-                break
+        # NOTE: only consider epochs with DMD enabled. During the warmup the
+        # validation loss only contains the reconstruction term, so it is not
+        # comparable to the full DMD loss and would always be selected.
+        if model.dmd_enabled:
+            loss_v = loss_validate[0].item()
+            if loss_v < best_loss:
+                best_loss = loss_v
+                best_state = copy.deepcopy(model.state_dict())
+                best_epoch = epoch + 1
+                num_bad_epochs = 0
+            elif patience_early_stop > 0:
+                num_bad_epochs += 1
+                if num_bad_epochs >= patience_early_stop:
+                    log.info(
+                        "Early stopping at epoch %03d (best %03d, loss %.5e)",
+                        epoch + 1,
+                        best_epoch,
+                        best_loss,
+                    )
+                    losses = losses[: epoch + 1]
+                    break
 
         # }}}
 
