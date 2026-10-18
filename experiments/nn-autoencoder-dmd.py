@@ -65,35 +65,19 @@ class DMDConfig(Config):
     fixed_point_rtol: float = 1.0e-3
     ridge_eps: float = 1.0e-3
 
-    # latent (complex) dimension of the autoencoder; None defaults to ``2 * d``
+    # NOTE: None values get defaults from the data
     latent_size: int | None = None
-    # convex blend between the linear and quadratic activation (see
-    # nneuroutil.torch_extras.ComplexBlendedQuadratic)
     alpha: float = 0.75
+    norm_factor: float | None = None
+
+    dmd_method: Literal["pinv", "ridge"] = "pinv"
+    hidden_size: int | None = None
+    rollout_steps: int = 1
 
     # weights of the reconstruction, latent linearity, and prediction losses
     gamma_rec: float = 1.0
     gamma_lin: float = 1.0
     gamma_pre: float = 1.0
-
-    dmd_method: Literal["pinv", "ridge"] = "pinv"
-    """DMD solver method: 'pinv' (truncated SVD) or 'ridge' (L2-regularized)"""
-    architecture: Literal["lifting", "blended"] = "lifting"
-    """Autoencoder architecture: 'lifting' (explicit linear state + quadratic
-    observables) or 'blended' (learnable per-channel linear/quadratic blend).
-    """
-    hidden_size: int | None = None
-    """Hidden dimension for the quadratic lifting branch (None defaults to
-    latent_size - input_size).
-    """
-    rollout_steps: int = 1
-    """Number of rollout steps for DMD prediction (1 for one-step teacher-forced)."""
-
-    norm_factor: float | None = None
-    """Scale used to normalize the states; if None, the state RMS is computed
-    from the generated dataset so that the (quadratic) activation init gains
-    are valid
-    """
 
 
 # }}}
@@ -107,7 +91,7 @@ class LearnableBlendedEncoder(nn.Module):
 
     .. math::
 
-        y_i = \alpha_i (W z)_i + (1 - \alpha_i) (W z)_i^2 + b_i
+        y_i = W_1 (\alpha_i (W_2 z)_i + (1 - \alpha_i) (W_2 z)_i^2 + b_i)
 
     where :math:`\alpha_i = \sigma(\theta_i) \in [0, 1]` is a per-channel learnable
     parameter initialized from *alpha*.
@@ -115,8 +99,8 @@ class LearnableBlendedEncoder(nn.Module):
 
     def __init__(
         self,
-        input_size: int,
-        latent_size: int,
+        in_features: int,
+        out_features: int,
         *,
         alpha: float = 0.5,
         hidden_size: int | None = None,
@@ -131,172 +115,65 @@ class LearnableBlendedEncoder(nn.Module):
         )
 
         super().__init__()
-        self.input_size = input_size
-        self.latent_size = latent_size
+        self.input_size = in_features
+        self.hidden_size = hidden_size if hidden_size is not None else out_features
+        self.latent_size = out_features
 
-        h_size = hidden_size if hidden_size is not None else latent_size
-        self.linear_in = ComplexLinear(
-            input_size,
-            h_size,
+        # layer 1
+        linear_in = ComplexLinear(
+            self.input_size,
+            self.hidden_size,
             bias=False,
             interleaved=True,
             device=device,
             dtype=dtype,
         )
-        kaiming_uniform_(self.linear_in.weight, nonlinearity="linear")
-
-        if h_size != latent_size:
-            self.linear_out = ComplexLinear(
-                h_size,
-                latent_size,
-                bias=False,
-                interleaved=True,
-                device=device,
-                dtype=dtype,
-            )
-            kaiming_uniform_(self.linear_out.weight, nonlinearity="linear")
-        else:
-            self.linear_out = None
-
-        self.act = ComplexBlendedQuadratic(
-            alpha=alpha,
-            num_parameters=latent_size,
-            learnable=True,
-            interleaved=True,
-            device=device,
-            dtype=dtype,
-        )
-        self.bias = Bias(2 * latent_size, device=device, dtype=dtype)
-
-    @property
-    def alpha(self) -> torch.Tensor:
-        assert isinstance(self.act.alpha, torch.Tensor)
-        return self.act.alpha
-
-    # ty: ignore[invalid-mutable-override]
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        u = self.linear_in(x)
-        if self.linear_out is not None:
-            u = self.linear_out(u)
-
-        return self.bias(self.act(u))
-
-
-class QuadraticLiftingEncoder(nn.Module):
-    r"""Lifts state :math:`z \in \mathbb{C}^d` to
-    :math:`[z, \phi_{\text{quad}}(z)] \in \mathbb{C}^r`.
-
-    The first :math:`d` components are the linear state :math:`z` (initialized
-    to the identity map), while the remaining :math:`r - d` components are
-    quadratic observables of the form :math:`(W z)^2 + b` (or an intermediate
-    MLP if *hidden_size* is given).
-    """
-
-    def __init__(
-        self,
-        input_size: int,
-        latent_size: int,
-        *,
-        hidden_size: int | None = None,
-        device: str | torch.device | None = None,
-        dtype: Any = None,
-    ) -> None:
-        from nneuroutil.torch_extras import (
-            Bias,
-            ComplexLinear,
-            ComplexQuadratic,
-            kaiming_uniform_,
+        kaiming_uniform_(
+            linear_in.weight, param=alpha, nonlinearity="cblended_quadratic"
         )
 
-        super().__init__()
-        self.input_size = input_size
-        self.latent_size = latent_size
-        self.quad_size = latent_size - input_size
-
-        if self.quad_size < 0:
-            raise ValueError(
-                f"'latent_size' ({latent_size}) must be >= 'input_size' "
-                f"({input_size}) for lifting"
-            )
-
-        # Linear branch: initialized to the identity
-        self.linear = ComplexLinear(
-            input_size,
-            input_size,
+        # layer 2
+        linear_out = ComplexLinear(
+            self.hidden_size,
+            self.latent_size,
             bias=False,
             interleaved=True,
             device=device,
             dtype=dtype,
         )
-        with torch.no_grad():
-            self.linear.weight.copy_(
-                torch.eye(input_size, device=device, dtype=self.linear.weight.dtype)
-            )
+        kaiming_uniform_(linear_out.weight, nonlinearity="linear")
 
-        if self.quad_size > 0:
-            h_size = hidden_size if hidden_size is not None else self.quad_size
-            self.quad_in = ComplexLinear(
-                input_size,
-                h_size,
-                bias=False,
+        self.model = nn.Sequential(
+            linear_in,
+            ComplexBlendedQuadratic(
+                alpha=alpha,
+                num_parameters=self.hidden_size,
+                learnable=True,
                 interleaved=True,
                 device=device,
                 dtype=dtype,
-            )
-            kaiming_uniform_(self.quad_in.weight, nonlinearity="cquadratic")
-            self.quad_act = ComplexQuadratic(interleaved=True)
-
-            if h_size != self.quad_size:
-                self.quad_out = ComplexLinear(
-                    h_size,
-                    self.quad_size,
-                    bias=False,
-                    interleaved=True,
-                    device=device,
-                    dtype=dtype,
-                )
-                kaiming_uniform_(self.quad_out.weight, nonlinearity="linear")
-            else:
-                self.quad_out = None
-
-            self.quad_bias = Bias(2 * self.quad_size, device=device, dtype=dtype)
-        else:
-            self.quad_in = None
-            self.quad_act = None
-            self.quad_out = None
-            self.quad_bias = None
+            ),
+            linear_out,
+            Bias(2 * self.latent_size, device=device, dtype=dtype),
+        )
 
     # ty: ignore[invalid-mutable-override]
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y_lin = self.linear(x)
-        if self.quad_size > 0:
-            assert self.quad_in is not None
-            assert self.quad_act is not None
-            assert self.quad_bias is not None
-            q = self.quad_act(self.quad_in(x))
-            if self.quad_out is not None:
-                q = self.quad_out(q)
-            y_quad = self.quad_bias(q)
-            return torch.cat([y_lin, y_quad], dim=-1)
-        return y_lin
+        return self.model(x)
 
 
 class DMDAutoencoderResult(NamedTuple):
     A_dmd: torch.Tensor
     """Same-space DMD linear operator on the latent state."""
-
     B_dmd: torch.Tensor
     """DMDc control operator mapping the constant control ``c`` into the latent."""
 
     x_out: torch.Tensor
     """Output of the autoencoder (decoded state)."""
-
     y_latent: torch.Tensor | None
     """Encoded state trajectory (same as encoder input, for loss_lin)."""
-
     yhat_latent: torch.Tensor | None
     """DMDc one-step prediction of the latent trajectory (steps 1..n)."""
-
     yhat_out: torch.Tensor | None
     """Decoded DMDc one-step prediction (back in physical space)."""
 
@@ -307,14 +184,12 @@ class DMDAutoencoder(nn.Module):
         input_size: int,
         *,
         latent_size: int | None = None,
-        architecture: Literal["lifting", "blended"] = "lifting",
         hidden_size: int | None = None,
         dmd_method: Literal["pinv", "ridge"] = "pinv",
         rollout_steps: int = 1,
         dmd_enabled: bool = False,
         escape_radius: float | None = None,
         fixed_point_rtol: float | None = None,
-        control_size: int = 1,
         ridge_eps: float = 1.0e-3,
         alpha: float | None = None,
         device: str | torch.device | None = None,
@@ -329,28 +204,28 @@ class DMDAutoencoder(nn.Module):
         self.output_size = input_size
         self.latent_size = 2 * input_size if latent_size is None else latent_size
 
-        self.architecture = architecture
         self.hidden_size = hidden_size
         self.dmd_method = dmd_method
         self.rollout_steps = rollout_steps
         self.dtype = dtype
 
         self.dmd_enabled = dmd_enabled
-        # escape radius (in dataset units, i.e. after norm_factor scaling) used
-        # to mask out pinned states; None disables the masking
         self.escape_radius = escape_radius
-        # relative step size below which a trajectory is considered settled
-        # (dimensionless, so no norm_factor scaling needed); None disables it
         self.fixed_point_rtol = fixed_point_rtol
-        # number of (complex) control inputs fed to the DMDc operator
-        self.control_size = control_size
-        # ridge regularization for the DMDc least-squares solve
         self.ridge_eps = ridge_eps
 
         # {{{ construct autoencoder
 
         from nneuroutil.torch_extras import ComplexLinear, kaiming_uniform_
 
+        self.encoder = LearnableBlendedEncoder(
+            self.input_size,
+            self.latent_size,
+            alpha=0.5 if alpha is None else alpha,
+            hidden_size=hidden_size,
+            device=device,
+            dtype=dtype,
+        )
         self.decoder = ComplexLinear(
             self.latent_size,
             self.output_size,
@@ -359,45 +234,7 @@ class DMDAutoencoder(nn.Module):
             device=device,
             dtype=dtype,
         )
-
-        if architecture == "lifting":
-            self.encoder = QuadraticLiftingEncoder(
-                self.input_size,
-                self.latent_size,
-                hidden_size=hidden_size,
-                device=device,
-                dtype=dtype,
-            )
-            with torch.no_grad():
-                self.decoder.weight.zero_()
-                self.decoder.weight[:, : self.output_size].copy_(
-                    torch.eye(
-                        self.output_size,
-                        device=device,
-                        dtype=self.decoder.weight.dtype,
-                    )
-                )
-                if self.decoder.bias_re is not None:
-                    self.decoder.bias_re.zero_()
-                if self.decoder.bias_im is not None:
-                    self.decoder.bias_im.zero_()
-        elif architecture == "blended":
-            self.encoder = LearnableBlendedEncoder(
-                self.input_size,
-                self.latent_size,
-                alpha=0.5 if alpha is None else alpha,
-                hidden_size=hidden_size,
-                device=device,
-                dtype=dtype,
-            )
-            kaiming_uniform_(self.decoder.weight, nonlinearity="linear")
-            with torch.no_grad():
-                if self.decoder.bias_re is not None:
-                    self.decoder.bias_re.zero_()
-                if self.decoder.bias_im is not None:
-                    self.decoder.bias_im.zero_()
-        else:
-            raise ValueError(f"unsupported architecture: {architecture!r}")
+        kaiming_uniform_(self.decoder.weight, nonlinearity="linear")
 
         # }}}
 
@@ -409,37 +246,34 @@ class DMDAutoencoder(nn.Module):
         c_in: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         r = self.latent_size
+        control_size = c_in.shape[-1]
 
         cx_latent = view_as_complex(x_latent)
         window_size = cx_latent.shape[1]
 
         X = cx_latent[:, :-1, :].reshape(-1, r)
         Y = cx_latent[:, 1:, :].reshape(-1, r)
-        # the control is constant along a trajectory, so it is simply repeated
-        U = (
-            c_in[:, None, :]
-            .expand(-1, window_size - 1, -1)
-            .reshape(-1, self.control_size)
-        )
 
-        # drop pinned -> pinned and settled transitions: the former are
-        # artifacts of the clipping in generate_dataset, not actual dynamics
-        # (the escape transition into the first pinned state is kept), while
-        # the latter only sit at a fixed point
+        # NOTE: the control is constant along a trajectory, so it is simply repeated
+        U = c_in[:, None, :].expand(-1, window_size - 1, -1).reshape(-1, control_size)
+
+        # NOTE: drop transitions above the escape radius or at a fixed point
         if self.escape_radius is not None or self.fixed_point_rtol is not None:
             mask = compute_trajectory_mask(
                 x_in, escape_radius=self.escape_radius, rtol=self.fixed_point_rtol
-            )
-            w = mask.transition.reshape(-1)
-            if torch.any(w):
-                X = X[w]
-                Y = Y[w]
-                U = U[w]
+            ).transition.reshape(-1)
 
+            X = X[mask]
+            Y = Y[mask]
+            U = U[mask]
+
+        # build DMDc operators
         dmd = build_dense_dmdc(X, U, Y, method=self.dmd_method, eps=self.ridge_eps)
+
         assert dmd.A.shape == (r, r)
-        assert dmd.B.shape == (self.control_size, r)
-        return cast("torch.Tensor", dmd.A), cast("torch.Tensor", dmd.B)
+        assert dmd.B.shape == (control_size, r)
+
+        return cast(torch.Tensor, dmd.A), cast(torch.Tensor, dmd.B)
 
     def rollout_latent(
         self,
@@ -448,22 +282,24 @@ class DMDAutoencoder(nn.Module):
         A_dmd: torch.Tensor,
         B_dmd: torch.Tensor,
     ) -> torch.Tensor:
-        """Roll out latent state dynamics using the DMDc operators."""
         if self.rollout_steps == 1:
             yhat_complex = cx_latent[:, :-1, :] @ A_dmd + c_in[:, None, :] @ B_dmd
             return view_as_real(yhat_complex)
+        else:
+            yhat_steps = [cx_latent[:, :1, :]]
+            steps = cx_latent.shape[1] - 1
+            for _ in range(steps):
+                yhat_steps.append(yhat_steps[-1] @ A_dmd + c_in[:, None, :] @ B_dmd)
 
-        yhat_steps = [cx_latent[:, :1, :]]
-        steps = cx_latent.shape[1] - 1
-        for _ in range(steps):
-            yhat_steps.append(yhat_steps[-1] @ A_dmd + c_in[:, None, :] @ B_dmd)
-
-        return view_as_real(torch.cat(yhat_steps[1:], dim=1))
+            return view_as_real(torch.cat(yhat_steps[1:], dim=1))
 
     # ty: ignore[invalid-mutable-override]
     def forward(self, x_in: torch.Tensor, c_in: torch.Tensor) -> DMDAutoencoderResult:
         r = self.latent_size
         batch_size, window_size = x_in.shape[:2]
+
+        device = x_in.device
+        dtype = torch.complex64
 
         # encode the state trajectory (the control `c` is handled by DMDc below)
         x_latent = self.encoder(x_in)
@@ -483,10 +319,8 @@ class DMDAutoencoder(nn.Module):
             yhat_out = self.decoder(yhat_latent)
             assert yhat_out.shape == (batch_size, window_size - 1, x_in.shape[-1])
         else:
-            A_dmd = torch.eye(r, r, device=x_in.device, dtype=torch.complex64)
-            B_dmd = torch.zeros(
-                (self.control_size, r), device=x_in.device, dtype=torch.complex64
-            )
+            A_dmd = torch.eye(r, r, device=device, dtype=dtype)
+            B_dmd = torch.zeros((c_in.shape[-1], r), device=device, dtype=dtype)
             yhat_latent = None
             yhat_out = None
 
@@ -515,10 +349,8 @@ class DMDLossResult(NamedTuple):
 
     loss_rec: torch.Tensor
     """Reconstruction loss."""
-
     loss_lin: torch.Tensor
     """Linear approximation loss."""
-
     loss_pre: torch.Tensor
     """Linear prediction loss."""
 
@@ -877,6 +709,7 @@ def build_latent_dmd(
     """
     r = model.latent_size
     window_size = Z.shape[1]
+    control_size = C.shape[-1]
 
     with torch.no_grad():
         model.eval()
@@ -894,7 +727,7 @@ def build_latent_dmd(
             U_block = (
                 c_block[:, None, :]
                 .expand(-1, window_size - 1, -1)
-                .reshape(-1, model.control_size)
+                .reshape(-1, control_size)
             )
 
             # drop pinned -> pinned and settled transitions (see DMDAutoencoder.forward)
@@ -1146,13 +979,11 @@ def train(
         model_config = {
             "input_size": d,
             "latent_size": latent_size,
-            "architecture": config.architecture,
             "hidden_size": config.hidden_size,
             "dmd_method": config.dmd_method,
             "rollout_steps": config.rollout_steps,
             "fixed_point_rtol": config.fixed_point_rtol,
             "ridge_eps": config.ridge_eps,
-            "control_size": 1,
             "alpha": config.alpha,
         }
 
@@ -1535,15 +1366,6 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
-        "--architecture",
-        choices=["lifting", "blended"],
-        default=None,
-        help=(
-            "Autoencoder architecture: 'lifting' (explicit linear state + quadratic "
-            "observables) or 'blended' (learnable per-channel linear/quadratic blend)"
-        ),
-    )
-    parser.add_argument(
         "--dmd-method",
         choices=["pinv", "ridge"],
         default=None,
@@ -1553,8 +1375,7 @@ if __name__ == "__main__":
         "--hidden-size",
         type=int,
         default=None,
-        help="Hidden dimension for the quadratic lifting branch "
-        "(default: latent_size - input_size)",
+        help="Hidden dimension of the encoder (default: latent_size)",
     )
     parser.add_argument(
         "--rollout-steps",
