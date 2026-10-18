@@ -68,7 +68,7 @@ class DMDConfig(Config):
     # NOTE: None values get defaults from the data
     latent_size: int | None = None
     alpha: float = 0.75
-    norm_factor: float | None = None
+    norm_factor: float | None = 1.0
 
     dmd_method: Literal["pinv", "ridge"] = "pinv"
     hidden_size: int | None = None
@@ -238,6 +238,7 @@ class DMDAutoencoder(nn.Module):
 
         # }}}
 
+    @torch.compiler.disable
     @torch.no_grad()
     def fit_dmd(
         self,
