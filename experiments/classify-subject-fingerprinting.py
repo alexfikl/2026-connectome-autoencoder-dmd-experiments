@@ -379,8 +379,8 @@ def plot_reliability(
         hi = max(np.max(self_similarity), np.max(other_similarity))
         bins = np.linspace(lo, hi, 25)
 
-        ax1.hist(self_similarity, bins=bins, alpha=0.7, label="same subject")
-        ax1.hist(other_similarity, bins=bins, alpha=0.7, label="other subjects")
+        ax1.hist(self_similarity, bins=bins, alpha=0.7, label="same subject")  # ty: ignore[invalid-argument-type]
+        ax1.hist(other_similarity, bins=bins, alpha=0.7, label="other subjects")  # ty: ignore[invalid-argument-type]
         ax1.set_xlabel("Similarity (split-half)")
         ax1.set_ylabel("Count")
         ax1.set_title("Split-half reliability")

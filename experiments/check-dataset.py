@@ -61,7 +61,7 @@ def compute_statistics(
 
     return DatasetStatistics(
         escape_time=escape_time,
-        escaped=escaped,
+        escaped=escaped,  # ty: ignore[invalid-argument-type]
         znorm=np.sqrt(sqr_norm),
     )
 
