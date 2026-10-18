@@ -157,6 +157,12 @@ class LearnableBlendedEncoder(nn.Module):
             Bias(2 * self.latent_size, device=device, dtype=dtype),
         )
 
+    @property
+    def alpha(self) -> torch.Tensor:
+        """The current per-channel blend values."""
+        act = cast(Any, self.model[1])
+        return torch.sigmoid(act.alpha_param)
+
     # ty: ignore[invalid-mutable-override]
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
@@ -332,7 +338,7 @@ class DMDAutoencoder(nn.Module):
             A_dmd=A_dmd,
             B_dmd=B_dmd,
             x_out=x_out,
-            y_latent=x_latent if self.training and self.dmd_enabled else None,
+            y_latent=x_latent,
             yhat_latent=yhat_latent,
             yhat_out=yhat_out,
         )
@@ -502,6 +508,68 @@ class ControlWindowsDataset:
         )
 
 
+class TrainMetrics(NamedTuple):
+    lr: torch.Tensor
+    """Learning rate used for each epoch."""
+    alpha_mean: torch.Tensor
+    """Mean of the per-channel blend values :math:`\\alpha`."""
+    alpha_std: torch.Tensor
+    """Standard deviation of the per-channel blend values :math:`\\alpha`."""
+    y_latent_mean: torch.Tensor
+    """Mean of the encoded latent states over the training batches."""
+    y_latent_std: torch.Tensor
+    """Standard deviation of the encoded latent states over the training batches."""
+
+
+class ErrorMetrics(NamedTuple):
+    iou: torch.Tensor
+    """Intersection over union of the predicted and true converged sets."""
+    dice: torch.Tensor
+    """Dice score of the predicted and true converged sets."""
+    a_radius: torch.Tensor
+    """Spectral radius of the global DMD operator ``A_dmd``."""
+    b_norm: torch.Tensor
+    """Spectral norm of the global DMD control operator ``B_dmd``."""
+
+
+def _empty_train_metrics(epochs: int) -> TrainMetrics:
+    return TrainMetrics(
+        lr=torch.full((epochs,), float("nan")),
+        alpha_mean=torch.full((epochs,), float("nan")),
+        alpha_std=torch.full((epochs,), float("nan")),
+        y_latent_mean=torch.full((epochs,), float("nan")),
+        y_latent_std=torch.full((epochs,), float("nan")),
+    )
+
+
+def _empty_error_metrics(epochs: int) -> ErrorMetrics:
+    return ErrorMetrics(
+        iou=torch.full((epochs,), float("nan")),
+        dice=torch.full((epochs,), float("nan")),
+        a_radius=torch.full((epochs,), float("nan")),
+        b_norm=torch.full((epochs,), float("nan")),
+    )
+
+
+def _slice_metrics(metrics: Any, n: int) -> Any:
+    return metrics._replace(**{
+        key: value[:n] for key, value in metrics._asdict().items()
+    })
+
+
+def _cat_metrics(a: Any, b: Any) -> Any:
+    b_values = b._asdict()
+    return a._replace(**{
+        key: torch.cat((value, b_values[key])) for key, value in a._asdict().items()
+    })
+
+
+def _cpu_metrics(metrics: Any) -> Any:
+    return metrics._replace(**{
+        key: value.detach().cpu() for key, value in metrics._asdict().items()
+    })
+
+
 def torch_train(
     model: DMDAutoencoder,
     criterion: DMDLoss,
@@ -520,7 +588,7 @@ def torch_train(
     dmd_warmup_epochs: int = 0,
     patience_early_stop: int = 0,
     callback: Callable[[int, DMDAutoencoder], None] | None = None,
-) -> tuple[DMDAutoencoder, torch.optim.Optimizer, torch.Tensor]:
+) -> tuple[DMDAutoencoder, torch.optim.Optimizer, torch.Tensor, TrainMetrics]:
     device = X_train.device
     compiled_model = torch.compile(model)
     # compiled_model = model
@@ -553,17 +621,22 @@ def torch_train(
 
     timer = TicTocTimer()
     losses = torch.empty((epochs, 2, criterion.dim), device=device)
+    train_metrics = _empty_train_metrics(epochs)
 
     for epoch in range(epochs):
         # {{{ training
 
         model.train()
         model.dmd_enabled = epoch >= dmd_warmup_epochs
+        train_metrics.lr[epoch] = optimizer.param_groups[0]["lr"]
         if epoch == dmd_warmup_epochs and dmd_warmup_epochs > 0:
             log.info("Enabling DMD at epoch %03d", epoch + 1)
 
         loss_epoch = torch.zeros(criterion.dim, device=device)
         num_batches = 0
+        latent_sum = torch.zeros((), device=device, dtype=torch.float64)
+        latent_sq_sum = torch.zeros((), device=device, dtype=torch.float64)
+        latent_count = 0
 
         timer.tic()
         if device.type == "cuda":
@@ -591,6 +664,13 @@ def torch_train(
             loss_epoch += loss.tensor().detach()
             num_batches += 1
 
+            with torch.no_grad():
+                y_latent = predictions.y_latent
+                assert y_latent is not None
+                latent_sum += y_latent.sum(dtype=torch.float64)
+                latent_sq_sum += (y_latent**2).sum(dtype=torch.float64)
+                latent_count += y_latent.numel()
+
             if i in {0, len(loader) - 1}:
                 with torch.no_grad():
                     eigenvalues = torch.linalg.eigvals(predictions.A_dmd.cpu())
@@ -610,6 +690,18 @@ def torch_train(
                 )
 
         loss_train = loss_epoch / num_batches
+
+        alpha = model.encoder.alpha.detach().cpu()
+        train_metrics.alpha_mean[epoch] = alpha.mean().item()
+        train_metrics.alpha_std[epoch] = alpha.std(unbiased=False).item()
+
+        if latent_count > 0:
+            mean = latent_sum / latent_count
+            variance = latent_sq_sum / latent_count - mean**2
+            train_metrics.y_latent_mean[epoch] = mean.item()
+            train_metrics.y_latent_std[epoch] = torch.sqrt(
+                torch.clamp(variance, min=0.0)
+            ).item()
 
         # }}}
 
@@ -657,6 +749,10 @@ def torch_train(
             timer.short(),
         )
 
+        if callback is not None:
+            with torch.no_grad():
+                callback(epoch, compiled_model)  # ty: ignore[invalid-argument-type]
+
         # {{{ best model and early stopping
 
         # NOTE: only consider epochs with DMD enabled. During the warmup the
@@ -679,19 +775,16 @@ def torch_train(
                         best_loss,
                     )
                     losses = losses[: epoch + 1]
+                    train_metrics = _slice_metrics(train_metrics, epoch + 1)
                     break
 
         # }}}
-
-        if callback is not None:
-            with torch.no_grad():
-                callback(epoch, compiled_model)  # ty: ignore[invalid-argument-type]
 
     if best_state is not None:
         model.load_state_dict(best_state)
         log.info("Best model at epoch %03d (loss %.5e)", best_epoch, best_loss)
 
-    return model, optimizer, losses
+    return model, optimizer, losses, train_metrics
 
 
 # }}}
@@ -853,6 +946,22 @@ def _plot_loss(
         ax.legend(ncols=2)
 
 
+def _spectral_radius(A: torch.Tensor) -> torch.Tensor:
+    A = A.detach().cpu()
+    if not torch.isfinite(A).all():
+        return torch.tensor(float("nan"))
+
+    return torch.abs(torch.linalg.eigvals(A)).max()
+
+
+def _spectral_norm(B: torch.Tensor) -> torch.Tensor:
+    B = B.detach().cpu()
+    if not torch.isfinite(B).all():
+        return torch.tensor(float("nan"))
+
+    return torch.linalg.matrix_norm(B, ord=2)
+
+
 def _plot_predict(
     filename: pathlib.Path,
     model: DMDAutoencoder,
@@ -863,7 +972,7 @@ def _plot_predict(
     zmask: torch.Tensor,
     tag: str,
     overwrite: bool,
-) -> None:
+) -> ErrorMetrics:
     assert config.norm_factor is not None
 
     Zpredict = torch_predict(
@@ -876,12 +985,22 @@ def _plot_predict(
         norm_factor=config.norm_factor,
     )
 
-    from nneuroutil.scores import jaccard_index
+    from nneuroutil.scores import dice_score, jaccard_index
 
     escape_radius = config.escape_radius
     in_set = torch.sum(Zpredict.real**2 + Zpredict.imag**2, dim=-1) < escape_radius**2
+    metrics = ErrorMetrics(
+        iou=cast(torch.Tensor, jaccard_index(in_set, zmask)).detach().cpu(),
+        dice=cast(torch.Tensor, dice_score(in_set, zmask)).detach().cpu(),
+        a_radius=_spectral_radius(A_dmd),
+        b_norm=_spectral_norm(B_dmd),
+    )
+
     log.info("    Converged:    %d/%d", torch.sum(in_set), in_set.numel())
-    log.info("    IoU:          %.8e", jaccard_index(in_set, zmask))
+    log.info("    IoU:          %.8e", metrics.iou)
+    log.info("    Dice:         %.8e", metrics.dice)
+    log.info("    |lam|max(A):  %.8e", metrics.a_radius)
+    log.info("    ||B||_2:      %.8e", metrics.b_norm)
 
     with figure(
         filename.with_stem(f"{filename.stem}-predict-{tag}"),
@@ -896,6 +1015,104 @@ def _plot_predict(
         xs = np.linspace(xmin, xmax, zmask.shape[1])
         ys = np.linspace(ymin, ymax, zmask.shape[0])
         ax.contour(xs, ys, np.flipud(zmask), levels=[0.5], colors="red", linewidths=1.0)
+
+    return metrics
+
+
+# }}}
+
+
+# {{{ plot metrics
+
+
+def _plot_error_metrics(
+    filename: pathlib.Path,
+    metrics: ErrorMetrics,
+    *,
+    final: ErrorMetrics | None = None,
+    overwrite: bool,
+) -> None:
+    with figure(
+        filename.with_stem(f"{filename.stem}-error"),
+        ncols=2,
+        overwrite=overwrite,
+    ) as fig:
+        ax_set, ax_spec = fig.axes
+        epochs = np.arange(metrics.iou.numel())
+
+        ax_set.plot(epochs, metrics.iou.cpu().numpy(), label="IoU")
+        ax_set.plot(epochs, metrics.dice.cpu().numpy(), label="Dice")
+        ax_set.set_xlabel("Epoch")
+        ax_set.set_ylabel("Score")
+        ax_set.set_ylim(0.0, 1.0)
+        ax_set.legend()
+
+        if final is not None:
+            ax_set.axhline(float(final.iou), color="C0", ls=":", lw=1.0)
+            ax_set.axhline(float(final.dice), color="C1", ls=":", lw=1.0)
+
+        ax_spec.semilogy(
+            epochs,
+            metrics.a_radius.cpu().numpy(),
+            label=r"$|\lambda|_{\max}(A)$",
+        )
+        ax_spec.semilogy(epochs, metrics.b_norm.cpu().numpy(), label=r"$\|B\|_2$")
+        ax_spec.set_xlabel("Epoch")
+        ax_spec.set_ylabel("Magnitude")
+        ax_spec.legend()
+
+        if final is not None:
+            ax_spec.axhline(float(final.a_radius), color="C0", ls=":", lw=1.0)
+            ax_spec.axhline(float(final.b_norm), color="C1", ls=":", lw=1.0)
+
+
+def _plot_train_metrics(
+    filename: pathlib.Path,
+    metrics: TrainMetrics,
+    *,
+    overwrite: bool,
+) -> None:
+    with figure(
+        filename.with_stem(f"{filename.stem}-train"),
+        ncols=3,
+        overwrite=overwrite,
+    ) as fig:
+        ax_lr, ax_alpha, ax_latent = fig.axes
+        epochs = np.arange(metrics.lr.numel())
+
+        ax_lr.semilogy(epochs, metrics.lr.cpu().numpy(), label="LR")
+        ax_lr.set_xlabel("Epoch")
+        ax_lr.set_ylabel("Learning rate")
+        ax_lr.legend()
+
+        alpha_mean = metrics.alpha_mean.cpu().numpy()
+        alpha_std = metrics.alpha_std.cpu().numpy()
+        ax_alpha.plot(epochs, alpha_mean, label=r"$\alpha$ mean")
+        ax_alpha.fill_between(
+            epochs,
+            alpha_mean - alpha_std,
+            alpha_mean + alpha_std,
+            alpha=0.3,
+            linewidth=0.0,
+        )
+        ax_alpha.set_xlabel("Epoch")
+        ax_alpha.set_ylabel(r"$\alpha$")
+        ax_alpha.set_ylim(0.0, 1.0)
+        ax_alpha.legend()
+
+        y_mean = metrics.y_latent_mean.cpu().numpy()
+        y_std = metrics.y_latent_std.cpu().numpy()
+        ax_latent.plot(epochs, y_mean, label="Mean")
+        ax_latent.fill_between(
+            epochs,
+            y_mean - y_std,
+            y_mean + y_std,
+            alpha=0.3,
+            linewidth=0.0,
+        )
+        ax_latent.set_xlabel("Epoch")
+        ax_latent.set_ylabel(r"$y_{\mathrm{latent}}$")
+        ax_latent.legend()
 
 
 # }}}
@@ -1017,12 +1234,16 @@ def train(
     log.info("Network:\n%s", model)
 
     losses_previous: torch.Tensor | None = None
+    train_metrics_previous: dict[str, torch.Tensor] | None = None
+    error_metrics_previous: dict[str, torch.Tensor] | None = None
     if checkpoint is not None:
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
 
         losses_previous = checkpoint["losses"]
+        train_metrics_previous = checkpoint.get("train_metrics")
+        error_metrics_previous = checkpoint.get("error_metrics")
         log.info(
             "Resuming from '%s' (%d epochs trained)",
             weights,
@@ -1092,9 +1313,11 @@ def train(
 
     # {{{ train
 
+    error_metrics = _empty_error_metrics(config.epochs)
+
     def plot_predict(epoch: int, m: DMDAutoencoder) -> None:
         A_dmd, B_dmd = build_latent_dmd(m, x_train, c_train)
-        _plot_predict(
+        metrics = _plot_predict(
             outfile,
             m,
             A_dmd,
@@ -1104,6 +1327,11 @@ def train(
             tag=f"{epoch:04d}",
             overwrite=overwrite,
         )
+
+        error_metrics.iou[epoch] = metrics.iou
+        error_metrics.dice[epoch] = metrics.dice
+        error_metrics.a_radius[epoch] = metrics.a_radius
+        error_metrics.b_norm[epoch] = metrics.b_norm
 
     assert config.norm_factor is not None
 
@@ -1117,7 +1345,7 @@ def train(
         fixed_point_rtol=config.fixed_point_rtol,
     )
 
-    _, optimizer, losses = torch_train(
+    _, optimizer, losses, train_metrics = torch_train(
         model,
         criterion,
         optimizer,
@@ -1135,6 +1363,7 @@ def train(
         callback=plot_predict,
     )
     A_dmd, B_dmd = build_latent_dmd(model, x_train, c_train)
+    error_metrics = _slice_metrics(error_metrics, len(losses))
 
     mem.add_record("After training")
 
@@ -1180,6 +1409,17 @@ def train(
             loss_test[3].item(),
         )
 
+    final_error_metrics = _plot_predict(
+        outfile,
+        model,
+        A_dmd,
+        B_dmd,
+        config,
+        zmask=zmask,
+        tag="final",
+        overwrite=overwrite,
+    )
+
     mem.add_record("After test loss")
 
     # }}}
@@ -1189,7 +1429,20 @@ def train(
     from dataclasses import asdict
 
     if losses_previous is not None:
+        n_previous = len(losses_previous)
         losses = torch.cat((losses_previous.to(losses.device), losses))
+
+        if train_metrics_previous is not None:
+            previous = _cpu_metrics(TrainMetrics(**train_metrics_previous))
+        else:
+            previous = _empty_train_metrics(n_previous)
+        train_metrics = _cat_metrics(previous, train_metrics)
+
+        if error_metrics_previous is not None:
+            previous = _cpu_metrics(ErrorMetrics(**error_metrics_previous))
+        else:
+            previous = _empty_error_metrics(n_previous)
+        error_metrics = _cat_metrics(previous, error_metrics)
 
     num_epochs_trained = len(losses)
     torch.save(
@@ -1202,10 +1455,13 @@ def train(
             "model_config": model_config,
             "a_dmd": A_dmd,
             "b_dmd": B_dmd,
-            # loss
+            # loss and metrics
             "num_epochs_trained": num_epochs_trained,
             "losses": losses,
             "loss_test": loss_test,
+            "train_metrics": train_metrics._asdict(),
+            "error_metrics": error_metrics._asdict(),
+            "final_error_metrics": final_error_metrics._asdict(),
             # dataset
             "inputfile": str(filename),
             "mat": mat,
@@ -1227,14 +1483,11 @@ def train(
 
     _plot_dataset(outfile, zmask, bbox=config.bbox, overwrite=overwrite)
     _plot_loss(outfile, losses, overwrite=overwrite)
-    _plot_predict(
+    _plot_train_metrics(outfile, train_metrics, overwrite=overwrite)
+    _plot_error_metrics(
         outfile,
-        model,
-        A_dmd,
-        B_dmd,
-        config,
-        zmask=zmask,
-        tag="final",
+        error_metrics,
+        final=final_error_metrics,
         overwrite=overwrite,
     )
 
@@ -1281,6 +1534,8 @@ def infer(
     zmask = checkpoint["zmask"]
     A_dmd = checkpoint["a_dmd"]
     B_dmd = checkpoint["b_dmd"]
+    train_metrics = checkpoint.get("train_metrics")
+    error_metrics = checkpoint.get("error_metrics")
 
     if outfile is None:
         outfile = weightsfile.with_suffix("")
@@ -1311,7 +1566,8 @@ def infer(
 
     _plot_dataset(outfile, zmask, bbox=config.bbox, overwrite=overwrite)
     _plot_loss(outfile, losses, overwrite=overwrite)
-    _plot_predict(
+
+    final_metrics = _plot_predict(
         outfile,
         model,
         A_dmd,
@@ -1321,6 +1577,17 @@ def infer(
         tag="final",
         overwrite=overwrite,
     )
+
+    if train_metrics is not None:
+        _plot_train_metrics(outfile, TrainMetrics(**train_metrics), overwrite=overwrite)
+
+    if error_metrics is not None:
+        _plot_error_metrics(
+            outfile,
+            ErrorMetrics(**error_metrics),
+            final=final_metrics,
+            overwrite=overwrite,
+        )
 
     # }}}
 
