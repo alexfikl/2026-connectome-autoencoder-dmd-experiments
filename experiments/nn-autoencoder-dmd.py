@@ -856,6 +856,7 @@ def _plot_predict(
     B_dmd: torch.Tensor,
     config: DMDConfig,
     *,
+    zmask: torch.Tensor,
     tag: str,
     overwrite: bool,
 ) -> None:
@@ -881,6 +882,13 @@ def _plot_predict(
     ) as fig:
         ax = fig.gca()
         ax.imshow(in_set.cpu().numpy(), extent=config.bbox, cmap="binary")
+
+        # NOTE: overlay the true converged set as a red outline
+        xmin, xmax, ymin, ymax = config.bbox
+        zmask = zmask.cpu().numpy()
+        xs = np.linspace(xmin, xmax, zmask.shape[1])
+        ys = np.linspace(ymin, ymax, zmask.shape[0])
+        ax.contour(xs, ys, np.flipud(zmask), levels=[0.5], colors="red", linewidths=1.0)
 
 
 # }}}
@@ -1085,6 +1093,7 @@ def train(
             A_dmd,
             B_dmd,
             config,
+            zmask=zmask,
             tag=f"{epoch:04d}",
             overwrite=overwrite,
         )
@@ -1116,7 +1125,7 @@ def train(
         nwindows=config.nwindows,
         dmd_warmup_epochs=config.dmd_warmup_epochs,
         patience_early_stop=config.early_stop_patience,
-        # callback=plot_predict,
+        callback=plot_predict,
     )
     A_dmd, B_dmd = build_latent_dmd(model, x_train, c_train)
 
@@ -1217,6 +1226,7 @@ def train(
         A_dmd,
         B_dmd,
         config,
+        zmask=zmask,
         tag="final",
         overwrite=overwrite,
     )
@@ -1300,6 +1310,7 @@ def infer(
         A_dmd,
         B_dmd,
         config,
+        zmask=zmask,
         tag="final",
         overwrite=overwrite,
     )
