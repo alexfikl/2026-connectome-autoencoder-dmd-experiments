@@ -17,7 +17,6 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from commonlib import Config, compute_trajectory_mask, make_argument_parser
-from nneuroutil.dmdc import build_dense_dmdc
 from nneuroutil.helpers import (
     TicTocTimer,
     machine_info,
@@ -54,30 +53,45 @@ class DMDConfig(Config):
     """Configuration for the DMD autoencoder network."""
 
     epochs: int = 100
-    lr: float = 5.0e-3
+    lr: float = 1.0e-3
     maxit: int = 32
     batch_size: int = 512
     escape_radius: float = 10.0
 
-    window_size: int = 32
     nwindows: int = 1
-    dmd_warmup_epochs: int = 10
+    window_stride: int | None = None
+    window_min: int = 8
+    max_norm: float = 1.0
+    dmd_warmup_epochs: int = 5
     fixed_point_rtol: float = 1.0e-3
     ridge_eps: float = 1.0e-3
 
     # NOTE: None values get defaults from the data
-    latent_size: int | None = None
-    alpha: float = 0.75
     norm_factor: float | None = None
 
     dmd_method: Literal["pinv", "ridge"] = "pinv"
-    hidden_size: int | None = None
-    rollout_steps: int = 1
 
     # weights of the reconstruction, latent linearity, and prediction losses
     gamma_rec: float = 1.0
     gamma_lin: float = 1.0
     gamma_pre: float = 1.0
+    # weight of the multi-step rollout terms (added to the one-step terms)
+    gamma_roll: float = 0.1
+    # weight of the latent cycle-consistency term
+    gamma_cycle: float = 0.1
+    # fit A_dmd globally once per epoch instead of per batch
+    global_dmd: bool = True
+
+    # number of learned quadratic features per block (None -> 2 * d)
+    feature_size: int | None = None
+    # number of stacked quadratic feature blocks (1 -> degree 2, 2 -> degree 4)
+    feature_depth: int = 1
+    # hidden width of the bounded residual decoder (None -> 2 * d)
+    decoder_hidden_size: int | None = None
+    # number of latent steps in the multi-step losses
+    multi_steps: int = 8
+    # rollout used for the final prediction
+    predict_mode: Literal["latent", "reencode"] = "latent"
 
 
 # }}}
@@ -86,102 +100,185 @@ class DMDConfig(Config):
 # {{{ model
 
 
-class LearnableBlendedEncoder(nn.Module):
-    r"""Encodes state :math:`z \in \mathbb{C}^d` using a learnable blended activation:
+class QuadraticFeatureEncoder(nn.Module):
+    r"""Lift ``(z, c)`` with an explicit linear block and learned quadratic features.
+
+    The latent is
 
     .. math::
 
-        y_i = W_1 (\alpha_i (W_2 z)_i + (1 - \alpha_i) (W_2 z)_i^2 + b_i)
+        g = [z, c, \phi_1(z, c), \ldots, \phi_L(z, c)],
 
-    where :math:`\alpha_i = \sigma(\theta_i) \in [0, 1]` is a per-channel learnable
-    parameter initialized from *alpha*.
+    where each block is a learned quadratic map
+
+    .. math::
+
+        \phi_\ell = (W_\ell [z, c, \phi_{\ell-1}])^2.
+
+    The first ``d + 1`` coordinates are always the exact state and control, so
+    the decoder can recover the state and the latent cannot lose the linear
+    part of the dynamics.  ``L = 1`` gives degree-2 features; ``L = 2`` gives
+    degree-4 features.
     """
 
     def __init__(
         self,
-        in_features: int,
-        out_features: int,
+        input_size: int,
+        feature_size: int,
         *,
-        alpha: float = 0.5,
+        depth: int = 1,
+        device: str | torch.device | None = None,
+        dtype: Any = None,
+    ) -> None:
+        from nneuroutil.torch_extras import kaiming_uniform_
+
+        super().__init__()
+        if depth < 1:
+            raise ValueError(f"'depth' must be positive: {depth}")
+
+        real_dtype = None if dtype is None else dtype.to_real()
+        self.input_size = input_size
+        self.feature_size = feature_size
+        self.depth = depth
+
+        base = input_size + 1
+        self.weights = nn.ParameterList()
+        for level in range(depth):
+            in_features = base if level == 0 else base + feature_size
+            weight = nn.Parameter(
+                torch.empty(feature_size, in_features, device=device, dtype=real_dtype)
+            )
+            kaiming_uniform_(weight, nonlinearity="linear")
+            self.weights.append(weight)
+
+        self.latent_size = base + depth * feature_size
+
+    # ty: ignore[invalid-mutable-override]
+    def forward(self, z: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+        # z: (..., d) complex, c: (..., 1) complex
+        base = torch.cat([z, c], dim=-1)
+        x = base
+        features = []
+        for weight in self.weights:
+            # complex input times a real weight
+            x = x @ weight.to(dtype=x.dtype).mT
+            x = x**2
+            features.append(x)
+            x = torch.cat([base, x], dim=-1)
+
+        return torch.cat([base, *features], dim=-1)
+
+
+class LiftedDecoder(nn.Module):
+    r"""Bounded nonlinear decoder with an explicit linear state skip.
+
+    The first ``d`` latent coordinates are the state.  The decoder is
+
+    .. math::
+
+        z = g_{:d} + \mathrm{MLP}(g),
+
+    where the MLP uses split ``tanh`` and its output layer is initialized to
+    zero, so the model starts from the exact linear readout.
+    """
+
+    def __init__(
+        self,
+        latent_size: int,
+        output_size: int,
+        *,
         hidden_size: int | None = None,
         device: str | torch.device | None = None,
         dtype: Any = None,
     ) -> None:
-        from nneuroutil.torch_extras import (
-            Bias,
-            ComplexBlendedQuadratic,
-            ComplexLinear,
-            kaiming_uniform_,
-        )
+        from nneuroutil.torch_extras import kaiming_uniform_
 
         super().__init__()
-        self.input_size = in_features
-        self.hidden_size = hidden_size if hidden_size is not None else out_features
-        self.latent_size = out_features
+        self.latent_size = latent_size
+        self.output_size = output_size
+        self.hidden_size = hidden_size
 
-        # layer 1
-        linear_in = ComplexLinear(
-            self.input_size,
-            self.hidden_size,
-            bias=False,
-            interleaved=True,
-            device=device,
-            dtype=dtype,
-        )
-        kaiming_uniform_(
-            linear_in.weight, param=alpha, nonlinearity="cblended_quadratic"
-        )
-
-        # layer 2
-        linear_out = ComplexLinear(
-            self.hidden_size,
-            self.latent_size,
-            bias=False,
-            interleaved=True,
-            device=device,
-            dtype=dtype,
-        )
-        kaiming_uniform_(linear_out.weight, nonlinearity="linear")
-
-        self.model = nn.Sequential(
-            linear_in,
-            ComplexBlendedQuadratic(
-                alpha=alpha,
-                num_parameters=self.hidden_size,
-                learnable=True,
-                interleaved=True,
-                device=device,
-                dtype=dtype,
-            ),
-            linear_out,
-            Bias(2 * self.latent_size, device=device, dtype=dtype),
-        )
-
-    @property
-    def alpha(self) -> torch.Tensor:
-        """The current per-channel blend values."""
-        act = cast(Any, self.model[1])
-        return torch.sigmoid(act.alpha_param)
+        real_dtype = None if dtype is None else dtype.to_real()
+        if hidden_size is not None and hidden_size > 0:
+            self.w1 = nn.Parameter(
+                torch.empty(hidden_size, latent_size, device=device, dtype=real_dtype)
+            )
+            self.b1 = nn.Parameter(
+                torch.zeros(hidden_size, device=device, dtype=torch.complex64)
+            )
+            self.w2 = nn.Parameter(
+                torch.zeros(output_size, hidden_size, device=device, dtype=real_dtype)
+            )
+            self.b2 = nn.Parameter(
+                torch.zeros(output_size, device=device, dtype=torch.complex64)
+            )
+            kaiming_uniform_(self.w1, nonlinearity="linear")
+        else:
+            self.w1 = None
+            self.b1 = None
+            self.w2 = None
+            self.b2 = None
 
     # ty: ignore[invalid-mutable-override]
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(x)
+    def forward(self, g: torch.Tensor) -> torch.Tensor:
+        z = g[..., : self.output_size]
+        if self.w1 is None:
+            return z
+
+        h = g @ self.w1.to(dtype=g.dtype).mT + self.b1  # ty: ignore[unsupported-operator]
+        h = torch.complex(torch.tanh(h.real), torch.tanh(h.imag))
+        residual = h @ self.w2.to(dtype=h.dtype).mT + self.b2  # ty: ignore[unsupported-operator,unresolved-attribute]
+        return z + residual
+
+
+def _fit_linear_operator(
+    X: torch.Tensor,
+    Y: torch.Tensor,
+    *,
+    method: Literal["pinv", "ridge"],
+    eps: float,
+) -> torch.Tensor:
+    """Fit ``Y ~ X A`` with no control term."""
+    r = X.shape[1]
+    XhX = X.mH @ X
+    XhY = X.mH @ Y
+    XhX = 0.5 * (XhX + XhX.mH)
+
+    if method == "pinv":
+        A = torch.linalg.pinv(XhX) @ XhY
+    else:
+        A = torch.linalg.solve(
+            XhX + eps * torch.eye(r, device=X.device, dtype=X.dtype), XhY
+        )
+
+    return cast(torch.Tensor, A)
 
 
 class DMDAutoencoderResult(NamedTuple):
     A_dmd: torch.Tensor
-    """Same-space DMD linear operator on the latent state."""
-    B_dmd: torch.Tensor
-    """DMDc control operator mapping the constant control ``c`` into the latent."""
+    """Linear DMD operator on the lifted latent state."""
 
     x_out: torch.Tensor
     """Output of the autoencoder (decoded state)."""
     y_latent: torch.Tensor | None
     """Encoded state trajectory (same as encoder input, for loss_lin)."""
     yhat_latent: torch.Tensor | None
-    """DMDc one-step prediction of the latent trajectory (steps 1..n)."""
+    """One-step prediction of the latent trajectory (steps 1..n)."""
     yhat_out: torch.Tensor | None
-    """Decoded DMDc one-step prediction (back in physical space)."""
+    """Decoded one-step prediction (back in physical space)."""
+    yhat_latent_roll: torch.Tensor | None
+    """Multi-step prediction of the latent trajectory."""
+    yhat_out_roll: torch.Tensor | None
+    """Decoded multi-step prediction (back in physical space)."""
+
+    y_latent_roll_target: torch.Tensor | None = None
+    """Encoded targets for the multi-step rollout."""
+    x_out_roll_target: torch.Tensor | None = None
+    """Physical targets for the multi-step rollout."""
+    cycle_loss: torch.Tensor | None = None
+    """Latent cycle-consistency ``E(D(g)) - g`` for the rolled-out states."""
+    roll_weight: torch.Tensor | None = None
+    """Per-target weights (masks) for the multi-step rollout losses."""
 
 
 class DMDAutoencoder(nn.Module):
@@ -189,15 +286,15 @@ class DMDAutoencoder(nn.Module):
         self,
         input_size: int,
         *,
-        latent_size: int | None = None,
-        hidden_size: int | None = None,
+        feature_size: int | None = None,
+        feature_depth: int = 1,
+        decoder_hidden_size: int | None = None,
+        multi_steps: int = 8,
         dmd_method: Literal["pinv", "ridge"] = "pinv",
-        rollout_steps: int = 1,
         dmd_enabled: bool = False,
         escape_radius: float | None = None,
         fixed_point_rtol: float | None = None,
         ridge_eps: float = 1.0e-3,
-        alpha: float | None = None,
         device: str | torch.device | None = None,
         dtype: Any = None,
     ) -> None:
@@ -208,39 +305,41 @@ class DMDAutoencoder(nn.Module):
 
         self.input_size = input_size
         self.output_size = input_size
-        self.latent_size = 2 * input_size if latent_size is None else latent_size
-
-        self.hidden_size = hidden_size
+        self.feature_size = (
+            2 * input_size if feature_size is None else int(feature_size)
+        )
+        self.feature_depth = int(feature_depth)
+        self.decoder_hidden_size = (
+            2 * input_size if decoder_hidden_size is None else int(decoder_hidden_size)
+        )
+        self.multi_steps = multi_steps
         self.dmd_method = dmd_method
-        self.rollout_steps = rollout_steps
         self.dtype = dtype
 
         self.dmd_enabled = dmd_enabled
         self.escape_radius = escape_radius
         self.fixed_point_rtol = fixed_point_rtol
         self.ridge_eps = ridge_eps
+        # globally fitted latent operator, shared by all batches in an epoch
+        self.dmd_override: torch.Tensor | None = None
 
         # {{{ construct autoencoder
 
-        from nneuroutil.torch_extras import ComplexLinear, kaiming_uniform_
-
-        self.encoder = LearnableBlendedEncoder(
+        self.encoder = QuadraticFeatureEncoder(
             self.input_size,
-            self.latent_size,
-            alpha=0.5 if alpha is None else alpha,
-            hidden_size=hidden_size,
+            self.feature_size,
+            depth=self.feature_depth,
             device=device,
             dtype=dtype,
         )
-        self.decoder = ComplexLinear(
+        self.latent_size = self.encoder.latent_size
+        self.decoder = LiftedDecoder(
             self.latent_size,
             self.output_size,
-            bias=True,
-            interleaved=True,
+            hidden_size=self.decoder_hidden_size,
             device=device,
             dtype=dtype,
         )
-        kaiming_uniform_(self.decoder.weight, nonlinearity="linear")
 
         # }}}
 
@@ -251,106 +350,155 @@ class DMDAutoencoder(nn.Module):
         x_latent: torch.Tensor,
         x_in: torch.Tensor,
         c_in: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         r = self.latent_size
-        control_size = c_in.shape[-1]
 
-        cx_latent = view_as_complex(x_latent)
-        window_size = cx_latent.shape[1]
-
-        X = cx_latent[:, :-1, :].reshape(-1, r)
-        Y = cx_latent[:, 1:, :].reshape(-1, r)
-
-        # NOTE: the control is constant along a trajectory, so it is simply repeated
-        U = c_in[:, None, :].expand(-1, window_size - 1, -1).reshape(-1, control_size)
+        X = x_latent[:, :-1, :].reshape(-1, r)
+        Y = x_latent[:, 1:, :].reshape(-1, r)
 
         # NOTE: drop transitions above the escape radius or at a fixed point
         if self.escape_radius is not None or self.fixed_point_rtol is not None:
             mask = compute_trajectory_mask(
                 x_in, escape_radius=self.escape_radius, rtol=self.fixed_point_rtol
             ).transition.reshape(-1)
-
             X = X[mask]
             Y = Y[mask]
-            U = U[mask]
 
-        # build DMDc operators
-        dmd = build_dense_dmdc(X, U, Y, method=self.dmd_method, eps=self.ridge_eps)
+        A = _fit_linear_operator(X, Y, method=self.dmd_method, eps=self.ridge_eps)
+        # c is an invariant latent coordinate, not a linear control input
+        A[self.input_size, :] = 0
+        A[self.input_size, self.input_size] = 1
+        return A
 
-        assert dmd.A.shape == (r, r)
-        assert dmd.B.shape == (control_size, r)
-
-        return cast(torch.Tensor, dmd.A), cast(torch.Tensor, dmd.B)
-
-    def rollout_latent(
+    @torch.compiler.disable
+    def _lifted_rollout(
         self,
-        cx_latent: torch.Tensor,
+        g: torch.Tensor,
+        x_in: torch.Tensor,
         c_in: torch.Tensor,
         A_dmd: torch.Tensor,
-        B_dmd: torch.Tensor,
-    ) -> torch.Tensor:
-        nsteps = cx_latent.shape[1] - 1
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        """Roll out from several window starts and collect cycle targets."""
+        window_size = g.shape[1]
+        nsteps = min(max(int(self.multi_steps), 1), window_size - 1)
+        if nsteps < 1:
+            return None, None, None, None, None, None
 
-        if self.rollout_steps == 1:
-            yhat_complex = cx_latent[:, :-1, :] @ A_dmd + c_in[:, None, :] @ B_dmd
-            return view_as_real(yhat_complex)
+        max_start = window_size - 1 - nsteps
+        nstarts = min(4, max_start + 1)
+        starts = (
+            torch
+            .linspace(0, max_start, steps=nstarts, device=g.device)
+            .round()
+            .long()
+            .unique()
+        )
+
+        if self.escape_radius is None and self.fixed_point_rtol is None:
+            state_weight = None
         else:
-            # NOTE: roll out for `rollout_steps` steps, then reset to the
-            # teacher-forced state. This limits how much an expansive `A_dmd` can
-            # compound while still using every transition in the window.
-            k = max(1, min(self.rollout_steps, nsteps))
-            yhat_steps = []
-            y = cx_latent[:, :1, :]
-            for i in range(nsteps):
-                if i % k == 0:
-                    y = cx_latent[:, i : i + 1, :]
+            state_weight = compute_trajectory_mask(
+                x_in,
+                escape_radius=self.escape_radius,
+                rtol=self.fixed_point_rtol,
+            ).state.to(x_in.dtype)
 
-                y = y @ A_dmd + c_in[:, None, :] @ B_dmd
-                yhat_steps.append(y)
+        yhat_latent: list[torch.Tensor] = []
+        latent_targets: list[torch.Tensor] = []
+        out_targets: list[torch.Tensor] = []
+        weights: list[torch.Tensor] = []
+        cycle_terms: list[torch.Tensor] = []
 
-            return view_as_real(torch.cat(yhat_steps, dim=1))
+        for start in starts.tolist():
+            h = g[:, start : start + 1, :]
+            for k in range(nsteps):
+                h = h @ A_dmd
+                target_idx = start + 1 + k
+                yhat_latent.append(h[:, 0, :])
+                latent_targets.append(g[:, target_idx, :])
+                out_targets.append(x_in[:, target_idx, :])
+                if state_weight is not None:
+                    weights.append(state_weight[:, target_idx])
+
+                # cycle consistency: decoding and re-encoding a rolled-out
+                # latent state must return the same latent state
+                decoded = self.decoder(h)
+                reencoded = self.encoder(decoded, c_in[:, None, :])
+                cycle_terms.append(((reencoded - h).abs() ** 2).mean())
+
+        yhat_latent_t = torch.stack(yhat_latent, dim=1)
+        return (
+            view_as_real(yhat_latent_t),
+            view_as_real(self.decoder(yhat_latent_t)),
+            view_as_real(torch.stack(latent_targets, dim=1)),
+            torch.stack(out_targets, dim=1),
+            torch.stack(cycle_terms).mean(),
+            None if state_weight is None else torch.stack(weights, dim=1),
+        )
 
     # ty: ignore[invalid-mutable-override]
     def forward(self, x_in: torch.Tensor, c_in: torch.Tensor) -> DMDAutoencoderResult:
         r = self.latent_size
-        batch_size, window_size = x_in.shape[:2]
+        _batch_size, window_size = x_in.shape[:2]
 
         device = x_in.device
         dtype = torch.complex64
 
-        # encode the state trajectory (the control `c` is handled by DMDc below)
-        x_latent = self.encoder(x_in)
-        assert x_latent.shape == (batch_size, window_size, 2 * r)
+        c_time = c_in[:, None, :].expand(-1, window_size, -1)
+        g = self.encoder(view_as_complex(x_in), c_time)
+        x_out = view_as_real(self.decoder(g))
 
-        if self.training and self.dmd_enabled:
-            # same-space DMDc on the encoded trajectory
-            A_dmd, B_dmd = self.fit_dmd(x_latent, x_in, c_in)
+        yhat_latent = None
+        yhat_out = None
+        yhat_latent_roll = None
+        yhat_out_roll = None
+        y_latent_roll_target = None
+        x_out_roll_target = None
+        cycle_loss = None
+        roll_weight = None
 
-            # evolve with the DMDc operator (either 1-step teacher-forcing or
-            # multi-step rollout depending on rollout_steps). The control is
-            # constant along the window
-            cx_latent = view_as_complex(x_latent)
-            yhat_latent = self.rollout_latent(cx_latent, c_in, A_dmd, B_dmd)
-            assert yhat_latent.shape == (batch_size, window_size - 1, 2 * r)
+        if self.dmd_enabled and (self.training or self.dmd_override is not None):
+            if self.dmd_override is not None:
+                A_dmd = self.dmd_override
+            else:
+                A_dmd = self.fit_dmd(g, x_in, c_in)
 
-            yhat_out = self.decoder(yhat_latent)
-            assert yhat_out.shape == (batch_size, window_size - 1, x_in.shape[-1])
+            yhat = g[:, :-1, :] @ A_dmd
+            yhat_latent = view_as_real(yhat)
+            yhat_out = view_as_real(self.decoder(yhat))
+
+            if self.multi_steps > 1:
+                (
+                    yhat_latent_roll,
+                    yhat_out_roll,
+                    y_latent_roll_target,
+                    x_out_roll_target,
+                    cycle_loss,
+                    roll_weight,
+                ) = self._lifted_rollout(g, x_in, c_in, A_dmd)
         else:
             A_dmd = torch.eye(r, r, device=device, dtype=dtype)
-            B_dmd = torch.zeros((c_in.shape[-1], r), device=device, dtype=dtype)
-            yhat_latent = None
-            yhat_out = None
 
-        x_out = self.decoder(x_latent)
         assert x_out.shape == x_in.shape
-
         return DMDAutoencoderResult(
             A_dmd=A_dmd,
-            B_dmd=B_dmd,
             x_out=x_out,
-            y_latent=x_latent,
+            y_latent=view_as_real(g),
             yhat_latent=yhat_latent,
             yhat_out=yhat_out,
+            yhat_latent_roll=yhat_latent_roll,
+            yhat_out_roll=yhat_out_roll,
+            y_latent_roll_target=y_latent_roll_target,
+            x_out_roll_target=x_out_roll_target,
+            cycle_loss=cycle_loss,
+            roll_weight=roll_weight,
         )
 
 
@@ -367,12 +515,26 @@ class DMDLossResult(NamedTuple):
     loss_rec: torch.Tensor
     """Reconstruction loss."""
     loss_lin: torch.Tensor
-    """Linear approximation loss."""
+    """One-step latent linearity loss."""
     loss_pre: torch.Tensor
-    """Linear prediction loss."""
+    """One-step decoded prediction loss."""
+    loss_lin_roll: torch.Tensor
+    """Short multi-step latent linearity loss."""
+    loss_pre_roll: torch.Tensor
+    """Short multi-step decoded prediction loss."""
+    loss_cycle: torch.Tensor
+    """Latent cycle-consistency loss."""
 
     def tensor(self) -> torch.Tensor:
-        return torch.stack([self.total, self.loss_rec, self.loss_lin, self.loss_pre])
+        return torch.stack([
+            self.total,
+            self.loss_rec,
+            self.loss_lin,
+            self.loss_pre,
+            self.loss_lin_roll,
+            self.loss_pre_roll,
+            self.loss_cycle,
+        ])
 
     def detach(self) -> DMDLossResult:
         return DMDLossResult(
@@ -380,6 +542,9 @@ class DMDLossResult(NamedTuple):
             loss_rec=self.loss_rec.detach(),
             loss_lin=self.loss_lin.detach(),
             loss_pre=self.loss_pre.detach(),
+            loss_lin_roll=self.loss_lin_roll.detach(),
+            loss_pre_roll=self.loss_pre_roll.detach(),
+            loss_cycle=self.loss_cycle.detach(),
         )
 
     def backward(self, *args: Any, **kwargs: Any) -> None:
@@ -406,6 +571,8 @@ class DMDLoss(nn.Module):
         gamma_rec: float = 1.0,
         gamma_lin: float = 1.0,
         gamma_pre: float = 1.0,
+        gamma_roll: float = 0.1,
+        gamma_cycle: float = 0.1,
         scale: float = 1.0,
         escape_radius: float | None = None,
         fixed_point_rtol: float | None = None,
@@ -415,6 +582,8 @@ class DMDLoss(nn.Module):
         self.gamma_rec = gamma_rec / scale
         self.gamma_lin = gamma_lin / scale
         self.gamma_pre = gamma_pre / scale
+        self.gamma_roll = gamma_roll / scale
+        self.gamma_cycle = gamma_cycle
         # escape radius (in dataset units) used to mask out pinned states
         self.escape_radius = escape_radius
         # relative step size below which a trajectory is considered settled
@@ -422,7 +591,7 @@ class DMDLoss(nn.Module):
 
     @property
     def dim(self) -> int:
-        return 4
+        return 7
 
     # ty: ignore[invalid-mutable-override]
     def forward(
@@ -433,6 +602,12 @@ class DMDLoss(nn.Module):
         y_latent: torch.Tensor | None = None,
         yhat_latent: torch.Tensor | None = None,
         yhat_out: torch.Tensor | None = None,
+        yhat_latent_roll: torch.Tensor | None = None,
+        yhat_out_roll: torch.Tensor | None = None,
+        y_latent_roll_target: torch.Tensor | None = None,
+        x_out_roll_target: torch.Tensor | None = None,
+        cycle_loss: torch.Tensor | None = None,
+        roll_weight: torch.Tensor | None = None,
     ) -> DMDLossResult:
         # masks that drop pinned (clipped) and settled (fixed-point) states:
         # they are artifacts of the clipping / carry no dynamics (the escape
@@ -465,11 +640,43 @@ class DMDLoss(nn.Module):
         else:
             loss_pre = torch.zeros_like(loss_rec)
 
+        # multi-step rollout losses (added to the one-step anchors)
+        if yhat_latent_roll is not None:
+            assert y_latent_roll_target is not None
+            loss_lin_roll = masked_mse(
+                y_latent_roll_target, yhat_latent_roll, roll_weight
+            )
+            loss_lin_roll = self.gamma_roll * loss_lin_roll
+        else:
+            loss_lin_roll = torch.zeros_like(loss_rec)
+
+        if yhat_out_roll is not None:
+            assert x_out_roll_target is not None
+            loss_pre_roll = masked_mse(x_out_roll_target, yhat_out_roll, roll_weight)
+            loss_pre_roll = self.gamma_roll * loss_pre_roll
+        else:
+            loss_pre_roll = torch.zeros_like(loss_rec)
+
+        if cycle_loss is not None:
+            loss_cycle = self.gamma_cycle * cycle_loss
+        else:
+            loss_cycle = torch.zeros_like(loss_rec)
+
         return DMDLossResult(
-            total=loss_rec + loss_lin + loss_pre,
+            total=(
+                loss_rec
+                + loss_lin
+                + loss_pre
+                + loss_lin_roll
+                + loss_pre_roll
+                + loss_cycle
+            ),
             loss_rec=loss_rec,
             loss_lin=loss_lin,
             loss_pre=loss_pre,
+            loss_lin_roll=loss_lin_roll,
+            loss_pre_roll=loss_pre_roll,
+            loss_cycle=loss_cycle,
         )
 
 
@@ -518,13 +725,70 @@ class ControlWindowsDataset:
         )
 
 
+def _window_params(
+    total_steps: int,
+    *,
+    nwindows: int,
+    window_stride: int | None,
+    window_min: int,
+) -> tuple[int, int]:
+    """Determine the window size and stride from the number of windows.
+
+    The windows are placed at ``0, stride, 2 * stride, ...`` and the last one
+    ends at ``total_steps``. The stride is chosen as large as possible while
+    keeping at least one overlapping step and a window of at least
+    ``window_min`` steps.
+    """
+    if nwindows < 1:
+        raise ValueError(f"'nwindows' must be positive: {nwindows}")
+
+    if window_min < 1:
+        raise ValueError(f"'window_min' must be positive: {window_min}")
+
+    if nwindows == 1:
+        return total_steps, 0
+
+    if total_steps <= window_min:
+        raise ValueError(
+            f"'total_steps' ({total_steps}) must be larger than 'window_min' "
+            f"({window_min}) when 'nwindows' > 1"
+        )
+
+    if window_stride is None:
+        # NOTE: the second term enforces `stride <= window_size - 1`, i.e. at
+        # least one overlapping step between consecutive windows.
+        stride = min(
+            (total_steps - window_min) // (nwindows - 1),
+            (total_steps - 1) // nwindows,
+        )
+    else:
+        stride = window_stride
+
+    if stride < 1:
+        raise ValueError(
+            f"could not fit {nwindows} windows in {total_steps} steps with "
+            f"a minimum window size of {window_min}"
+        )
+
+    window_size = total_steps - (nwindows - 1) * stride
+    if window_size < window_min:
+        raise ValueError(
+            f"derived 'window_size' ({window_size}) is smaller than "
+            f"'window_min' ({window_min})"
+        )
+
+    if stride > window_size - 1:
+        raise ValueError(
+            f"derived 'stride' ({stride}) leaves no overlap in "
+            f"'window_size' ({window_size})"
+        )
+
+    return window_size, stride
+
+
 class TrainMetrics(NamedTuple):
     lr: torch.Tensor
     """Learning rate used for each epoch."""
-    alpha_mean: torch.Tensor
-    """Mean of the per-channel blend values :math:`\\alpha`."""
-    alpha_std: torch.Tensor
-    """Standard deviation of the per-channel blend values :math:`\\alpha`."""
     y_latent_mean: torch.Tensor
     """Mean of the encoded latent states over the training batches."""
     y_latent_std: torch.Tensor
@@ -538,15 +802,11 @@ class ErrorMetrics(NamedTuple):
     """Dice score of the predicted and true converged sets."""
     a_radius: torch.Tensor
     """Spectral radius of the global DMD operator ``A_dmd``."""
-    b_norm: torch.Tensor
-    """Spectral norm of the global DMD control operator ``B_dmd``."""
 
 
 def _empty_train_metrics(epochs: int) -> TrainMetrics:
     return TrainMetrics(
         lr=torch.full((epochs,), float("nan")),
-        alpha_mean=torch.full((epochs,), float("nan")),
-        alpha_std=torch.full((epochs,), float("nan")),
         y_latent_mean=torch.full((epochs,), float("nan")),
         y_latent_std=torch.full((epochs,), float("nan")),
     )
@@ -557,7 +817,6 @@ def _empty_error_metrics(epochs: int) -> ErrorMetrics:
         iou=torch.full((epochs,), float("nan")),
         dice=torch.full((epochs,), float("nan")),
         a_radius=torch.full((epochs,), float("nan")),
-        b_norm=torch.full((epochs,), float("nan")),
     )
 
 
@@ -596,6 +855,7 @@ def torch_train(
     epochs: int = 50,
     batch_size: int = 2048,
     dmd_warmup_epochs: int = 0,
+    global_dmd: bool = True,
     patience_early_stop: int = 0,
     callback: Callable[[int, DMDAutoencoder], None] | None = None,
 ) -> tuple[DMDAutoencoder, torch.optim.Optimizer, torch.Tensor, TrainMetrics]:
@@ -638,9 +898,18 @@ def torch_train(
 
         model.train()
         model.dmd_enabled = epoch >= dmd_warmup_epochs
+        model.dmd_override = None
         train_metrics.lr[epoch] = optimizer.param_groups[0]["lr"]
         if epoch == dmd_warmup_epochs and dmd_warmup_epochs > 0:
             log.info("Enabling DMD at epoch %03d", epoch + 1)
+
+        if model.dmd_enabled and global_dmd:
+            # NOTE: fit the DMD readout on the full training set, so that
+            # training uses the same operator as the final evaluation.
+            model.eval()
+            A_dmd = build_latent_dmd(model, X_train, c_train)
+            model.train()
+            model.dmd_override = A_dmd
 
         loss_epoch = torch.zeros(criterion.dim, device=device)
         num_batches = 0
@@ -662,6 +931,12 @@ def torch_train(
                 y_latent=predictions.y_latent,
                 yhat_latent=predictions.yhat_latent,
                 yhat_out=predictions.yhat_out,
+                yhat_latent_roll=predictions.yhat_latent_roll,
+                yhat_out_roll=predictions.yhat_out_roll,
+                y_latent_roll_target=predictions.y_latent_roll_target,
+                x_out_roll_target=predictions.x_out_roll_target,
+                cycle_loss=predictions.cycle_loss,
+                roll_weight=predictions.roll_weight,
             )
 
             loss.backward()
@@ -688,7 +963,8 @@ def torch_train(
 
                 log.info(
                     r"    \[batch %03d] "
-                    r"lam (%.3e, %.3e) total %.3e rec %.3e lin %.3e pre %.3e grad %.3e",
+                    r"lam (%.3e, %.3e) total %.3e rec %.3e lin %.3e pre %.3e "
+                    r"roll (%.3e, %.3e) cycle %.3e grad %.3e",
                     i,
                     eigmax.real,
                     eigmax.imag,
@@ -696,14 +972,13 @@ def torch_train(
                     loss.loss_rec.item(),
                     loss.loss_lin.item(),
                     loss.loss_pre.item(),
+                    loss.loss_lin_roll.item(),
+                    loss.loss_pre_roll.item(),
+                    loss.loss_cycle.item(),
                     grad_norm,
                 )
 
         loss_train = loss_epoch / num_batches
-
-        alpha = model.encoder.alpha.detach().cpu()
-        train_metrics.alpha_mean[epoch] = alpha.mean().item()
-        train_metrics.alpha_std[epoch] = alpha.std(unbiased=False).item()
 
         if latent_count > 0:
             mean = latent_sum / latent_count
@@ -732,6 +1007,12 @@ def torch_train(
                     y_latent=predictions.y_latent,
                     yhat_latent=predictions.yhat_latent,
                     yhat_out=predictions.yhat_out,
+                    yhat_latent_roll=predictions.yhat_latent_roll,
+                    yhat_out_roll=predictions.yhat_out_roll,
+                    y_latent_roll_target=predictions.y_latent_roll_target,
+                    x_out_roll_target=predictions.x_out_roll_target,
+                    cycle_loss=predictions.cycle_loss,
+                    roll_weight=predictions.roll_weight,
                 )
 
                 loss_val_epoch += loss.tensor()
@@ -749,13 +1030,17 @@ def torch_train(
         losses[epoch, 1] = loss_validate
 
         log.info(
-            "[%03d/%03d] total %.5e rec %.3e lin %.3e pre %.3e (%s)",
+            "[%03d/%03d] total %.5e rec %.3e lin %.3e pre %.3e "
+            "roll (%.3e, %.3e) cycle %.3e (%s)",
             epoch + 1,
             epochs,
             loss_train[0],
             loss_train[1],
             loss_train[2],
             loss_train[3],
+            loss_train[4],
+            loss_train[5],
+            loss_train[6],
             timer.short(),
         )
 
@@ -809,34 +1094,28 @@ def build_latent_dmd(
     C: torch.Tensor,
     *,
     block_size: int = 256,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    r"""Build the DMDc operators in the latent space from the full dataset.
+) -> torch.Tensor:
+    r"""Build the DMD operator in the lifted latent space from the full dataset.
 
     ``Z`` has shape ``(ntraj, maxit, 2 d)`` — the state ``z_n`` in interleaved
     real format — and ``C`` has shape ``(ntraj, 1)`` — the constant control.
     """
     r = model.latent_size
     window_size = Z.shape[1]
-    control_size = C.shape[-1]
 
     with torch.no_grad():
         model.eval()
 
         Xs = []
         Ys = []
-        Us = []
         for start in range(0, Z.shape[0], block_size):
             z_block = Z[start : start + block_size]
             c_block = C[start : start + block_size]
-            cx = view_as_complex(model.encoder(z_block))
+            c_time = c_block[:, None, :].expand(-1, window_size, -1)
+            cx = model.encoder(view_as_complex(z_block), c_time)
 
             X_block = cx[:, :-1, :].reshape(-1, r)
             Y_block = cx[:, 1:, :].reshape(-1, r)
-            U_block = (
-                c_block[:, None, :]
-                .expand(-1, window_size - 1, -1)
-                .reshape(-1, control_size)
-            )
 
             # drop pinned -> pinned and settled transitions (see DMDAutoencoder.forward)
             if model.escape_radius is not None or model.fixed_point_rtol is not None:
@@ -846,32 +1125,30 @@ def build_latent_dmd(
                     rtol=model.fixed_point_rtol,
                 )
                 w = mask.transition.reshape(-1)
-                if torch.any(w):
-                    X_block = X_block[w]
-                    Y_block = Y_block[w]
-                    U_block = U_block[w]
+                X_block = X_block[w]
+                Y_block = Y_block[w]
 
             Xs.append(X_block)
             Ys.append(Y_block)
-            Us.append(U_block)
 
         X = torch.cat(Xs)
         Y = torch.cat(Ys)
-        U = torch.cat(Us)
 
-        dmd = build_dense_dmdc(X, U, Y, method=model.dmd_method, eps=model.ridge_eps)
-        return cast("torch.Tensor", dmd.A), cast("torch.Tensor", dmd.B)
+        A = _fit_linear_operator(X, Y, method=model.dmd_method, eps=model.ridge_eps)
+        A[model.input_size, :] = 0
+        A[model.input_size, model.input_size] = 1
+        return A
 
 
 def torch_predict(
     model: DMDAutoencoder,
     A_dmd: torch.Tensor,
-    B_dmd: torch.Tensor,
     *,
     bbox: tuple[float, float, float, float],
     resolution: int = 128,
     maxit: int = 128,
     norm_factor: float = 1.0,
+    mode: Literal["latent", "reencode"] = "latent",
     device: Any = None,
 ) -> torch.Tensor:
     from commonlib import generate_grid
@@ -896,12 +1173,18 @@ def torch_predict(
         )
         c = (c / norm_factor)[..., None]
 
-        for _ in range(maxit):
-            # NOTE: the model already learned `A * norm_factor` so no rescaling
-            # needed here. We just need it at the end to go back to physical space
-            g = model.encoder(z)
-            g_next = view_as_complex(g) @ A_dmd + c @ B_dmd
-            z = model.decoder(view_as_real(g_next))
+        if mode == "latent":
+            # true encode-once rollout: the nonlinearity is only in the
+            # initial lift and the final decoder
+            g = model.encoder(view_as_complex(z), c)
+            for _ in range(maxit):
+                g = g @ A_dmd
+            z = view_as_real(model.decoder(g))
+        else:
+            for _ in range(maxit):
+                g = model.encoder(view_as_complex(z), c)
+                g = g @ A_dmd
+                z = view_as_real(model.decoder(g))
 
         z = z * norm_factor
 
@@ -940,7 +1223,8 @@ def _plot_loss(
         ax = fig.gca()
 
         losses_np = losses.cpu().numpy()
-        labels = ("Rec", "Lin", "Pre")
+        labels = ("Rec", "Lin", "Pre", "Lin roll", "Pre roll", "Cycle")
+        labels = labels[: losses_np.shape[2] - 1]
 
         for k, label in enumerate(labels):
             (line,) = ax.semilogy(losses_np[:, 0, 1 + k], label=f"Train. {label}")
@@ -964,19 +1248,10 @@ def _spectral_radius(A: torch.Tensor) -> torch.Tensor:
     return torch.abs(torch.linalg.eigvals(A)).max()
 
 
-def _spectral_norm(B: torch.Tensor) -> torch.Tensor:
-    B = B.detach().cpu()
-    if not torch.isfinite(B).all():
-        return torch.tensor(float("nan"))
-
-    return torch.linalg.matrix_norm(B, ord=2)
-
-
 def _plot_predict(
     filename: pathlib.Path,
     model: DMDAutoencoder,
     A_dmd: torch.Tensor,
-    B_dmd: torch.Tensor,
     config: DMDConfig,
     *,
     zmask: torch.Tensor,
@@ -988,11 +1263,11 @@ def _plot_predict(
     Zpredict = torch_predict(
         model,
         A_dmd,
-        B_dmd,
         bbox=config.bbox,
         resolution=config.resolution,
         maxit=config.maxit,
         norm_factor=config.norm_factor,
+        mode=config.predict_mode,
     )
 
     from nneuroutil.scores import dice_score, jaccard_index
@@ -1003,14 +1278,12 @@ def _plot_predict(
         iou=cast(torch.Tensor, jaccard_index(in_set, zmask)).detach().cpu(),
         dice=cast(torch.Tensor, dice_score(in_set, zmask)).detach().cpu(),
         a_radius=_spectral_radius(A_dmd),
-        b_norm=_spectral_norm(B_dmd),
     )
 
     log.info("    Converged:    %d/%d", torch.sum(in_set), in_set.numel())
     log.info("    IoU:          %.8e", metrics.iou)
     log.info("    Dice:         %.8e", metrics.dice)
     log.info("    |lam|max(A):  %.8e", metrics.a_radius)
-    log.info("    ||B||_2:      %.8e", metrics.b_norm)
 
     with figure(
         filename.with_stem(f"{filename.stem}-predict-{tag}"),
@@ -1066,14 +1339,12 @@ def _plot_error_metrics(
             metrics.a_radius.cpu().numpy(),
             label=r"$|\lambda|_{\max}(A)$",
         )
-        ax_spec.semilogy(epochs, metrics.b_norm.cpu().numpy(), label=r"$\|B\|_2$")
         ax_spec.set_xlabel("Epoch")
         ax_spec.set_ylabel("Magnitude")
         ax_spec.legend()
 
         if final is not None:
             ax_spec.axhline(float(final.a_radius), color="C0", ls=":", lw=1.0)
-            ax_spec.axhline(float(final.b_norm), color="C1", ls=":", lw=1.0)
 
 
 def _plot_train_metrics(
@@ -1084,31 +1355,16 @@ def _plot_train_metrics(
 ) -> None:
     with figure(
         filename.with_stem(f"{filename.stem}-train"),
-        ncols=3,
+        ncols=2,
         overwrite=overwrite,
     ) as fig:
-        ax_lr, ax_alpha, ax_latent = fig.axes
+        ax_lr, ax_latent = fig.axes
         epochs = np.arange(metrics.lr.numel())
 
         ax_lr.semilogy(epochs, metrics.lr.cpu().numpy(), label="LR")
         ax_lr.set_xlabel("Epoch")
         ax_lr.set_ylabel("Learning rate")
         ax_lr.legend()
-
-        alpha_mean = metrics.alpha_mean.cpu().numpy()
-        alpha_std = metrics.alpha_std.cpu().numpy()
-        ax_alpha.plot(epochs, alpha_mean, label=r"$\alpha$ mean")
-        ax_alpha.fill_between(
-            epochs,
-            alpha_mean - alpha_std,
-            alpha_mean + alpha_std,
-            alpha=0.3,
-            linewidth=0.0,
-        )
-        ax_alpha.set_xlabel("Epoch")
-        ax_alpha.set_ylabel(r"$\alpha$")
-        ax_alpha.set_ylim(0.0, 1.0)
-        ax_alpha.legend()
 
         y_mean = metrics.y_latent_mean.cpu().numpy()
         y_std = metrics.y_latent_std.cpu().numpy()
@@ -1228,24 +1484,24 @@ def train(
     log.info("Using seed: %d", config.seed)
     torch.manual_seed(config.seed)
 
-    # NOTE: when resuming, the stored architecture is used to rebuild the model
+    # NOTE: when resuming, the stored model configuration is used
     model_config: dict[str, Any]
     if checkpoint is not None:
         model_config = checkpoint["model_config"]
     else:
-        latent_size = 2 * d if config.latent_size is None else config.latent_size
         model_config = {
             "input_size": d,
-            "latent_size": latent_size,
-            "hidden_size": config.hidden_size,
+            "feature_size": config.feature_size,
+            "feature_depth": config.feature_depth,
+            "decoder_hidden_size": config.decoder_hidden_size,
+            "multi_steps": config.multi_steps,
             "dmd_method": config.dmd_method,
-            "rollout_steps": config.rollout_steps,
             "fixed_point_rtol": config.fixed_point_rtol,
             "ridge_eps": config.ridge_eps,
-            "alpha": config.alpha,
         }
 
     model = DMDAutoencoder(**model_config, device=device, dtype=mat.dtype.to_real())
+    model.multi_steps = config.multi_steps
 
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -1338,15 +1594,29 @@ def train(
 
     # {{{ train
 
+    window_min = max(config.window_min, config.multi_steps + 1)
+    window_size, window_stride = _window_params(
+        x.shape[1],
+        nwindows=config.nwindows,
+        window_stride=config.window_stride,
+        window_min=window_min,
+    )
+    log.info(
+        "Windows: %d windows of %d steps (stride %d) over %d steps",
+        config.nwindows,
+        window_size,
+        window_stride,
+        x.shape[1],
+    )
+
     error_metrics = _empty_error_metrics(config.epochs)
 
     def plot_predict(epoch: int, m: DMDAutoencoder) -> None:
-        A_dmd, B_dmd = build_latent_dmd(m, x_train, c_train)
+        A_dmd = build_latent_dmd(m, x_train, c_train)
         metrics = _plot_predict(
             outfile,
             m,
             A_dmd,
-            B_dmd,
             config,
             zmask=zmask,
             tag=f"{epoch:04d}",
@@ -1356,7 +1626,6 @@ def train(
         error_metrics.iou[epoch] = metrics.iou
         error_metrics.dice[epoch] = metrics.dice
         error_metrics.a_radius[epoch] = metrics.a_radius
-        error_metrics.b_norm[epoch] = metrics.b_norm
 
     assert config.norm_factor is not None
 
@@ -1365,6 +1634,8 @@ def train(
         gamma_rec=config.gamma_rec,
         gamma_lin=config.gamma_lin,
         gamma_pre=config.gamma_pre,
+        gamma_roll=config.gamma_roll,
+        gamma_cycle=config.gamma_cycle,
         scale=target_scale,
         escape_radius=config.escape_radius / config.norm_factor,
         fixed_point_rtol=config.fixed_point_rtol,
@@ -1381,13 +1652,15 @@ def train(
         c_validate=c_validate,
         epochs=config.epochs,
         batch_size=config.batch_size,
-        window_size=config.window_size,
+        max_norm=config.max_norm,
+        window_size=window_size,
         nwindows=config.nwindows,
         dmd_warmup_epochs=config.dmd_warmup_epochs,
+        global_dmd=config.global_dmd,
         patience_early_stop=config.early_stop_patience,
         callback=plot_predict,
     )
-    A_dmd, B_dmd = build_latent_dmd(model, x_train, c_train)
+    A_dmd = build_latent_dmd(model, x_train, c_train)
     error_metrics = _slice_metrics(error_metrics, len(losses))
 
     mem.add_record("After training")
@@ -1395,7 +1668,7 @@ def train(
     model.eval()
     with torch.no_grad():
         test_dataset = ControlWindowsDataset(
-            x_test, c_test, window_size=config.window_size, nwindows=config.nwindows
+            x_test, c_test, window_size=window_size, nwindows=config.nwindows
         )
         test_loader = DataLoader(
             test_dataset,  # ty: ignore[invalid-argument-type]
@@ -1405,19 +1678,22 @@ def train(
         loss_test_epoch = torch.zeros(criterion.dim, device=device)
         num_test_batches = 0
 
+        model.dmd_enabled = True
+        model.dmd_override = A_dmd
         for batch_x, batch_c in test_loader:
-            x_latent = model.encoder(batch_x)
-            cx_latent = view_as_complex(x_latent)
-            yhat_latent = model.rollout_latent(cx_latent, batch_c, A_dmd, B_dmd)
-            yhat_out = model.decoder(yhat_latent)
-            x_out = model.decoder(x_latent)
-
+            predictions = model(batch_x, batch_c)
             loss = criterion(
                 batch_x,
-                x_out=x_out,
-                y_latent=x_latent,
-                yhat_latent=yhat_latent,
-                yhat_out=yhat_out,
+                x_out=predictions.x_out,
+                y_latent=predictions.y_latent,
+                yhat_latent=predictions.yhat_latent,
+                yhat_out=predictions.yhat_out,
+                yhat_latent_roll=predictions.yhat_latent_roll,
+                yhat_out_roll=predictions.yhat_out_roll,
+                y_latent_roll_target=predictions.y_latent_roll_target,
+                x_out_roll_target=predictions.x_out_roll_target,
+                cycle_loss=predictions.cycle_loss,
+                roll_weight=predictions.roll_weight,
             )
 
             loss_test_epoch += loss.tensor()
@@ -1425,20 +1701,23 @@ def train(
 
         loss_test = loss_test_epoch / num_test_batches
         log.info(
-            "[%03d/%03d] test_total %.5e test_rec %.5e test_lin %.5e test_pre %.5e",
+            "[%03d/%03d] test_total %.5e test_rec %.5e test_lin %.5e test_pre %.5e "
+            "test_roll (%.5e, %.5e) test_cycle %.5e",
             config.epochs,
             config.epochs,
             loss_test[0].item(),
             loss_test[1].item(),
             loss_test[2].item(),
             loss_test[3].item(),
+            loss_test[4].item(),
+            loss_test[5].item(),
+            loss_test[6].item(),
         )
 
     final_error_metrics = _plot_predict(
         outfile,
         model,
         A_dmd,
-        B_dmd,
         config,
         zmask=zmask,
         tag="final",
@@ -1455,7 +1734,8 @@ def train(
 
     if losses_previous is not None:
         n_previous = len(losses_previous)
-        losses = torch.cat((losses_previous.to(losses.device), losses))
+        previous_losses = losses_previous.to(losses.device)
+        losses = torch.cat((previous_losses, losses))
 
         if train_metrics_previous is not None:
             previous = _cpu_metrics(TrainMetrics(**train_metrics_previous))
@@ -1479,7 +1759,6 @@ def train(
             "scheduler": scheduler.state_dict(),
             "model_config": model_config,
             "a_dmd": A_dmd,
-            "b_dmd": B_dmd,
             # loss and metrics
             "num_epochs_trained": num_epochs_trained,
             "losses": losses,
@@ -1558,7 +1837,6 @@ def infer(
     losses = checkpoint["losses"]
     zmask = checkpoint["zmask"]
     A_dmd = checkpoint["a_dmd"]
-    B_dmd = checkpoint["b_dmd"]
     train_metrics = checkpoint.get("train_metrics")
     error_metrics = checkpoint.get("error_metrics")
 
@@ -1580,7 +1858,7 @@ def infer(
     model.fixed_point_rtol = config.fixed_point_rtol
     model.ridge_eps = config.ridge_eps
     model.dmd_method = config.dmd_method
-    model.rollout_steps = config.rollout_steps
+    model.multi_steps = config.multi_steps
     model.eval()
 
     mem.add_record("After model load")
@@ -1596,7 +1874,6 @@ def infer(
         outfile,
         model,
         A_dmd,
-        B_dmd,
         config,
         zmask=zmask,
         tag="final",
@@ -1654,27 +1931,42 @@ if __name__ == "__main__":
         type=float,
         default=None,
         help=(
-            "Ridge regularization for the DMDc least-squares solve "
+            "Ridge regularization for the DMD least-squares solve "
             "(default: 1e-3, from checkpoint when resuming)"
         ),
     )
     parser.add_argument(
-        "--latent-size",
+        "--feature-size",
+        type=int,
+        default=None,
+        help=("Number of learned quadratic features per lifted block (default: 2 * d)"),
+    )
+    parser.add_argument(
+        "--feature-depth",
         type=int,
         default=None,
         help=(
-            "Latent (complex) dimension of the autoencoder "
-            "(default: 2 * d, from checkpoint when resuming)"
+            "Number of stacked quadratic feature blocks "
+            "(1 -> degree 2, 2 -> degree 4; default: 1)"
         ),
     )
     parser.add_argument(
-        "--alpha",
-        type=float,
+        "--decoder-hidden-size",
+        type=int,
         default=None,
-        help=(
-            "Blend between the linear and quadratic activation, in [0, 1] "
-            "(default: 0.75, from checkpoint when resuming)"
-        ),
+        help="Hidden width of the bounded residual decoder (default: 2 * d)",
+    )
+    parser.add_argument(
+        "--multi-steps",
+        type=int,
+        default=None,
+        help="Number of latent steps in the multi-step losses (default: 8)",
+    )
+    parser.add_argument(
+        "--predict-mode",
+        choices=["latent", "reencode"],
+        default=None,
+        help="Rollout mode used for final prediction (default: latent)",
     )
     parser.add_argument(
         "--dmd-method",
@@ -1683,17 +1975,41 @@ if __name__ == "__main__":
         help="DMD solver method: 'pinv' (truncated SVD) or 'ridge' (L2-regularized)",
     )
     parser.add_argument(
-        "--hidden-size",
+        "--nwindows",
         type=int,
         default=None,
-        help="Hidden dimension of the encoder (default: latent_size)",
+        help="Number of sliding windows per trajectory",
     )
     parser.add_argument(
-        "--rollout-steps",
+        "--window-stride",
         type=int,
         default=None,
-        help="Number of rollout steps for DMD prediction in training "
-        "(1 for one-step teacher-forcing)",
+        help="Stride between sliding windows (derived from nwindows by default)",
+    )
+    parser.add_argument(
+        "--window-min",
+        type=int,
+        default=None,
+        help="Minimum window size used when deriving the window stride",
+    )
+    parser.add_argument(
+        "--max-norm",
+        type=float,
+        default=None,
+        help="Gradient clipping norm (default: 1)",
+    )
+    parser.add_argument(
+        "--global-dmd",
+        dest="global_dmd",
+        action="store_true",
+        default=None,
+        help="Fit A_dmd globally once per epoch (default: enabled)",
+    )
+    parser.add_argument(
+        "--local-dmd",
+        dest="global_dmd",
+        action="store_false",
+        help="Fit A_dmd per batch",
     )
     parser.add_argument(
         "--gamma-rec",
@@ -1712,6 +2028,18 @@ if __name__ == "__main__":
         type=float,
         default=None,
         help="Weight of the prediction loss (default: 1)",
+    )
+    parser.add_argument(
+        "--gamma-roll",
+        type=float,
+        default=None,
+        help="Weight of the multi-step rollout loss (default: 0.1)",
+    )
+    parser.add_argument(
+        "--gamma-cycle",
+        type=float,
+        default=None,
+        help="Weight of the latent cycle-consistency loss (default: 0.1)",
     )
     args = parser.parse_args()
 
