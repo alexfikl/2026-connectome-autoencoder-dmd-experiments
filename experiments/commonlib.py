@@ -16,7 +16,7 @@ import array_api_compat
 import numpy as np
 
 from nneuroutil.array_api_extras import interleave
-from nneuroutil.helpers import FuzzyChoiceAction, module_logger, tictoc
+from nneuroutil.helpers import FuzzyChoiceAction, dc_stringify, module_logger, tictoc
 from nneuroutil.typing import Array1D, Array2D, Array3D, Array4D
 
 if TYPE_CHECKING:
@@ -264,6 +264,9 @@ class Config:
             values["seed"] = secrets.randbits(64)
 
         return cls(**values)
+
+    def __str__(self) -> str:
+        return dc_stringify(self)
 
 
 def make_argument_parser(
