@@ -22,6 +22,8 @@ from nneuroutil.helpers import (
     module_logger,
 )
 from nneuroutil.torch_extras import (
+    ComplexLinear,
+    ComplexQuadratic,
     TorchMemoryTracker,
     available_device_names,
     torch_default_device,
@@ -83,6 +85,10 @@ class DMDConfig(Config):
     npca: int = 24
     latent_size: int = 32
     hidden_size: int = 128
+    # number of complex features of the control c (0 disables the branch) and the
+    # number of (complex linear, complex square) blocks in it
+    c_features: int = 0
+    c_depth: int = 1
     # horizons of the multi-step prediction stages (None -> 2, 4, 8, maxit - 1)
     horizons: tuple[int, ...] | None = None
 
@@ -189,6 +195,8 @@ class DMDAutoencoder(nn.Module):
         latent_size: int,
         hidden_size: int,
         escape_radius: float,
+        c_features: int = 0,
+        c_depth: int = 1,
         dmd_method: Literal["pinv", "ridge"] = "ridge",
         ridge_eps: float = 1.0e-4,
         device: Any = None,
@@ -212,8 +220,29 @@ class DMDAutoencoder(nn.Module):
             "basis", torch.zeros(2 * input_size, npca, device=device, dtype=dtype)
         )
 
+        # NOTE: the states are polynomials in the (complex) control `c`, so a
+        # complex branch `c -> (w c + b)^2 -> ...` supplies the monomials (and the
+        # phase doubling) that a real MLP has a hard time constructing from
+        # `(Re c, Im c)`. `c` is stored stacked as `[Re c, Im c]`.
+        self.c_branch: nn.Module | None = None
+        if c_features > 0:
+            layers: list[nn.Module] = []
+            width = 1
+            for _ in range(c_depth):
+                layers.append(
+                    ComplexLinear(
+                        width, c_features, bias=True, device=device, dtype=dtype
+                    )
+                )
+                layers.append(ComplexQuadratic())
+                width = c_features
+
+            self.c_branch = nn.Sequential(*layers)
+
         self.encoder = nn.Sequential(
-            nn.Linear(npca + 3, hidden_size, device=device, dtype=dtype),
+            nn.Linear(
+                npca + 3 + 2 * c_features, hidden_size, device=device, dtype=dtype
+            ),
             nn.Tanh(),
             nn.Linear(hidden_size, hidden_size, device=device, dtype=dtype),
             nn.Tanh(),
@@ -262,6 +291,9 @@ class DMDAutoencoder(nn.Module):
     def encode(
         self, direction: torch.Tensor, logn: torch.Tensor, c: torch.Tensor
     ) -> torch.Tensor:
+        if self.c_branch is not None:
+            c = torch.cat([c, self.c_branch(c)], dim=-1)
+
         c = c[:, None, :].expand(-1, direction.shape[1], -1)
         return self.encoder(torch.cat([direction, logn[..., None], c], dim=-1))
 
@@ -1010,6 +1042,8 @@ def train(
             "npca": config.npca,
             "latent_size": config.latent_size,
             "hidden_size": config.hidden_size,
+            "c_features": config.c_features,
+            "c_depth": config.c_depth,
             "escape_radius": config.escape_radius,
             "dmd_method": config.dmd_method,
             "ridge_eps": config.ridge_eps,
@@ -1333,6 +1367,18 @@ if __name__ == "__main__":
             "Number of training trajectories used to fit the DMD operator at each "
             "training step (default: all)"
         ),
+    )
+    parser.add_argument(
+        "--c-features",
+        type=int,
+        default=None,
+        help="Number of complex features of c in the encoder (default: 0, disabled)",
+    )
+    parser.add_argument(
+        "--c-depth",
+        type=int,
+        default=None,
+        help="Number of (complex linear, complex square) blocks for c (default: 1)",
     )
     parser.add_argument(
         "--npca",
