@@ -289,16 +289,26 @@ class DMDAutoencoder(nn.Module):
         A_dmd: torch.Tensor,
         B_dmd: torch.Tensor,
     ) -> torch.Tensor:
+        nsteps = cx_latent.shape[1] - 1
+
         if self.rollout_steps == 1:
             yhat_complex = cx_latent[:, :-1, :] @ A_dmd + c_in[:, None, :] @ B_dmd
             return view_as_real(yhat_complex)
         else:
-            yhat_steps = [cx_latent[:, :1, :]]
-            steps = cx_latent.shape[1] - 1
-            for _ in range(steps):
-                yhat_steps.append(yhat_steps[-1] @ A_dmd + c_in[:, None, :] @ B_dmd)
+            # NOTE: roll out for `rollout_steps` steps, then reset to the
+            # teacher-forced state. This limits how much an expansive `A_dmd` can
+            # compound while still using every transition in the window.
+            k = max(1, min(self.rollout_steps, nsteps))
+            yhat_steps = []
+            y = cx_latent[:, :1, :]
+            for i in range(nsteps):
+                if i % k == 0:
+                    y = cx_latent[:, i : i + 1, :]
 
-            return view_as_real(torch.cat(yhat_steps[1:], dim=1))
+                y = y @ A_dmd + c_in[:, None, :] @ B_dmd
+                yhat_steps.append(y)
+
+            return view_as_real(torch.cat(yhat_steps, dim=1))
 
     # ty: ignore[invalid-mutable-override]
     def forward(self, x_in: torch.Tensor, c_in: torch.Tensor) -> DMDAutoencoderResult:
@@ -1176,7 +1186,22 @@ def train(
             log.error("Failed to load dataset '%s': %s", filename.name, exc)
             return 1
 
+        # from dataclasses import replace
+        #
+        # mat = (
+        #     torch
+        #     .Tensor([
+        #         [1.0, -1.0, 1.0],
+        #         [0.0, 1.0, 1.0],
+        #         [0.0, 0.0, -1.0],
+        #     ])
+        #     .to(device)
+        #     .to(torch.complex64)
+        # )
+        # config = replace(config, bbox=(-1.25, 0.5, -0.75, 0.75))
+
     mem.add_record("After data load")
+    log.info("Config:\n%s", config)
 
     if outfile is None:
         outfile = filename.parent / f"{filename.stem}-ae-dmd-quad.npz"
