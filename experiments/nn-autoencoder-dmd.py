@@ -70,6 +70,9 @@ class DMDConfig(Config):
     max_norm: float = 5.0
     ridge_eps: float = 1.0e-4
     dmd_method: Literal["pinv", "ridge"] = "ridge"
+    # number of trajectories sampled per step to fit the operator in training
+    # (None -> all the training trajectories)
+    dmd_subset: int | None = None
 
     # weights of the reconstruction, latent linearity, and prediction losses
     gamma_rec: float = 1.0
@@ -480,13 +483,19 @@ def build_latent_dmd(
     C: torch.Tensor,
     *,
     grad: bool = False,
+    subset: int | None = None,
 ) -> torch.Tensor:
     r"""Build the DMD operator in the latent space from the full dataset.
 
     ``X`` has shape ``(ntraj, maxit, 2 d)`` and ``C`` has shape ``(ntraj, 2)``.
     Only transitions between unpinned states are used. With *grad*, the fit is
-    differentiable with respect to the encoder.
+    differentiable with respect to the encoder. With *subset*, the fit uses that
+    many randomly sampled trajectories.
     """
+    if subset is not None and subset < X.shape[0]:
+        idx = torch.randperm(X.shape[0], device=X.device)[:subset]
+        X, C = X[idx], C[idx]
+
     with torch.set_grad_enabled(grad):
         obs = model.observe(X)
         enc = model.encode(obs.direction, obs.logn, C)
@@ -534,12 +543,15 @@ def torch_train(
     max_norm: float = 5.0,
     epochs: int = 60,
     batch_size: int = 512,
+    dmd_subset: int | None = None,
     callback: TrainCallback | None = None,
 ) -> tuple[DMDAutoencoder, torch.Tensor, TrainMetrics]:
     """Train the model in *stages* of *epochs* epochs each.
 
     The model is not compiled and the DMD operator is fit (and differentiated
-    through) on the full training set at every optimizer step.
+    through) at every optimizer step on *dmd_subset* random training
+    trajectories (all of them by default). Validation always uses the full
+    training set.
     """
     device = X_train.device
 
@@ -584,10 +596,10 @@ def torch_train(
 
             timer.tic()
             for batch_x, batch_c in loader:
-                # NOTE: the operator is fit on the full training set at every
-                # step, so that training uses the operator used for evaluation
                 A_dmd = (
-                    build_latent_dmd(model, X_train, c_train, grad=True)
+                    build_latent_dmd(
+                        model, X_train, c_train, grad=True, subset=dmd_subset
+                    )
                     if stage.use_dmd
                     else None
                 )
@@ -1109,6 +1121,7 @@ def train(
         max_norm=config.max_norm,
         epochs=config.epochs,
         batch_size=config.batch_size,
+        dmd_subset=config.dmd_subset,
         callback=plot_predict,
     )
     A_dmd = build_latent_dmd(model, x_train, c_train)
@@ -1311,6 +1324,15 @@ if __name__ == "__main__":
         choices=["pinv", "ridge"],
         default=None,
         help="DMD solver method: 'pinv' (truncated SVD) or 'ridge' (L2-regularized)",
+    )
+    parser.add_argument(
+        "--dmd-subset",
+        type=int,
+        default=None,
+        help=(
+            "Number of training trajectories used to fit the DMD operator at each "
+            "training step (default: all)"
+        ),
     )
     parser.add_argument(
         "--npca",
