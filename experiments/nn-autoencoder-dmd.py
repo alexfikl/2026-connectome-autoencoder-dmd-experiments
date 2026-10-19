@@ -61,9 +61,10 @@ class DMDConfig(Config):
     # NOTE: `epochs` is the number of epochs *per stage*
     epochs: int = 60
     lr: float = 2.0e-3
+    batch_size: int = 512
+
     resolution: int = 64
     maxit: int = 16
-    batch_size: int = 512
     escape_radius: float = 100.0
 
     max_norm: float = 5.0
@@ -196,7 +197,7 @@ class DMDAutoencoder(nn.Module):
         self.npca = npca
         self.latent_size = latent_size
         self.escape_radius = escape_radius
-        self.dmd_method: Literal["pinv", "ridge"] = dmd_method
+        self.dmd_method = dmd_method
         self.ridge_eps = ridge_eps
         self.dtype = dtype
 
@@ -238,8 +239,9 @@ class DMDAutoencoder(nn.Module):
         """Polar observables of the interleaved real states ``x``."""
         masks = compute_trajectory_mask(x, escape_radius=self.escape_radius)
         active = masks.state
+        basis = cast(torch.Tensor, self.basis)
 
-        y = x @ cast(torch.Tensor, self.basis)
+        y = x @ basis
         ynorm = torch.linalg.vector_norm(y, dim=-1, keepdim=True)
         valid = active[..., None] & (ynorm > 1.0e-8)
         direction = torch.where(valid, y / ynorm.clamp(min=1.0e-8), torch.zeros_like(y))
@@ -856,7 +858,7 @@ def _plot_error_metrics(
             ax_set.axhline(float(final.iou), color="C0", ls=":", lw=1.0)
             ax_set.axhline(float(final.dice), color="C1", ls=":", lw=1.0)
 
-        ax_spec.semilogy(
+        ax_spec.plot(
             epochs,
             metrics.a_radius.cpu().numpy(),
             label=r"$|\lambda|_{\max}(A)$",
