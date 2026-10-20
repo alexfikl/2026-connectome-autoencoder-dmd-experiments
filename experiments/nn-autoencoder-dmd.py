@@ -854,7 +854,7 @@ def compute_features(
 
     gain = torch.linalg.vector_norm(modes, dim=0)
     modes = modes / gain.clamp(min=1.0e-12)
-    pivot = modes[modes.abs().argmax(dim=0), torch.arange(modes.shape[1])]
+    pivot = modes.gather(0, modes.abs().argmax(dim=0, keepdim=True))[0]
     modes = modes * (pivot.abs() / pivot)[None, :]
     modes = modes.T.reshape(modes.shape[1], -1, 2)
 
@@ -868,7 +868,7 @@ def compute_features(
 
     # {{{ sensitivity to the control
 
-    c = c.clone().requires_grad_(mode=True)
+    c = c.detach().clone().requires_grad_()
     g_final = model.rollout(_encode_origin(model, c), A_dmd, maxit)[:, -1]
     _, logn_final = model.decode(g_final)
     (grad,) = torch.autograd.grad(logn_final.sum(), c)
