@@ -713,6 +713,45 @@ def _normalize_control(
     return torch.stack([c.real, c.imag], dim=-1) / max(abs(b) for b in bbox)
 
 
+def _grid_control(
+    model: DMDAutoencoder,
+    bbox: tuple[float, float, float, float],
+    resolution: int,
+    *,
+    like: torch.Tensor,
+) -> torch.Tensor:
+    """Normalized controls of shape ``(resolution ** 2, 2)`` on the grid."""
+    from commonlib import generate_grid
+
+    assert model.dtype.is_floating_point
+
+    c = cast(
+        "torch.Tensor",
+        generate_grid(
+            *bbox,
+            nx=resolution,
+            ny=resolution,
+            dtype=model.dtype.to_complex(),
+            xp=array_api_compat.array_namespace(like),
+        ),
+    )
+    return _normalize_control(c.reshape(-1), bbox)
+
+
+def _encode_origin(model: DMDAutoencoder, c: torch.Tensor) -> torch.Tensor:
+    """Encode the initial state ``z_0 = 0`` for each of the controls *c*."""
+    n = c.shape[0]
+    direction = torch.zeros((n, 1, model.npca), device=c.device, dtype=model.dtype)
+    logn = torch.full(
+        (n, 1),
+        float(np.log(LOG_EPS) / LOG_SCALE),
+        device=c.device,
+        dtype=model.dtype,
+    )
+
+    return model.encode(direction, logn, c)[:, 0]
+
+
 def torch_predict(
     model: DMDAutoencoder,
     A_dmd: torch.Tensor,
@@ -728,36 +767,136 @@ def torch_predict(
 
     :returns: a real tensor of shape ``(resolution, resolution)``.
     """
-    from commonlib import generate_grid
-
-    dtype = model.dtype
-    assert dtype.is_floating_point
-
     with torch.no_grad():
-        c = cast(
-            "torch.Tensor",
-            generate_grid(
-                *bbox,
-                nx=resolution,
-                ny=resolution,
-                dtype=dtype.to_complex(),
-                xp=array_api_compat.array_namespace(A_dmd),
-            ),
-        )
-        c = _normalize_control(c.reshape(-1), bbox)
-
-        n = c.shape[0]
-        direction = torch.zeros((n, 1, model.npca), device=c.device, dtype=dtype)
-        logn = torch.full(
-            (n, 1), float(np.log(LOG_EPS) / LOG_SCALE), device=c.device, dtype=dtype
-        )
-
-        g0 = model.encode(direction, logn, c)[:, 0]
+        c = _grid_control(model, bbox, resolution, like=A_dmd)
+        g0 = _encode_origin(model, c)
         _, logn_final = model.decode(model.rollout(g0, A_dmd, maxit)[:, -1])
 
         norm = torch.exp(logn_final * LOG_SCALE) - LOG_EPS
 
     return norm.reshape(resolution, resolution)
+
+
+# }}}
+
+
+# {{{ features
+
+
+def compute_features(
+    model: DMDAutoencoder,
+    A_dmd: torch.Tensor,
+    *,
+    bbox: tuple[float, float, float, float],
+    resolution: int,
+    maxit: int,
+) -> dict[str, np.ndarray]:
+    r"""Compute features of the trained model for classification.
+
+    The latent basis is arbitrary (every matrix has its own encoder), so the
+    features are either invariant to it or are lifted to the state space, where
+    the ROI coordinates are shared between matrices.
+
+    With the row convention ``g -> g A_dmd`` and ``A_dmd = V diag(lambda) V^-1``,
+    the latent state is ``g_k = sum_j b_j lambda_j^k W_j`` with ``b = g V`` and
+    ``W = V^-1``. We then have
+
+    * ``eigvals``: the eigenvalues, sorted by decreasing modulus.
+    * ``modes``: the modes ``W_j`` pushed through the Jacobian of the decoder (at
+      the mean encoded initial state) and the PCA basis, as unit vectors of shape
+      ``(nmodes, d, 2)``, where the last axis holds the coefficients of
+      ``(Re z_i, Im z_i)``. The phase is fixed so that the largest entry is real.
+    * ``mode_profiles``: ``(nmodes, d)`` phase-free ROI profile of each mode.
+    * ``mode_gain``: the norm of the pushed-through modes before normalization.
+    * ``strength_mean``, ``strength_std``: statistics over the grid of the
+      strengths ``|b_j(c)| * gain_j`` of each mode in the encode-once rollout.
+    * ``logn_strength_mean``: the same, but for the effect on the decoded
+      log-norm instead of the direction.
+    * ``jac_map``, ``jac_stats``: the gradient norm
+      :math:`|\nabla_c \log |z_N||` of the decoded final log-norm with respect to
+      the (physical) control, on the grid, and its (mean, std, median, p90, max).
+    """
+    scale = max(abs(b) for b in bbox)
+    r = model.latent_size
+
+    # {{{ spectrum
+
+    lam, V = torch.linalg.eig(A_dmd.detach().cpu().to(torch.float64))
+    order = torch.argsort(lam.abs(), descending=True)
+    lam, V = lam[order], V[:, order]
+    W = torch.linalg.inv(V)
+
+    # }}}
+
+    # {{{ strengths
+
+    c = _grid_control(model, bbox, resolution, like=A_dmd)
+    with torch.no_grad():
+        g0 = _encode_origin(model, c)
+        g1 = torch.cat([g0, torch.ones_like(g0[:, :1])], dim=-1)
+        b = g1.cpu().to(torch.complex128) @ V
+
+    # }}}
+
+    # {{{ modes in the state space
+
+    def decoded(g: torch.Tensor) -> torch.Tensor:
+        direction, logn = model.decode(g)
+        return torch.cat([direction, logn[..., None]], dim=-1)
+
+    jac_dec = torch.autograd.functional.jacobian(decoded, g0.mean(dim=0))
+    jac_dec = jac_dec.detach().cpu().to(torch.complex128)
+
+    # NOTE: shape (npca + 1, nmodes)
+    lifted = jac_dec @ W[:, :r].T
+    basis = cast(torch.Tensor, model.basis).detach().cpu().to(torch.complex128)
+    modes = basis @ lifted[: model.npca]
+
+    gain = torch.linalg.vector_norm(modes, dim=0)
+    modes = modes / gain.clamp(min=1.0e-12)
+    pivot = modes[modes.abs().argmax(dim=0), torch.arange(modes.shape[1])]
+    modes = modes * (pivot.abs() / pivot)[None, :]
+    modes = modes.T.reshape(modes.shape[1], -1, 2)
+
+    profiles = torch.linalg.vector_norm(modes, dim=-1)
+
+    amplitude = b.abs()
+    strength = amplitude * gain[None, :]
+    logn_strength = amplitude * lifted[model.npca].abs()[None, :]
+
+    # }}}
+
+    # {{{ sensitivity to the control
+
+    c = c.clone().requires_grad_(mode=True)
+    g_final = model.rollout(_encode_origin(model, c), A_dmd, maxit)[:, -1]
+    _, logn_final = model.decode(g_final)
+    (grad,) = torch.autograd.grad(logn_final.sum(), c)
+
+    # NOTE: `c` is normalized by `scale` and the log-norm by `LOG_SCALE`
+    jac = torch.linalg.vector_norm(grad, dim=-1) * (LOG_SCALE / scale)
+    jac = jac.detach().cpu()
+    jac_stats = torch.stack([
+        jac.mean(),
+        jac.std(),
+        jac.median(),
+        torch.quantile(jac, 0.9),
+        jac.max(),
+    ])
+
+    # }}}
+
+    return {
+        "eigvals": lam.numpy(),
+        "modes": modes.numpy(),
+        "mode_profiles": profiles.numpy(),
+        "mode_gain": gain.numpy(),
+        "strength_mean": strength.mean(dim=0).numpy(),
+        "strength_std": strength.std(dim=0).numpy(),
+        "logn_strength_mean": logn_strength.mean(dim=0).numpy(),
+        "jac_map": jac.reshape(resolution, resolution).numpy(),
+        "jac_stats": jac_stats.numpy(),
+    }
 
 
 # }}}
@@ -1258,6 +1397,7 @@ def infer(
     *,
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
+    features: bool = False,
 ) -> int:
     if not weightsfile.exists():
         log.error("Weights file does not exist: '%s'.", weightsfile)
@@ -1298,6 +1438,38 @@ def infer(
     model.eval()
 
     mem.add_record("After model load")
+
+    # }}}
+
+    # {{{ features
+
+    if features:
+        featfile = outfile.with_name(f"{outfile.name}-features.npz")
+        if not overwrite and featfile.exists():
+            log.error("Features file exists (use --force to overwrite): '%s'", featfile)
+            return 1
+
+        feats = compute_features(
+            model,
+            A_dmd,
+            bbox=config.bbox,
+            resolution=config.resolution,
+            maxit=config.maxit,
+        )
+        feats["a_dmd"] = A_dmd.detach().cpu().numpy()
+        if "loss_test" in checkpoint:
+            feats["loss_test"] = checkpoint["loss_test"].detach().cpu().numpy()
+
+        eigvals = feats["eigvals"]
+        log.info(
+            "|lambda| (top 8): %s", np.array2string(np.abs(eigvals[:8]), precision=3)
+        )
+        log.info("jacobian (mean, std, median, p90, max): %s", feats["jac_stats"])
+
+        np.savez(featfile, allow_pickle=True, **feats)
+        log.info("Saved features: '%s'.", featfile)
+
+        return 0
 
     # }}}
 
@@ -1429,6 +1601,15 @@ if __name__ == "__main__":
         default=None,
         help="Weight of the prediction loss (default: 1)",
     )
+    parser.add_argument(
+        "--features",
+        action="store_true",
+        help=(
+            "With 'infer': compute classification features (spectrum, modes, "
+            "strengths, control sensitivity), save them to '{basename}-features.npz' "
+            "and skip the plots"
+        ),
+    )
     args = parser.parse_args()
 
     if not args.quiet:
@@ -1455,6 +1636,7 @@ if __name__ == "__main__":
                     overrides=vars(args),
                     outfile=args.outfile,
                     overwrite=args.force,
+                    features=args.features,
                 )
             )
         else:
