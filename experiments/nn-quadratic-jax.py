@@ -717,7 +717,7 @@ def infer(
 
 
 if __name__ == "__main__":
-    parser = make_argument_parser(
+    parser, _ = make_argument_parser(
         description=SCRIPT_LONG_HELP,
         devices=available_device_names(),
     )

@@ -273,7 +273,15 @@ def make_argument_parser(
     *,
     description: str = "",
     devices: frozenset[str] = frozenset(),
-) -> argparse.ArgumentParser:
+) -> tuple[
+    argparse.ArgumentParser, argparse._SubParsersAction[argparse.ArgumentParser]
+]:
+    """Make the argument parser with the common options and the ``train`` and
+    ``infer`` commands.
+
+    The sub-parsers are also returned, so that scripts can add their own commands.
+    """
+
     class HelpFormatter(
         argparse.ArgumentDefaultsHelpFormatter,
         argparse.RawDescriptionHelpFormatter,
@@ -397,7 +405,7 @@ def make_argument_parser(
     )
     subparser.add_argument("filename", type=pathlib.Path)
 
-    return parser
+    return parser, subparsers
 
 
 # }}}
