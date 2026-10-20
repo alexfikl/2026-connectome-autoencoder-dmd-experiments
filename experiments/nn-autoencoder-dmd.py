@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple, Protocol, cast
@@ -815,6 +816,15 @@ def compute_features(
     * ``jac_map``, ``jac_stats``: the gradient norm
       :math:`|\nabla_c \log |z_N||` of the decoded final log-norm with respect to
       the (physical) control, on the grid, and its (mean, std, median, p90, max).
+    * ``inset_fraction``: fraction of the grid predicted in the set (decoded final
+      norm below the escape radius). The following describe the decoded final states
+      of these points, which approximate the attractors in the ROI space.
+    * ``attractor_roi``: ``(d,)`` mean over the points of the per-ROI magnitude
+      ``|z_i|`` of the final state; ``attractor_norm``: mean norm of the final state.
+    * ``attractor_energy``: the first 8 normalized squared singular values of the
+      final states (uncentered), i.e. how many directions the attractors span.
+    * ``attractor_residual``: median and p90 of ``|z_N - z_{N-1}| / |z_N|``, which
+      is zero for fixed points and not for cycles.
     """
     scale = max(abs(b) for b in bbox)
     r = model.latent_size
@@ -886,6 +896,45 @@ def compute_features(
 
     # }}}
 
+    # {{{ attractors
+
+    # NOTE: states of the in-set points at the end of the rollout, rebuilt from
+    # the decoded direction (unit, in the orthonormal PCA basis) and norm
+    with torch.no_grad():
+        g_last = model.rollout(_encode_origin(model, c.detach()), A_dmd, maxit)
+        direction, logn = model.decode(g_last[:, -2:])
+        norm = (torch.exp(logn * LOG_SCALE) - LOG_EPS).clamp(min=0.0)
+        states = norm[..., None] * (direction @ cast(torch.Tensor, model.basis).T)
+
+        inset = norm[:, -1] < model.escape_radius
+        final = states[inset, -1].cpu().to(torch.float64)
+        previous = states[inset, -2].cpu().to(torch.float64)
+
+    nenergy = 8
+    inset_fraction = torch.tensor(float(inset.float().mean()), device="cpu")
+    attractor_roi = torch.zeros(model.input_size, dtype=torch.float64, device="cpu")
+    attractor_norm = torch.zeros((), dtype=torch.float64, device="cpu")
+    attractor_energy = torch.zeros(nenergy, dtype=torch.float64, device="cpu")
+    attractor_residual = torch.zeros(2, dtype=torch.float64, device="cpu")
+
+    if final.shape[0] > 1:
+        fnorm = torch.linalg.vector_norm(final, dim=-1)
+        rel = torch.linalg.vector_norm(final - previous, dim=-1) / fnorm.clamp(
+            min=1.0e-8
+        )
+
+        attractor_roi = torch.linalg.vector_norm(
+            final.reshape(final.shape[0], -1, 2), dim=-1
+        ).mean(dim=0)
+        attractor_norm = fnorm.mean()
+
+        energy = torch.linalg.svdvals(final) ** 2
+        energy = energy[:nenergy] / energy.sum()
+        attractor_energy[: energy.shape[0]] = energy
+        attractor_residual = torch.stack([rel.median(), torch.quantile(rel, 0.9)])
+
+    # }}}
+
     return {
         "eigvals": lam.numpy(),
         "modes": modes.numpy(),
@@ -896,7 +945,35 @@ def compute_features(
         "logn_strength_mean": logn_strength.mean(dim=0).numpy(),
         "jac_map": jac.reshape(resolution, resolution).numpy(),
         "jac_stats": jac_stats.numpy(),
+        "inset_fraction": inset_fraction.numpy(),
+        "attractor_roi": attractor_roi.numpy(),
+        "attractor_norm": attractor_norm.numpy(),
+        "attractor_energy": attractor_energy.numpy(),
+        "attractor_residual": attractor_residual.numpy(),
     }
+
+
+def make_feature_vector(
+    feats: Mapping[str, np.ndarray], *, neig: int = 8
+) -> tuple[np.ndarray, np.ndarray, tuple[str, ...]]:
+    """Gather the stable features of :func:`compute_features` in a single vector.
+
+    The format matches ``make-features.py``: the feature vector, the boundaries of
+    the feature groups (``ngroups + 1``) and a description of each group.
+    """
+    groups = {
+        "Leading eigenvalue moduli": np.sort(np.abs(feats["eigvals"]))[::-1][:neig],
+        "Control sensitivity (log)": np.log(feats["jac_stats"]),
+        "Attractor ROI magnitudes": feats["attractor_roi"],
+        "Attractor energy": feats["attractor_energy"],
+    }
+
+    x = np.concatenate([np.ravel(v) for v in groups.values()]).astype(np.float64)
+    starts = np.cumsum([0, *(np.size(v) for v in groups.values())])
+    if not np.all(np.isfinite(x)):
+        raise ValueError("features are not finite")
+
+    return x, starts, tuple(groups)
 
 
 # }}}
@@ -1458,6 +1535,8 @@ def infer(
             maxit=config.maxit,
         )
         feats["a_dmd"] = A_dmd.detach().cpu().numpy()
+        feats["x"], feats["starts"], descrs = make_feature_vector(feats)
+        feats["descrs"] = np.array(descrs)
         if "loss_test" in checkpoint:
             feats["loss_test"] = checkpoint["loss_test"].detach().cpu().numpy()
 
@@ -1512,8 +1591,88 @@ def infer(
 # }}}
 
 
+# {{{ merge
+
+
+def merge(
+    filenames: Sequence[pathlib.Path],
+    *,
+    indir: pathlib.Path | None = None,
+    outfile: pathlib.Path | None = None,
+    overwrite: bool = False,
+) -> int:
+    """Merge the features written by ``infer --features`` into a single file.
+
+    For each of the datasets in *filenames*, this reads the features of all the
+    matrices from ``{indir}/{stem}-m{i}-features.npz``. The result has the same
+    format as the files written by ``make-features.py``.
+    """
+    if not filenames:
+        log.warning("No files given.")
+        return 0
+
+    if indir is None:
+        indir = filenames[0].parent / "ae-dmd"
+
+    if outfile is None:
+        outfile = filenames[0].parent / "dataset-features-ae-dmd.npz"
+    outfile = outfile.with_suffix(".npz")
+
+    if not overwrite and outfile.exists():
+        log.error("File already exists (use --force to overwrite): '%s'.", outfile)
+        return 1
+
+    datasets: dict[str, np.ndarray] = {}
+    starts: np.ndarray | None = None
+    descrs: np.ndarray | None = None
+
+    for filename in filenames:
+        pattern = re.compile(rf"{re.escape(filename.stem)}-m(\d+)-features\.npz")
+        found = {
+            int(m.group(1)): path
+            for path in indir.glob(f"{filename.stem}-m*-features.npz")
+            if (m := pattern.fullmatch(path.name))
+        }
+
+        nmatrices = len(found)
+        if nmatrices == 0 or set(found) != set(range(nmatrices)):
+            log.error(
+                "Features for '%s' in '%s' are missing or not contiguous: %s",
+                filename.stem,
+                indir,
+                sorted(found),
+            )
+            return 1
+
+        xs = []
+        for i in range(nmatrices):
+            data = np.load(found[i])
+            if starts is None:
+                starts, descrs = data["starts"], data["descrs"]
+
+            if not (
+                np.array_equal(data["starts"], starts)
+                and np.array_equal(data["descrs"], descrs)
+            ):
+                log.error("Inconsistent feature groups: '%s'.", found[i])
+                return 1
+
+            xs.append(data["x"])
+
+        datasets[filename.stem] = np.stack(xs)
+        log.info("Gathered %d matrices for '%s'.", nmatrices, filename.stem)
+
+    np.savez(outfile, datasets=datasets, starts=starts, descrs=descrs)
+    log.info("Saved merged features: '%s'.", outfile)
+
+    return 0
+
+
+# }}}
+
+
 if __name__ == "__main__":
-    parser = make_argument_parser(
+    parser, subparsers = make_argument_parser(
         description=SCRIPT_LONG_HELP,
         devices=available_device_names(),
     )
@@ -1611,6 +1770,23 @@ if __name__ == "__main__":
             "and skip the plots"
         ),
     )
+
+    subparser = subparsers.add_parser(
+        "merge",
+        formatter_class=parser.formatter_class,
+        description=(
+            "Merge the features written by 'infer --features' for all the matrices "
+            "of the given datasets into a single file for make-features.py consumers."
+        ),
+    )
+    subparser.add_argument("filenames", nargs="+", type=pathlib.Path)
+    subparser.add_argument(
+        "--indir",
+        type=pathlib.Path,
+        default=None,
+        help="Directory with the features (default: 'ae-dmd' next to the first file)",
+    )
+
     args = parser.parse_args()
 
     if not args.quiet:
@@ -1638,6 +1814,15 @@ if __name__ == "__main__":
                     outfile=args.outfile,
                     overwrite=args.force,
                     features=args.features,
+                )
+            )
+        elif args.command == "merge":
+            raise SystemExit(
+                merge(
+                    args.filenames,
+                    indir=args.indir,
+                    outfile=args.outfile,
+                    overwrite=args.force,
                 )
             )
         else:
