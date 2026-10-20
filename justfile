@@ -128,3 +128,18 @@ features:
     @just make_features fourier data/task-*-fractal.npz data/structural-fractal.npz
 
 # }}}
+
+# {{{ autoencoder-dmd
+
+[doc("Train a DMD autoencoder on each of the 48 matrices in an npz file")]
+train_autoencoder_dmd filename:
+    for idx in $(seq 0 47); do \
+        {{ PYTHON }} experiments/nn-autoencoder-dmd.py \
+            --device cuda --force \
+            --seed 0 \
+            --resolution 64 --epochs 40 --batch-size 1024 --dmd-subset 1024 \
+            --maxit 32 --c-features 8 --c-depth 2 \
+            train --dataidx $idx {{ filename }}; \
+    done
+
+# }}}
