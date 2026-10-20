@@ -1150,8 +1150,9 @@ def train(
 
     if outfile is None:
         outfile = filename.parent / f"{filename.stem}-ae-dmd.npz"
+        outfile = outfile.with_stem(f"{outfile.stem}-{config.suffix}")
 
-    outfile = outfile.with_stem(f"{outfile.stem}-{config.suffix}").with_suffix("")
+    outfile = outfile.with_suffix("")
     weightsfile = outfile.with_suffix(".pkl")
 
     if not overwrite and weightsfile.exists():

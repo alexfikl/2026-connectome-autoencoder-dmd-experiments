@@ -131,15 +131,21 @@ features:
 
 # {{{ autoencoder-dmd
 
-[doc("Train a DMD autoencoder on each of the 48 matrices in an npz file")]
+[doc("Train a DMD autoencoder and compute its features for each of the 48 matrices")]
 train_autoencoder_dmd filename:
+    mkdir -p data/ae-dmd
+    stem=$(basename {{ filename }} .npz); \
     for idx in $(seq 0 47); do \
+        out=data/ae-dmd/$stem-m$idx; \
         {{ PYTHON }} experiments/nn-autoencoder-dmd.py \
-            --device cuda --force \
+            --device cuda --force -o $out.npz \
             --seed 0 \
             --resolution 64 --epochs 40 --batch-size 1024 --dmd-subset 1024 \
             --maxit 32 --c-features 8 --c-depth 2 \
-            train --dataidx $idx {{ filename }}; \
+            train --dataidx $idx {{ filename }} || exit 1; \
+        {{ PYTHON }} experiments/nn-autoencoder-dmd.py \
+            --device cuda --force --features \
+            infer $out.pkl || exit 1; \
     done
 
 # }}}
