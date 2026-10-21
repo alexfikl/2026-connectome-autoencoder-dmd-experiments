@@ -135,7 +135,7 @@ features:
 train_autoencoder_dmd filename:
     mkdir -p data/ae-dmd
     stem=$(basename {{ filename }} .npz); \
-    for idx in $(seq 0 47); do \
+    for idx in $(seq -w 0 47); do \
         out=data/ae-dmd/$stem-m$idx; \
         {{ PYTHON }} experiments/nn-autoencoder-dmd.py \
             --device cuda --force -o $out.npz \
