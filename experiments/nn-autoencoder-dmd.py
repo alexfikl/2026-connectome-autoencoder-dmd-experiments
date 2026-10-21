@@ -798,21 +798,9 @@ def compute_features(
     features are either invariant to it or are lifted to the state space, where
     the ROI coordinates are shared between matrices.
 
-    With the row convention ``g -> g A_dmd`` and ``A_dmd = V diag(lambda) V^-1``,
-    the latent state is ``g_k = sum_j b_j lambda_j^k W_j`` with ``b = g V`` and
-    ``W = V^-1``. We then have
-
-    * ``eigvals``: the eigenvalues, sorted by decreasing modulus.
-    * ``modes``: the modes ``W_j`` pushed through the Jacobian of the decoder (at
-      the mean encoded initial state) and the PCA basis, as unit vectors of shape
-      ``(nmodes, d, 2)``, where the last axis holds the coefficients of
-      ``(Re z_i, Im z_i)``. The phase is fixed so that the largest entry is real.
-    * ``mode_profiles``: ``(nmodes, d)`` phase-free ROI profile of each mode.
-    * ``mode_gain``: the norm of the pushed-through modes before normalization.
-    * ``strength_mean``, ``strength_std``: statistics over the grid of the
-      strengths ``|b_j(c)| * gain_j`` of each mode in the encode-once rollout.
-    * ``logn_strength_mean``: the same, but for the effect on the decoded
-      log-norm instead of the direction.
+    * ``eigvals``: the eigenvalues of the latent block of ``A_dmd`` (the constant
+      coordinate only contributes the trivial eigenvalue 1), sorted by decreasing
+      modulus.
     * ``jac_map``, ``jac_stats``: the gradient norm
       :math:`|\nabla_c \log |z_N||` of the decoded final log-norm with respect to
       the (physical) control, on the grid, and its (mean, std, median, p90, max).
@@ -820,64 +808,23 @@ def compute_features(
       norm below the escape radius). The following describe the decoded final states
       of these points, which approximate the attractors in the ROI space.
     * ``attractor_roi``: ``(d,)`` mean over the points of the per-ROI magnitude
-      ``|z_i|`` of the final state; ``attractor_norm``: mean norm of the final state.
+      ``|z_i|`` of the final state.
     * ``attractor_energy``: the first 8 normalized squared singular values of the
       final states (uncentered), i.e. how many directions the attractors span.
-    * ``attractor_residual``: median and p90 of ``|z_N - z_{N-1}| / |z_N|``, which
-      is zero for fixed points and not for cycles.
     """
     scale = max(abs(b) for b in bbox)
     r = model.latent_size
 
     # {{{ spectrum
 
-    lam, V = torch.linalg.eig(A_dmd.detach().cpu().to(torch.float64))
-    order = torch.argsort(lam.abs(), descending=True)
-    lam, V = lam[order], V[:, order]
-    W = torch.linalg.inv(V)
-
-    # }}}
-
-    # {{{ strengths
-
-    c = _grid_control(model, bbox, resolution, like=A_dmd)
-    with torch.no_grad():
-        g0 = _encode_origin(model, c)
-        g1 = torch.cat([g0, torch.ones_like(g0[:, :1])], dim=-1)
-        b = g1.cpu().to(torch.complex128) @ V
-
-    # }}}
-
-    # {{{ modes in the state space
-
-    def decoded(g: torch.Tensor) -> torch.Tensor:
-        direction, logn = model.decode(g)
-        return torch.cat([direction, logn[..., None]], dim=-1)
-
-    jac_dec = torch.autograd.functional.jacobian(decoded, g0.mean(dim=0))
-    jac_dec = jac_dec.detach().cpu().to(torch.complex128)
-
-    # NOTE: shape (npca + 1, nmodes)
-    lifted = jac_dec @ W[:, :r].T
-    basis = cast(torch.Tensor, model.basis).detach().cpu().to(torch.complex128)
-    modes = basis @ lifted[: model.npca]
-
-    gain = torch.linalg.vector_norm(modes, dim=0)
-    modes = modes / gain.clamp(min=1.0e-12)
-    pivot = modes.gather(0, modes.abs().argmax(dim=0, keepdim=True))[0]
-    modes = modes * (pivot.abs() / pivot)[None, :]
-    modes = modes.T.reshape(modes.shape[1], -1, 2)
-
-    profiles = torch.linalg.vector_norm(modes, dim=-1)
-
-    amplitude = b.abs()
-    strength = amplitude * gain[None, :]
-    logn_strength = amplitude * lifted[model.npca].abs()[None, :]
+    lam = torch.linalg.eigvals(A_dmd.detach().cpu().to(torch.float64)[:r, :r])
+    lam = lam[torch.argsort(lam.abs(), descending=True)]
 
     # }}}
 
     # {{{ sensitivity to the control
 
+    c = _grid_control(model, bbox, resolution, like=A_dmd)
     c = c.detach().clone().requires_grad_()
     g_final = model.rollout(_encode_origin(model, c), A_dmd, maxit)[:, -1]
     _, logn_final = model.decode(g_final)
@@ -902,54 +849,36 @@ def compute_features(
     # the decoded direction (unit, in the orthonormal PCA basis) and norm
     with torch.no_grad():
         g_last = model.rollout(_encode_origin(model, c.detach()), A_dmd, maxit)
-        direction, logn = model.decode(g_last[:, -2:])
+        direction, logn = model.decode(g_last[:, -1])
         norm = (torch.exp(logn * LOG_SCALE) - LOG_EPS).clamp(min=0.0)
-        states = norm[..., None] * (direction @ cast(torch.Tensor, model.basis).T)
+        states = norm[:, None] * (direction @ cast(torch.Tensor, model.basis).T)
 
-        inset = norm[:, -1] < model.escape_radius
-        final = states[inset, -1].cpu().to(torch.float64)
-        previous = states[inset, -2].cpu().to(torch.float64)
+        inset = norm < model.escape_radius
+        final = states[inset].cpu().to(torch.float64)
 
     nenergy = 8
     inset_fraction = torch.tensor(float(inset.float().mean()), device="cpu")
     attractor_roi = torch.zeros(model.input_size, dtype=torch.float64, device="cpu")
-    attractor_norm = torch.zeros((), dtype=torch.float64, device="cpu")
     attractor_energy = torch.zeros(nenergy, dtype=torch.float64, device="cpu")
-    attractor_residual = torch.zeros(2, dtype=torch.float64, device="cpu")
 
     if final.shape[0] > 1:
-        fnorm = torch.linalg.vector_norm(final, dim=-1)
-        rel = torch.linalg.vector_norm(final - previous, dim=-1) / fnorm.clamp(
-            min=1.0e-8
-        )
-
         attractor_roi = torch.linalg.vector_norm(
             final.reshape(final.shape[0], -1, 2), dim=-1
         ).mean(dim=0)
-        attractor_norm = fnorm.mean()
 
         energy = torch.linalg.svdvals(final) ** 2
         energy = energy[:nenergy] / energy.sum()
         attractor_energy[: energy.shape[0]] = energy
-        attractor_residual = torch.stack([rel.median(), torch.quantile(rel, 0.9)])
 
     # }}}
 
     return {
         "eigvals": lam.numpy(),
-        "modes": modes.numpy(),
-        "mode_profiles": profiles.numpy(),
-        "mode_gain": gain.numpy(),
-        "strength_mean": strength.mean(dim=0).numpy(),
-        "strength_std": strength.std(dim=0).numpy(),
-        "logn_strength_mean": logn_strength.mean(dim=0).numpy(),
         "jac_map": jac.reshape(resolution, resolution).numpy(),
         "jac_stats": jac_stats.numpy(),
         "inset_fraction": inset_fraction.numpy(),
         "attractor_roi": attractor_roi.numpy(),
-        "attractor_norm": attractor_norm.numpy(),
         "attractor_energy": attractor_energy.numpy(),
-        "attractor_residual": attractor_residual.numpy(),
     }
 
 
@@ -961,8 +890,13 @@ def make_feature_vector(
     The format matches ``make-features.py``: the feature vector, the boundaries of
     the feature groups (``ngroups + 1``) and a description of each group.
     """
+    # NOTE: the operator is real, so the eigenvalues come in conjugate pairs that
+    # have the same modulus; we only keep one of each
+    eigvals = feats["eigvals"]
+    moduli = np.sort(np.abs(eigvals[eigvals.imag >= 0]))[::-1][:neig]
+
     groups = {
-        "Leading eigenvalue moduli": np.sort(np.abs(feats["eigvals"]))[::-1][:neig],
+        "Leading eigenvalue moduli": moduli,
         "Control sensitivity (log)": np.log(feats["jac_stats"]),
         "Attractor ROI magnitudes": feats["attractor_roi"],
         "Attractor energy": feats["attractor_energy"],
