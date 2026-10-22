@@ -17,6 +17,7 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from commonlib import Config, compute_trajectory_mask, make_argument_parser
+from nneuroutil.dmdc import DenseDMDc, build_dense_dmdc
 from nneuroutil.helpers import (
     TicTocTimer,
     machine_info,
@@ -152,40 +153,22 @@ class DMDAutoencoderResult(NamedTuple):
     """Decoded log-norm of the latent rollout from the initial state."""
 
 
-def _fit_linear_operator(
-    X: torch.Tensor,
-    Y: torch.Tensor,
-    *,
-    method: Literal["pinv", "ridge"],
-    eps: float,
-) -> torch.Tensor:
-    """Fit ``Y ~ X A`` with no control term.
+def _load_latent_dmd(checkpoint: Mapping[str, Any], latent_size: int) -> DenseDMDc[Any]:
+    """Load the latent DMDc model, including legacy ``[[A, 0], [b, 1]]`` checkpoints."""
+    if "dmdc" in checkpoint:
+        return DenseDMDc(A=checkpoint["dmdc"]["A"], B=checkpoint["dmdc"]["B"])
 
-    The ridge parameter is relative to the average diagonal of ``X^H X``.
-    """
-    r = X.shape[1]
-    XhX = X.mH @ X
-    XhY = X.mH @ Y
-    XhX = 0.5 * (XhX + XhX.mH)
-
-    if method == "pinv":
-        A = torch.linalg.pinv(XhX) @ XhY
-    else:
-        reg = eps * torch.trace(XhX) / r
-        A = torch.linalg.solve(
-            XhX + reg * torch.eye(r, device=X.device, dtype=X.dtype), XhY
-        )
-
-    return cast(torch.Tensor, A)
+    W = checkpoint["a_dmd"]
+    return DenseDMDc(A=W[:latent_size, :latent_size], B=W[latent_size:, :latent_size])
 
 
 class DMDAutoencoder(nn.Module):
     r"""Autoencoder with polar observables and a linear latent operator.
 
     The encoder maps ``(direction, log-norm, c)`` of a state to a latent vector
-    ``g`` and the latent evolves as ``[g, 1] -> [g, 1] A_dmd``, where the last
-    column of ``A_dmd`` is fixed to ``(0, ..., 0, 1)`` so that the constant
-    coordinate is invariant. The decoder returns a direction and a log-norm.
+    ``g`` and the latent evolves as the affine map ``g -> g A + b``, fit as a DMDc
+    model with a constant unit input. The decoder returns a direction and a
+    log-norm.
     """
 
     def __init__(
@@ -307,35 +290,34 @@ class DMDAutoencoder(nn.Module):
 
         return direction, out[..., self.npca]
 
-    def fit_dmd(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-        """Fit the operator on ``[g, 1]`` from latent transitions ``X -> Y``."""
-        X1 = torch.cat([X, torch.ones_like(X[:, :1])], dim=-1)
-        A = _fit_linear_operator(X1, Y, method=self.dmd_method, eps=self.ridge_eps)
+    def fit_dmd(self, X: torch.Tensor, Y: torch.Tensor) -> DenseDMDc[Any]:
+        """Fit the affine latent dynamics ``Y = X A + b`` from transitions ``X -> Y``.
 
-        # NOTE: the constant coordinate is invariant
-        last = torch.zeros(self.latent_size + 1, 1, device=A.device, dtype=A.dtype)
-        last[-1, 0] = 1.0
-        return torch.cat([A, last], dim=1)
+        This is a DMDc fit with a constant unit input ``u = 1``, so that ``B = b``.
+        """
+        U = torch.ones_like(X[:, :1])
+        return build_dense_dmdc(X, U, Y, method=self.dmd_method, eps=self.ridge_eps)
 
     def rollout(
-        self, g0: torch.Tensor, A_dmd: torch.Tensor, steps: int
+        self, g0: torch.Tensor, dmdc: DenseDMDc[Any], steps: int
     ) -> torch.Tensor:
         """Latent states ``g_1, ..., g_steps`` of shape ``(batch, steps, r)``."""
-        g = torch.cat([g0, torch.ones_like(g0[:, :1])], dim=-1)
+        u = torch.ones_like(g0[:, :1])
 
+        g = g0
         out = []
         for _ in range(steps):
-            g = g @ A_dmd
-            out.append(g[:, : self.latent_size])
+            g = dmdc.evolve(g, u)
+            out.append(g)
 
-        return torch.stack(out, dim=1)
+        return torch.stack(out, dim=1)  # ty: ignore[invalid-argument-type]
 
     # ty: ignore[invalid-mutable-override]
     def forward(
         self,
         x: torch.Tensor,
         c: torch.Tensor,
-        A_dmd: torch.Tensor | None = None,
+        dmdc: DenseDMDc[Any] | None = None,
         horizon: int = 0,
     ) -> DMDAutoencoderResult:
         obs = self.observe(x)
@@ -345,15 +327,15 @@ class DMDAutoencoder(nn.Module):
         result = DMDAutoencoderResult(
             obs=obs, enc=enc, rec_direction=rec_direction, rec_logn=rec_logn
         )
-        if A_dmd is None:
+        if dmdc is None:
             return result
 
-        g = torch.cat([enc[:, :-1], torch.ones_like(enc[:, :-1, :1])], dim=-1)
-        result = result._replace(lin_pred=(g @ A_dmd)[..., : self.latent_size])
+        u = torch.ones_like(enc[:, :-1, :1])
+        result = result._replace(lin_pred=dmdc.evolve(enc[:, :-1], u))  # ty: ignore[invalid-argument-type]
 
         horizon = min(horizon, x.shape[1] - 1)
         if horizon > 0:
-            roll = self.rollout(enc[:, 0], A_dmd, horizon)
+            roll = self.rollout(enc[:, 0], dmdc, horizon)
             roll_direction, roll_logn = self.decode(roll)
             result = result._replace(roll_direction=roll_direction, roll_logn=roll_logn)
 
@@ -491,7 +473,7 @@ class ErrorMetrics(NamedTuple):
     dice: torch.Tensor
     """Dice score of the predicted and true converged sets."""
     a_radius: torch.Tensor
-    """Spectral radius of the global DMD operator ``A_dmd``."""
+    """Spectral radius of the global DMD operator ``dmdc.A``."""
 
 
 def _empty_train_metrics(epochs: int) -> TrainMetrics:
@@ -517,7 +499,7 @@ def build_latent_dmd(
     *,
     grad: bool = False,
     subset: int | None = None,
-) -> torch.Tensor:
+) -> DenseDMDc[Any]:
     r"""Build the DMD operator in the latent space from the full dataset.
 
     ``X`` has shape ``(ntraj, maxit, 2 d)`` and ``C`` has shape ``(ntraj, 2)``.
@@ -549,7 +531,7 @@ def _evaluate(
     model: DMDAutoencoder,
     criterion: DMDLoss,
     loader: DataLoader,
-    A_dmd: torch.Tensor | None,
+    dmdc: DenseDMDc[Any] | None,
     horizon: int,
 ) -> torch.Tensor:
     """Average loss over all the batches in *loader*."""
@@ -558,7 +540,7 @@ def _evaluate(
     with torch.no_grad():
         total = torch.zeros(criterion.dim, device=next(model.parameters()).device)
         for batch_x, batch_c in loader:
-            total += criterion(model(batch_x, batch_c, A_dmd, horizon)).tensor()
+            total += criterion(model(batch_x, batch_c, dmdc, horizon)).tensor()
 
     return total / len(loader)
 
@@ -629,7 +611,7 @@ def torch_train(
 
             timer.tic()
             for batch_x, batch_c in loader:
-                A_dmd = (
+                dmdc = (
                     build_latent_dmd(
                         model, X_train, c_train, grad=True, subset=dmd_subset
                     )
@@ -638,7 +620,7 @@ def torch_train(
                 )
 
                 optimizer.zero_grad()
-                result = model(batch_x, batch_c, A_dmd, stage.horizon)
+                result = model(batch_x, batch_c, dmdc, stage.horizon)
                 loss = criterion(result)
 
                 loss.backward()
@@ -656,12 +638,12 @@ def torch_train(
             # {{{ validation
 
             with torch.no_grad():
-                A_dmd = (
+                dmdc = (
                     build_latent_dmd(model, X_train, c_train) if stage.use_dmd else None
                 )
 
             loss_validate = _evaluate(
-                model, criterion, validate_loader, A_dmd, stage.horizon
+                model, criterion, validate_loader, dmdc, stage.horizon
             )
 
             train_metrics.lin_validate[epoch] = loss_validate[2]
@@ -674,7 +656,7 @@ def torch_train(
             losses[epoch, 0] = loss_train
             losses[epoch, 1] = loss_validate
 
-            radius = _spectral_radius(A_dmd[:-1, :-1]) if A_dmd is not None else None
+            radius = _spectral_radius(dmdc.A) if dmdc is not None else None  # ty: ignore[invalid-argument-type]
             log.info(
                 "[%s %03d/%03d] total %.5e rec %.3e lin %.3e pre %.3e | "
                 "val rec %.3e lin %.3e pre %.3e | lam %s (%s)",
@@ -755,7 +737,7 @@ def _encode_origin(model: DMDAutoencoder, c: torch.Tensor) -> torch.Tensor:
 
 def torch_predict(
     model: DMDAutoencoder,
-    A_dmd: torch.Tensor,
+    dmdc: DenseDMDc[Any],
     *,
     bbox: tuple[float, float, float, float],
     resolution: int = 128,
@@ -769,9 +751,9 @@ def torch_predict(
     :returns: a real tensor of shape ``(resolution, resolution)``.
     """
     with torch.no_grad():
-        c = _grid_control(model, bbox, resolution, like=A_dmd)
+        c = _grid_control(model, bbox, resolution, like=dmdc.A)  # ty: ignore[invalid-argument-type]
         g0 = _encode_origin(model, c)
-        _, logn_final = model.decode(model.rollout(g0, A_dmd, maxit)[:, -1])
+        _, logn_final = model.decode(model.rollout(g0, dmdc, maxit)[:, -1])
 
         norm = torch.exp(logn_final * LOG_SCALE) - LOG_EPS
 
@@ -786,7 +768,7 @@ def torch_predict(
 
 def compute_features(
     model: DMDAutoencoder,
-    A_dmd: torch.Tensor,
+    dmdc: DenseDMDc[Any],
     *,
     bbox: tuple[float, float, float, float],
     resolution: int,
@@ -798,8 +780,7 @@ def compute_features(
     features are either invariant to it or are lifted to the state space, where
     the ROI coordinates are shared between matrices.
 
-    * ``eigvals``: the eigenvalues of the latent block of ``A_dmd`` (the constant
-      coordinate only contributes the trivial eigenvalue 1), sorted by decreasing
+    * ``eigvals``: the eigenvalues of the operator ``dmdc.A``, sorted by decreasing
       modulus.
     * ``jac_map``, ``jac_stats``: the gradient norm
       :math:`|\nabla_c \log |z_N||` of the decoded final log-norm with respect to
@@ -813,20 +794,19 @@ def compute_features(
       final states (uncentered), i.e. how many directions the attractors span.
     """
     scale = max(abs(b) for b in bbox)
-    r = model.latent_size
 
     # {{{ spectrum
 
-    lam = torch.linalg.eigvals(A_dmd.detach().cpu().to(torch.float64)[:r, :r])
+    lam = torch.linalg.eigvals(dmdc.A.detach().cpu().to(torch.float64))  # ty: ignore[unresolved-attribute]
     lam = lam[torch.argsort(lam.abs(), descending=True)]
 
     # }}}
 
     # {{{ sensitivity to the control
 
-    c = _grid_control(model, bbox, resolution, like=A_dmd)
+    c = _grid_control(model, bbox, resolution, like=dmdc.A)  # ty: ignore[invalid-argument-type]
     c = c.detach().clone().requires_grad_()
-    g_final = model.rollout(_encode_origin(model, c), A_dmd, maxit)[:, -1]
+    g_final = model.rollout(_encode_origin(model, c), dmdc, maxit)[:, -1]
     _, logn_final = model.decode(g_final)
     (grad,) = torch.autograd.grad(logn_final.sum(), c)
 
@@ -848,7 +828,7 @@ def compute_features(
     # NOTE: states of the in-set points at the end of the rollout, rebuilt from
     # the decoded direction (unit, in the orthonormal PCA basis) and norm
     with torch.no_grad():
-        g_last = model.rollout(_encode_origin(model, c.detach()), A_dmd, maxit)
+        g_last = model.rollout(_encode_origin(model, c.detach()), dmdc, maxit)
         direction, logn = model.decode(g_last[:, -1])
         norm = (torch.exp(logn * LOG_SCALE) - LOG_EPS).clamp(min=0.0)
         states = norm[:, None] * (direction @ cast(torch.Tensor, model.basis).T)
@@ -970,7 +950,7 @@ def _spectral_radius(A: torch.Tensor) -> torch.Tensor:
 def _plot_predict(
     filename: pathlib.Path,
     model: DMDAutoencoder,
-    A_dmd: torch.Tensor,
+    dmdc: DenseDMDc[Any],
     config: DMDConfig,
     *,
     zmask: torch.Tensor,
@@ -980,7 +960,7 @@ def _plot_predict(
 ) -> ErrorMetrics:
     norm = torch_predict(
         model,
-        A_dmd,
+        dmdc,
         bbox=config.bbox,
         resolution=config.resolution,
         maxit=config.maxit,
@@ -992,7 +972,7 @@ def _plot_predict(
     metrics = ErrorMetrics(
         iou=cast(torch.Tensor, jaccard_index(in_set, zmask)).detach().cpu(),
         dice=cast(torch.Tensor, dice_score(in_set, zmask)).detach().cpu(),
-        a_radius=_spectral_radius(A_dmd[:-1, :-1]),
+        a_radius=_spectral_radius(dmdc.A),  # ty: ignore[invalid-argument-type]
     )
 
     if not plot:
@@ -1271,11 +1251,11 @@ def train(
         if not stage.use_dmd:
             return
 
-        A_dmd = build_latent_dmd(model, x_train, c_train)
+        dmdc = build_latent_dmd(model, x_train, c_train)
         metrics = _plot_predict(
             outfile,
             model,
-            A_dmd,
+            dmdc,
             config,
             zmask=zmask,
             tag=stage.name,
@@ -1309,7 +1289,7 @@ def train(
         dmd_subset=config.dmd_subset,
         callback=plot_predict,
     )
-    A_dmd = build_latent_dmd(model, x_train, c_train)
+    dmdc = build_latent_dmd(model, x_train, c_train)
 
     mem.add_record("After training")
 
@@ -1317,7 +1297,7 @@ def train(
         model,
         criterion,
         DataLoader(TensorDataset(x_test, c_test), batch_size=config.batch_size),
-        A_dmd,
+        dmdc,
         stages[-1].horizon,
     )
     log.info(
@@ -1333,7 +1313,7 @@ def train(
     final_error_metrics = _plot_predict(
         outfile,
         model,
-        A_dmd,
+        dmdc,
         config,
         zmask=zmask,
         tag="final",
@@ -1354,7 +1334,7 @@ def train(
             "provenance": provenance,
             "model": model.state_dict(),
             "model_config": model_config,
-            "a_dmd": A_dmd,
+            "dmdc": {"A": dmdc.A, "B": dmdc.B},
             # loss and metrics
             "num_epochs_trained": len(losses),
             "losses": losses,
@@ -1431,7 +1411,7 @@ def infer(
 
     losses = checkpoint["losses"]
     zmask = checkpoint["zmask"]
-    A_dmd = checkpoint["a_dmd"]
+    dmdc = _load_latent_dmd(checkpoint, checkpoint["model_config"]["latent_size"])
     train_metrics = checkpoint.get("train_metrics")
     error_metrics = checkpoint.get("error_metrics")
 
@@ -1463,12 +1443,13 @@ def infer(
 
         feats = compute_features(
             model,
-            A_dmd,
+            dmdc,
             bbox=config.bbox,
             resolution=config.resolution,
             maxit=config.maxit,
         )
-        feats["a_dmd"] = A_dmd.detach().cpu().numpy()
+        feats["dmdc_A"] = dmdc.A.detach().cpu().numpy()  # ty: ignore[unresolved-attribute]
+        feats["dmdc_B"] = dmdc.B.detach().cpu().numpy()  # ty: ignore[unresolved-attribute]
         feats["x"], feats["starts"], descrs = make_feature_vector(feats)
         feats["descrs"] = np.array(descrs)
         if "loss_test" in checkpoint:
@@ -1495,7 +1476,7 @@ def infer(
     final_metrics = _plot_predict(
         outfile,
         model,
-        A_dmd,
+        dmdc,
         config,
         zmask=zmask,
         tag="final",
