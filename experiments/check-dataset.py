@@ -10,7 +10,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from nneuroutil.helpers import module_logger
-from nneuroutil.typing import Array3D, Array4D
+from nneuroutil.typing import Array1D, Array3D, Array4D
 
 log = module_logger("lib.check_dataset")
 
@@ -55,7 +55,7 @@ def compute_statistics(
     sqr_norm = np.sum(np.real(z) ** 2 + np.imag(z) ** 2, axis=-1)
     escaped = sqr_norm > escape_radius**2
 
-    never_escaped = np.all(~escaped, axis=0)
+    never_escaped = np.all(np.logical_not(escaped), axis=0)
     first_escaped = np.argmax(escaped.astype(np.int32), axis=0)
     escape_time = np.where(never_escaped, z.shape[0], first_escaped)
 
@@ -64,6 +64,23 @@ def compute_statistics(
         escaped=escaped,  # ty: ignore[invalid-argument-type]
         znorm=np.sqrt(sqr_norm),
     )
+
+
+def compute_cumulative_energy(
+    z: Array4D[np.complexfloating[Any]],
+    escaped: Array3D[np.bool],
+) -> Array1D[np.floating[Any]]:
+    """Compute cumulative spectral energy of the unpinned trajectory snapshot matrix.
+
+    :arg z: trajectories of shape ``(n_levels, nx, ny, d)``.
+    :arg escaped: boolean mask of shape ``(n_levels, nx, ny)`` denoting pinned states.
+    """
+    d = z.shape[-1]
+    snapshots = z[np.logical_not(escaped)].reshape(-1, d)
+
+    s = np.linalg.svd(snapshots, compute_uv=False)
+    s_sq = s**2
+    return np.cumsum(s_sq) / (np.sum(s_sq) + 1e-15)
 
 
 # }}}
@@ -236,6 +253,10 @@ def main(
             np.max(zconv),
         )
 
+    energy = compute_cumulative_energy(z, stats.escaped)
+    r9999 = np.searchsorted(energy, 0.9999) + 1
+    log.info("    Cumulative energy: r_99.9%% = %d of %d", r9999, d)
+
     # }}}
 
     # {{{ plot masks
@@ -389,6 +410,26 @@ def main(
         ax.set_xlabel("Iteration $n$")
         ax.set_ylabel(r"$\|z_n\|_2$")
         ax.set_xlim((0, n_levels - 1))
+        ax.legend(loc="lower right")
+
+    # }}}
+
+    # {{{ plot cumulative energy
+
+    with figure(
+        basename.with_stem(f"{basename.stem}-energy"), overwrite=overwrite
+    ) as fig:
+        ax = fig.gca()
+
+        k = np.arange(1, len(energy) + 1)
+
+        ax.plot(k, energy, "o-", ms=3)
+        ax.axhline(0.999, ls="--", color="k", alpha=0.7, label=f"$k = {r9999}$")
+        ax.axvline(r9999, ls=":", color="k", alpha=0.7)
+        ax.plot([r9999], [0.999], ms=4)
+        ax.set_xlabel("Rank truncation $k$")
+        ax.set_ylabel("Cumulative spectral energy")
+        ax.grid(visible=True, alpha=0.3)
         ax.legend(loc="lower right")
 
     # }}}
