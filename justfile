@@ -131,21 +131,35 @@ features:
 
 # {{{ autoencoder-dmd
 
-[doc("Train a DMD autoencoder and compute its features for each of the 48 matrices")]
-train_autoencoder_dmd filename:
-    mkdir -p data/ae-dmd
+[private]
+train_autoencoder_dmd filename *ARGS:
     stem=$(basename {{ filename }} .npz); \
+    mkdir -p data/ae-dmd/$stem; \
     for idx in $(seq -w 0 47); do \
-        out=data/ae-dmd/$stem-m$idx; \
+        out=data/ae-dmd/$stem/$stem-m$idx; \
         {{ PYTHON }} experiments/nn-autoencoder-dmd.py \
             --device cuda --force -o $out.npz \
             --seed 0 \
-            --resolution 64 --epochs 40 --batch-size 1024 --dmd-subset 1024 \
+            --resolution 64 --epochs 60 --batch-size 1024 --dmd-subset 1024 \
             --maxit 32 --c-features 8 --c-depth 2 \
+            {{ ARGS }} \
             train --dataidx $idx {{ filename }} || exit 1; \
         {{ PYTHON }} experiments/nn-autoencoder-dmd.py \
             --device cuda --force --features \
             infer $out.pkl || exit 1; \
     done
+
+[doc("Train a DMD autoencoder and compute its features for each of the 48 matrices")]
+train:
+    @just train_autoencoder_dmd data/Emotion_LR_Task.npz
+    @just train_autoencoder_dmd data/Gambling_LR_Task.npz
+    @just train_autoencoder_dmd data/Language_LR_Task.npz
+    @just train_autoencoder_dmd data/Relational_LR_Task.npz
+    @just train_autoencoder_dmd data/Rest_LR_Task.npz
+    @just train_autoencoder_dmd data/Social_LR_Task.npz
+    @just train_autoencoder_dmd data/WM_LR_Task.npz
+    @just train_autoencoder_dmd data/Structural_LR.npz \
+        --resolution 128 \
+        --bbox '-0.8' '0.3' '-0.55' '0.55'
 
 # }}}
