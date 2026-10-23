@@ -1509,73 +1509,67 @@ def infer(
 # {{{ merge
 
 
+def _natural_sort_key(name: str) -> str:
+    return re.sub(r"(\d+)", lambda match: match.group(1).zfill(20), name)
+
+
 def merge(
-    filenames: Sequence[pathlib.Path],
+    indirs: Sequence[pathlib.Path],
     *,
-    indir: pathlib.Path | None = None,
+    pattern: str = "*-features.npz",
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
 ) -> int:
-    """Merge the features written by ``infer --features`` into a single file.
-
-    For each of the datasets in *filenames*, this reads the features of all the
-    matrices from ``{indir}/{stem}-m{i}-features.npz``. The result has the same
-    format as the files written by ``make-features.py``.
-    """
-    if not filenames:
-        log.warning("No files given.")
+    if not indirs:
+        log.warning("No directories given.")
         return 0
 
-    if indir is None:
-        indir = filenames[0].parent / "ae-dmd"
-
     if outfile is None:
-        outfile = filenames[0].parent / "dataset-features-ae-dmd.npz"
+        outfile = indirs[0].parent / "dataset-features-ae-dmd.npz"
     outfile = outfile.with_suffix(".npz")
 
     if not overwrite and outfile.exists():
         log.error("File already exists (use --force to overwrite): '%s'.", outfile)
         return 1
 
-    datasets: dict[str, np.ndarray] = {}
-    starts: np.ndarray | None = None
-    descrs: np.ndarray | None = None
+    datasets = {}
+    starts = None
+    descrs = None
 
-    for filename in filenames:
-        pattern = re.compile(rf"{re.escape(filename.stem)}-m(\d+)-features\.npz")
-        found = {
-            int(m.group(1)): path
-            for path in indir.glob(f"{filename.stem}-m*-features.npz")
-            if (m := pattern.fullmatch(path.name))
-        }
+    for indir in indirs:
+        if not indir.is_dir():
+            log.error("Not a directory: '%s'.", indir)
+            return 1
 
-        nmatrices = len(found)
-        if nmatrices == 0 or set(found) != set(range(nmatrices)):
-            log.error(
-                "Features for '%s' in '%s' are missing or not contiguous: %s",
-                filename.stem,
-                indir,
-                sorted(found),
-            )
+        name = indir.name
+        if name in datasets:
+            log.error("Duplicate dataset name: '%s'.", name)
+            return 1
+
+        found = sorted(
+            indir.glob(pattern), key=lambda path: _natural_sort_key(path.name)
+        )
+        if not found:
+            log.error("No files matching '%s' in '%s'.", pattern, indir)
             return 1
 
         xs = []
-        for i in range(nmatrices):
-            data = np.load(found[i])
-            if starts is None:
-                starts, descrs = data["starts"], data["descrs"]
+        for filename in found:
+            with np.load(filename) as data:
+                if starts is None:
+                    starts, descrs = data["starts"], data["descrs"]
 
-            if not (
-                np.array_equal(data["starts"], starts)
-                and np.array_equal(data["descrs"], descrs)
-            ):
-                log.error("Inconsistent feature groups: '%s'.", found[i])
-                return 1
+                if not (
+                    np.array_equal(data["starts"], starts)
+                    and np.array_equal(data["descrs"], descrs)
+                ):
+                    log.error("Inconsistent feature groups: '%s'.", filename)
+                    return 1
 
-            xs.append(data["x"])
+                xs.append(data["x"])
 
-        datasets[filename.stem] = np.stack(xs)
-        log.info("Gathered %d matrices for '%s'.", nmatrices, filename.stem)
+        datasets[name] = np.stack(xs)
+        log.info("Gathered %d matrices for '%s'.", len(xs), name)
 
     np.savez(outfile, datasets=datasets, starts=starts, descrs=descrs)
     log.info("Saved merged features: '%s'.", outfile)
@@ -1690,16 +1684,22 @@ if __name__ == "__main__":
         "merge",
         formatter_class=parser.formatter_class,
         description=(
-            "Merge the features written by 'infer --features' for all the matrices "
-            "of the given datasets into a single file for make-features.py consumers."
+            "Merge the features written by 'infer --features' into a single file "
+            "for make-features.py consumers. Each given directory is treated as one "
+            "dataset (class), named after the directory, and all its matching files "
+            "are stacked together."
         ),
     )
-    subparser.add_argument("filenames", nargs="+", type=pathlib.Path)
     subparser.add_argument(
-        "--indir",
+        "indirs",
+        nargs="+",
         type=pathlib.Path,
-        default=None,
-        help="Directory with the features (default: 'ae-dmd' next to the first file)",
+        help="Directory containing the features of a single dataset",
+    )
+    subparser.add_argument(
+        "--pattern",
+        default="*-features.npz",
+        help="Glob pattern used to find the feature files in each directory",
     )
 
     args = parser.parse_args()
@@ -1734,8 +1734,8 @@ if __name__ == "__main__":
         elif args.command == "merge":
             raise SystemExit(
                 merge(
-                    args.filenames,
-                    indir=args.indir,
+                    args.indirs,
+                    pattern=args.pattern,
                     outfile=args.outfile,
                     overwrite=args.force,
                 )
