@@ -118,6 +118,12 @@ make_features name *FILES:
         --features {{ name }} \
         {{ FILES }}
 
+[doc("Construct DMD autoencoder features from trained models")]
+make_ae_features dirname:
+    {{ PYTHON }} experiments/nn-autoencoder-dmd.py --force \
+        --outfile data/dataset-features-ae-dmd.npz \
+        merge {{ dirname }}/*
+
 [doc("Construct all features")]
 features:
     @just make_features matrix data/*_LR_*.npz data/Structural_LR.npz
@@ -126,6 +132,7 @@ features:
     @just make_features sgraph data/*_LR_*.npz data/Structural_LR.npz
     @just make_features dmd data/*_LR_*.npz data/Structural_LR.npz
     @just make_features fourier data/task-*-fractal.npz data/structural-fractal.npz
+    @just make_ae_features data/ae-dmd
 
 # }}}
 
