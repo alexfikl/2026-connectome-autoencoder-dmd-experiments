@@ -778,7 +778,7 @@ def compute_features(
 
     The latent basis is arbitrary (every matrix has its own encoder), so the
     features are either invariant to it or are lifted to the state space, where
-    the ROI coordinates are shared between matrices.
+    the node coordinates are shared between matrices.
 
     * ``eigvals``: the eigenvalues of the operator ``dmdc.A``, sorted by decreasing
       modulus.
@@ -787,9 +787,13 @@ def compute_features(
       the (physical) control, on the grid, and its (mean, std, median, p90, max).
     * ``inset_fraction``: fraction of the grid predicted in the set (decoded final
       norm below the escape radius). The following describe the decoded final states
-      of these points, which approximate the attractors in the ROI space.
-    * ``attractor_roi``: ``(d,)`` mean over the points of the per-ROI magnitude
-      ``|z_i|`` of the final state.
+      of these points, which approximate the attractors in the node space.
+    * ``attractor_node_magnitude``: ``(d,)`` mean over the points of the per-node
+      magnitude ``|z_i|`` of the final state.
+    * ``attractor_node_phase``: ``(2, d)`` mean over the points of the unit phasor
+      ``z_i / |z_i| * conj(c / |c|)``, i.e. the phase of each node relative to the
+      control, as its (cos, sin) components. The modulus of the mean is the
+      coherence of the phase over the points.
     * ``attractor_energy``: the first 8 normalized squared singular values of the
       final states (uncentered), i.e. how many directions the attractors span.
     """
@@ -835,16 +839,25 @@ def compute_features(
 
         inset = norm < model.escape_radius
         final = states[inset].cpu().to(torch.float64)
+        c_inset = c.detach()[inset].cpu().to(torch.float64)
 
     nenergy = 8
     inset_fraction = torch.tensor(float(inset.float().mean()), device="cpu")
-    attractor_roi = torch.zeros(model.input_size, dtype=torch.float64, device="cpu")
+    nnodes = model.input_size
+    attractor_node_magnitude = torch.zeros(nnodes, dtype=torch.float64, device="cpu")
+    attractor_node_phase = torch.zeros((2, nnodes), dtype=torch.float64, device="cpu")
     attractor_energy = torch.zeros(nenergy, dtype=torch.float64, device="cpu")
 
     if final.shape[0] > 1:
-        attractor_roi = torch.linalg.vector_norm(
-            final.reshape(final.shape[0], -1, 2), dim=-1
-        ).mean(dim=0)
+        z = torch.view_as_complex(final.reshape(final.shape[0], -1, 2).contiguous())
+        zc = torch.view_as_complex(c_inset.contiguous())
+
+        attractor_node_magnitude = z.abs().mean(dim=0)
+
+        phasor = z / z.abs().clamp(min=1.0e-12)
+        phasor = phasor * (zc / zc.abs().clamp(min=1.0e-12)).conj()[:, None]
+        phasor = phasor.mean(dim=0)
+        attractor_node_phase = torch.stack([phasor.real, phasor.imag])
 
         energy = torch.linalg.svdvals(final) ** 2
         energy = energy[:nenergy] / energy.sum()
@@ -857,7 +870,8 @@ def compute_features(
         "jac_map": jac.reshape(resolution, resolution).numpy(),
         "jac_stats": jac_stats.numpy(),
         "inset_fraction": inset_fraction.numpy(),
-        "attractor_roi": attractor_roi.numpy(),
+        "attractor_node_magnitude": attractor_node_magnitude.numpy(),
+        "attractor_node_phase": attractor_node_phase.numpy(),
         "attractor_energy": attractor_energy.numpy(),
     }
 
@@ -878,7 +892,9 @@ def make_feature_vector(
     groups = {
         "Leading eigenvalue moduli": moduli,
         "Control sensitivity (log)": np.log(feats["jac_stats"]),
-        "Attractor ROI magnitudes": feats["attractor_roi"],
+        "Attractor node magnitudes": feats["attractor_node_magnitude"],
+        "Attractor node phase (cos)": feats["attractor_node_phase"][0],
+        "Attractor node phase (sin)": feats["attractor_node_phase"][1],
         "Attractor energy": feats["attractor_energy"],
     }
 
