@@ -877,12 +877,15 @@ def compute_features(
 
 
 def make_feature_vector(
-    feats: Mapping[str, np.ndarray], *, neig: int = 8
+    feats: Mapping[str, np.ndarray], *, neig: int = 3, nenergy: int = 3
 ) -> tuple[np.ndarray, np.ndarray, tuple[str, ...]]:
-    """Gather the stable features of :func:`compute_features` in a single vector.
+    """Gather the useful features of :func:`compute_features` in a single vector.
 
     The format matches ``make-features.py``: the feature vector, the boundaries of
-    the feature groups (``ngroups + 1``) and a description of each group.
+    the feature groups (``ngroups + 1``) and a description of each group. The node
+    magnitudes carry most of the information; the small groups are secondary. The
+    node phases and ``inset_fraction`` are left out, since they are nearly constant
+    and a shape quantity, respectively.
     """
     # NOTE: the operator is real, so the eigenvalues come in conjugate pairs that
     # have the same modulus; we only keep one of each
@@ -893,9 +896,7 @@ def make_feature_vector(
         "Leading eigenvalue moduli": moduli,
         "Control sensitivity (log)": np.log(feats["jac_stats"]),
         "Attractor node magnitudes": feats["attractor_node_magnitude"],
-        "Attractor node phase (cos)": feats["attractor_node_phase"][0],
-        "Attractor node phase (sin)": feats["attractor_node_phase"][1],
-        "Attractor energy": feats["attractor_energy"],
+        "Attractor energy": feats["attractor_energy"][:nenergy],
     }
 
     x = np.concatenate([np.ravel(v) for v in groups.values()]).astype(np.float64)
