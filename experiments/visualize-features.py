@@ -11,11 +11,10 @@ from typing import Any, Literal, get_args
 import numpy as np
 
 from commonlib import FeatureDataset, load_feature_datasets
-from nneuroutil.helpers import module_logger
 from nneuroutil.typing import Array1D, Array2D
 from nneuroutil.visualization import figure
 
-log = module_logger("lib.visualize_features")
+log = logging.getLogger("lib.visualize_features")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\

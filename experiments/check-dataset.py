@@ -9,10 +9,9 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from nneuroutil.helpers import module_logger
 from nneuroutil.typing import Array1D, Array3D, Array4D
 
-log = module_logger("lib.check_dataset")
+log = logging.getLogger("lib.check_dataset")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\

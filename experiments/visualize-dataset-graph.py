@@ -12,11 +12,10 @@ from typing import Any
 import numpy as np
 
 import commonlib  # ruff: ignore[unused-import]
-from nneuroutil.helpers import module_logger
 from nneuroutil.visualization import figure
 from orbitkit.typing import Array1D, Array2D, Array3D
 
-log = module_logger("lib.visualize_dataset_graph")
+log = logging.getLogger("lib.visualize_dataset_graph")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\

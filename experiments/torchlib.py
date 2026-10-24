@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -13,12 +14,12 @@ from torch import nn
 from torch.utils.data import TensorDataset
 
 from nneuroutil.data import SlicedDataLoader
-from nneuroutil.helpers import TicTocTimer, module_logger
+from nneuroutil.helpers import TicTocTimer
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-log = module_logger("lib.torchlib")
+log = logging.getLogger("lib.torchlib")
 
 # {{{ MultilayerPerceptron
 

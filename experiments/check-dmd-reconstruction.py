@@ -10,7 +10,7 @@ from typing import Literal, cast
 import numpy as np
 import torch
 
-from nneuroutil.helpers import FuzzyChoiceAction, module_logger, tictoc
+from nneuroutil.helpers import FuzzyChoiceAction, tictoc
 from nneuroutil.torch_extras import (
     TorchMemoryTracker,
     available_device_names,
@@ -18,7 +18,7 @@ from nneuroutil.torch_extras import (
 )
 from nneuroutil.visualization import figure, make_colorbar_axes
 
-log = module_logger("lib.dmd")
+log = logging.getLogger("lib.dmd")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\

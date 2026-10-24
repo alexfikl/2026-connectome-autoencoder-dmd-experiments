@@ -12,11 +12,10 @@ import numpy as np
 
 from commonlib import FeatureDataset, load_feature_datasets
 from nneuroutil.classifier import AnovaScores, compute_anova_scores
-from nneuroutil.helpers import module_logger
 from nneuroutil.typing import Array1D, Array2D, Array3D
 from nneuroutil.visualization import figure, make_colorbar_axes
 
-log = module_logger("lib.visualize_feature_separability")
+log = logging.getLogger("lib.visualize_feature_separability")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\

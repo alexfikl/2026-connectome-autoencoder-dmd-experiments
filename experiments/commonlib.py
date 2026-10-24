@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import math
 import os
 import pathlib
@@ -16,13 +17,14 @@ import array_api_compat
 import numpy as np
 
 from nneuroutil.array_api_extras import interleave
-from nneuroutil.helpers import FuzzyChoiceAction, dc_stringify, module_logger, tictoc
+from nneuroutil.helpers import FuzzyChoiceAction, dc_stringify, set_up_logging, tictoc
 from nneuroutil.typing import Array1D, Array2D, Array3D, Array4D
 
 if TYPE_CHECKING:
     import torch
 
-log = module_logger("lib")
+set_up_logging("INFO")
+log = logging.getLogger("lib")
 
 # {{{ matplotlib
 

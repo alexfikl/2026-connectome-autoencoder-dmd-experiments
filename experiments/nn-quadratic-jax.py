@@ -17,10 +17,10 @@ from flax import nnx
 
 from commonlib import Config, make_argument_parser
 from nneuroutil.flax_extras import JaxMemoryTracker, available_device_names
-from nneuroutil.helpers import machine_info, module_logger, to_complex
+from nneuroutil.helpers import machine_info, to_complex
 from nneuroutil.visualization import figure, make_colorbar_axes
 
-log = module_logger("lib.quadratic_network")
+log = logging.getLogger("lib.quadratic_network")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\

@@ -9,9 +9,7 @@ from typing import Any, TypeAlias
 
 import numpy as np
 
-from nneuroutil.helpers import module_logger
-
-log = module_logger("lib.check_matrix_cdf")
+log = logging.getLogger("lib.check_matrix_cdf")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\

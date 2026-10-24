@@ -21,7 +21,6 @@ from nneuroutil.dmdc import DenseDMDc, build_dense_dmdc
 from nneuroutil.helpers import (
     TicTocTimer,
     machine_info,
-    module_logger,
 )
 from nneuroutil.torch_extras import (
     ComplexLinear,
@@ -32,7 +31,7 @@ from nneuroutil.torch_extras import (
 )
 from nneuroutil.visualization import figure
 
-log = module_logger("lib.autoencoder_network")
+log = logging.getLogger("lib.autoencoder_network")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\

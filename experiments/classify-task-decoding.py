@@ -11,11 +11,11 @@ import numpy as np
 import torch
 
 from commonlib import load_feature_datasets
-from nneuroutil.helpers import FuzzyChoiceAction, module_logger
+from nneuroutil.helpers import FuzzyChoiceAction
 from nneuroutil.torch_extras import available_device_names, torch_default_device
 from nneuroutil.visualization import figure, make_colorbar_axes
 
-log = module_logger("lib.autoencoder_network")
+log = logging.getLogger("lib.autoencoder_network")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\

@@ -15,7 +15,7 @@ from torch import nn
 from torch.utils.data import TensorDataset
 
 from commonlib import Config, make_argument_parser
-from nneuroutil.helpers import machine_info, module_logger
+from nneuroutil.helpers import machine_info
 from nneuroutil.torch_extras import (
     TorchMemoryTracker,
     available_device_names,
@@ -23,7 +23,7 @@ from nneuroutil.torch_extras import (
 )
 from nneuroutil.visualization import figure
 
-log = module_logger("lib.autoencoder_network")
+log = logging.getLogger("lib.autoencoder_network")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\

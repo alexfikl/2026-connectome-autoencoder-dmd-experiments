@@ -14,7 +14,7 @@ from torch import nn
 from torch.utils.data import TensorDataset
 
 from commonlib import Config, make_argument_parser
-from nneuroutil.helpers import machine_info, module_logger
+from nneuroutil.helpers import machine_info
 from nneuroutil.torch_extras import (
     TorchMemoryTracker,
     available_device_names,
@@ -22,7 +22,7 @@ from nneuroutil.torch_extras import (
 )
 from nneuroutil.visualization import figure, make_colorbar_axes
 
-log = module_logger("lib.quadratic_network")
+log = logging.getLogger("lib.quadratic_network")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
