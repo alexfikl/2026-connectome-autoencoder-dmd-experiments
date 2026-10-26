@@ -15,7 +15,7 @@ from torch.utils.data import TensorDataset
 
 from commonlib import Config, make_argument_parser
 from nneuroutil.helpers import machine_info
-from nneuroutil.torch_extras import (
+from nneuroutil.interop.torch import (
     TorchMemoryTracker,
     available_device_names,
     torch_default_device,
@@ -59,7 +59,7 @@ class QuadraticNetwork(nn.Module):
         self.output_size = output_size
         self.dtype = dtype
 
-        from nneuroutil.torch_extras import (
+        from nneuroutil.interop.torch import (
             Bias,
             ComplexLinear,
             ComplexQuadratic,

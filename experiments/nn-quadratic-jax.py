@@ -16,8 +16,8 @@ import optax
 from flax import nnx
 
 from commonlib import Config, make_argument_parser
-from nneuroutil.flax_extras import JaxMemoryTracker, available_device_names
 from nneuroutil.helpers import machine_info, to_complex
+from nneuroutil.interop.flax import JaxMemoryTracker, available_device_names
 from nneuroutil.visualization import figure, make_colorbar_axes
 
 log = logging.getLogger("lib.quadratic_network")
@@ -64,7 +64,7 @@ class QuadraticNetwork(nnx.Module):
         self.output_size = output_size
         self.dtype = dtype
 
-        from nneuroutil.flax_extras import (
+        from nneuroutil.interop.flax import (
             Bias,
             ComplexLinear,
             ComplexQuadratic,
@@ -726,7 +726,7 @@ if __name__ == "__main__":
     if not args.quiet:
         log.setLevel(logging.INFO)
 
-    from nneuroutil.flax_extras import jax_default_device, set_jax_config
+    from nneuroutil.interop.flax import jax_default_device, set_jax_config
 
     with jax_default_device(args.device):
         set_jax_config()

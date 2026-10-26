@@ -17,7 +17,7 @@ from torch.utils.data import TensorDataset
 
 from commonlib import Config, make_argument_parser
 from nneuroutil.helpers import machine_info
-from nneuroutil.torch_extras import (
+from nneuroutil.interop.torch import (
     TorchMemoryTracker,
     available_device_names,
     torch_default_device,
@@ -78,7 +78,7 @@ class Autoencoder(nn.Module):
 
         # {{{ construct autoencoder
 
-        from nneuroutil.torch_extras import ComplexLinear, kaiming_uniform_
+        from nneuroutil.interop.torch import ComplexLinear, kaiming_uniform_
 
         def make_linear_layer(
             n_in: int,

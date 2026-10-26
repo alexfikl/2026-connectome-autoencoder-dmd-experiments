@@ -12,7 +12,7 @@ import torch
 
 from commonlib import load_feature_datasets
 from nneuroutil.helpers import FuzzyChoiceAction
-from nneuroutil.torch_extras import available_device_names, torch_default_device
+from nneuroutil.interop.torch import available_device_names, torch_default_device
 from nneuroutil.visualization import figure, make_colorbar_axes
 
 log = logging.getLogger("lib.autoencoder_network")

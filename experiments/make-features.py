@@ -311,7 +311,7 @@ def make_dmd_features(
     try:  # ruff: ignore[too-many-statements-in-try-clause]
         import torch
 
-        from nneuroutil.torch_extras import available_device_names
+        from nneuroutil.interop.torch import available_device_names
 
         if any(dev.startswith("cuda") for dev in available_device_names()):
             torch.set_default_device("cuda")

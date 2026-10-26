@@ -780,7 +780,7 @@ def compute_trajectory_mask(
 
     With both *escape_radius* and *rtol* unset nothing is masked.
     """
-    from nneuroutil.array_api_extras import deinterleave
+    from nneuroutil.array_api_extras import view_as_complex
 
     if xp is None:
         xp = array_api_compat.array_namespace(x)
@@ -788,14 +788,7 @@ def compute_trajectory_mask(
     batch_size, window_size = x.shape[:2]
     device = array_api_compat.device(x)
 
-    if array_api_compat.is_torch_array(x):
-        from nneuroutil.torch_extras import view_as_complex
-
-        zx = view_as_complex(x)
-    else:
-        zx_re, zx_im = deinterleave(x)
-        zx = zx_re + 1j * zx_im
-
+    zx = view_as_complex(x)
     zn = xp.sum(xp.real(zx) ** 2 + xp.imag(zx) ** 2, axis=-1)
 
     if escape_radius is None:

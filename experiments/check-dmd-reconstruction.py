@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from nneuroutil.helpers import FuzzyChoiceAction, tictoc
-from nneuroutil.torch_extras import (
+from nneuroutil.interop.torch import (
     TorchMemoryTracker,
     available_device_names,
     torch_default_device,

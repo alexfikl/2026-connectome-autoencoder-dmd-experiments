@@ -22,7 +22,7 @@ from nneuroutil.helpers import (
     TicTocTimer,
     machine_info,
 )
-from nneuroutil.torch_extras import (
+from nneuroutil.interop.torch import (
     ComplexLinear,
     ComplexQuadratic,
     TorchMemoryTracker,
