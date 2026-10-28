@@ -38,7 +38,7 @@ SCRIPT_LONG_HELP = f"""\
 Trains or runs inference with a DMD Autoencoder: encode -> evolve linearly in
 latent space -> decode.
 
-The state is represented by polar observables: a unit direction in a PCA basis
+The state is represented by polar observables: a unit direction in a POD basis
 and the log of its norm. The latent operator is a ridge DMD fit on the encoded
 training transitions. Training is staged: reconstruction only, then one-step
 latent linearity, then multi-step prediction with increasing horizons.
@@ -82,8 +82,8 @@ class DMDConfig(Config):
     gamma_lin: float = 1.0
     gamma_pre: float = 1.0
 
-    # number of PCA directions, latent size, and hidden width of the networks
-    npca: int = 24
+    # number of POD directions, latent size, and hidden width of the networks
+    npod: int = 24
     latent_size: int = 32
     hidden_size: int = 128
     # number of complex features of the control c (0 disables the branch) and the
@@ -123,7 +123,7 @@ def make_stages(config: DMDConfig) -> tuple[Stage, ...]:
 
 class Observables(NamedTuple):
     direction: torch.Tensor
-    """Unit direction in the PCA basis of shape ``(batch, steps, npca)``.
+    """Unit direction in the POD basis of shape ``(batch, steps, npod)``.
 
     Pinned (clipped) and zero states have a zero direction.
     """
@@ -174,7 +174,7 @@ class DMDAutoencoder(nn.Module):
         self,
         input_size: int,
         *,
-        npca: int,
+        npod: int,
         latent_size: int,
         hidden_size: int,
         escape_radius: float,
@@ -188,7 +188,7 @@ class DMDAutoencoder(nn.Module):
         super().__init__()
 
         self.input_size = input_size
-        self.npca = npca
+        self.npod = npod
         self.latent_size = latent_size
         self.escape_radius = escape_radius
         self.dmd_method = dmd_method
@@ -198,9 +198,9 @@ class DMDAutoencoder(nn.Module):
         # NOTE: log-norm that pinned states are mapped to
         self.logn_clip = float(np.log(escape_radius + LOG_EPS) / LOG_SCALE)
 
-        # PCA basis of the (real, interleaved) states; see `fit_observables`
+        # POD basis of the (real, interleaved) states; see `fit_observables`
         self.register_buffer(
-            "basis", torch.zeros(2 * input_size, npca, device=device, dtype=dtype)
+            "basis", torch.zeros(2 * input_size, npod, device=device, dtype=dtype)
         )
 
         # NOTE: the states are polynomials in the (complex) control `c`, so a
@@ -224,7 +224,7 @@ class DMDAutoencoder(nn.Module):
 
         self.encoder = nn.Sequential(
             nn.Linear(
-                npca + 3 + 2 * c_features, hidden_size, device=device, dtype=dtype
+                npod + 3 + 2 * c_features, hidden_size, device=device, dtype=dtype
             ),
             nn.Tanh(),
             nn.Linear(hidden_size, hidden_size, device=device, dtype=dtype),
@@ -234,13 +234,13 @@ class DMDAutoencoder(nn.Module):
         self.decoder_mlp = nn.Sequential(
             nn.Linear(latent_size, hidden_size, device=device, dtype=dtype),
             nn.Tanh(),
-            nn.Linear(hidden_size, npca + 1, device=device, dtype=dtype),
+            nn.Linear(hidden_size, npod + 1, device=device, dtype=dtype),
         )
-        self.decoder_lin = nn.Linear(latent_size, npca + 1, device=device, dtype=dtype)
+        self.decoder_lin = nn.Linear(latent_size, npod + 1, device=device, dtype=dtype)
 
     @torch.no_grad()
     def fit_observables(self, x: torch.Tensor) -> None:
-        """Compute the PCA basis from the unpinned states in ``x``.
+        """Compute the POD basis from the unpinned states in ``x``.
 
         The states are not centered, so that ``z_0 = 0`` stays at the origin.
         """
@@ -248,7 +248,7 @@ class DMDAutoencoder(nn.Module):
         _, _, vh = torch.linalg.svd(x[xn <= self.escape_radius], full_matrices=False)
 
         basis = cast(torch.Tensor, self.basis)
-        basis.copy_(vh[: self.npca].T)
+        basis.copy_(vh[: self.npod].T)
 
     def observe(self, x: torch.Tensor) -> Observables:
         """Polar observables of the interleaved real states ``x``."""
@@ -282,12 +282,12 @@ class DMDAutoencoder(nn.Module):
 
     def decode(self, g: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         out = self.decoder_mlp(g) + self.decoder_lin(g)
-        direction = out[..., : self.npca]
+        direction = out[..., : self.npod]
         direction = direction / torch.linalg.vector_norm(
             direction, dim=-1, keepdim=True
         ).clamp(min=1.0e-6)
 
-        return direction, out[..., self.npca]
+        return direction, out[..., self.npod]
 
     def fit_dmd(self, X: torch.Tensor, Y: torch.Tensor) -> DenseDMDc[Any]:
         """Fit the affine latent dynamics ``Y = X A + b`` from transitions ``X -> Y``.
@@ -723,7 +723,7 @@ def _grid_control(
 def _encode_origin(model: DMDAutoencoder, c: torch.Tensor) -> torch.Tensor:
     """Encode the initial state ``z_0 = 0`` for each of the controls *c*."""
     n = c.shape[0]
-    direction = torch.zeros((n, 1, model.npca), device=c.device, dtype=model.dtype)
+    direction = torch.zeros((n, 1, model.npod), device=c.device, dtype=model.dtype)
     logn = torch.full(
         (n, 1),
         float(np.log(LOG_EPS) / LOG_SCALE),
@@ -829,7 +829,7 @@ def compute_features(
     # {{{ attractors
 
     # NOTE: states of the in-set points at the end of the rollout, rebuilt from
-    # the decoded direction (unit, in the orthonormal PCA basis) and norm
+    # the decoded direction (unit, in the orthonormal POD basis) and norm
     with torch.no_grad():
         g_last = model.rollout(_encode_origin(model, c.detach()), dmdc, maxit)
         direction, logn = model.decode(g_last[:, -1])
@@ -1182,11 +1182,13 @@ def train(
     # NOTE: when resuming, the stored model configuration is used
     model_config: dict[str, Any]
     if checkpoint is not None:
-        model_config = checkpoint["model_config"]
+        model_config = checkpoint["model_config"].copy()
+        if "npca" in model_config and "npod" not in model_config:
+            model_config["npod"] = model_config.pop("npca")
     else:
         model_config = {
             "input_size": d,
-            "npca": config.npca,
+            "npod": config.npod,
             "latent_size": config.latent_size,
             "hidden_size": config.hidden_size,
             "c_features": config.c_features,
@@ -1439,9 +1441,11 @@ def infer(
 
     # {{{ load model
 
-    model = DMDAutoencoder(
-        **checkpoint["model_config"], device=device, dtype=torch.float32
-    )
+    model_config = checkpoint["model_config"].copy()
+    if "npca" in model_config and "npod" not in model_config:
+        model_config["npod"] = model_config.pop("npca")
+
+    model = DMDAutoencoder(**model_config, device=device, dtype=torch.float32)
     model.load_state_dict(checkpoint["model"])
     model.eval()
 
@@ -1638,10 +1642,10 @@ if __name__ == "__main__":
         help="Number of (complex linear, complex square) blocks for c (default: 1)",
     )
     parser.add_argument(
-        "--npca",
+        "--npod",
         type=int,
         default=None,
-        help="Number of PCA directions used to represent the state (default: 24)",
+        help="Number of POD directions used to represent the state (default: 24)",
     )
     parser.add_argument(
         "--latent-size",
