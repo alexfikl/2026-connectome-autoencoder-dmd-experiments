@@ -14,7 +14,7 @@ contourpy==1.4.0 ; python_full_version >= '3.12'
     # via matplotlib
 cycler==0.12.1
     # via matplotlib
-fonttools==4.67.0
+fonttools==4.68.0
     # via matplotlib
 joblib==1.6.0
     # via scikit-learn
@@ -28,13 +28,13 @@ matplotlib==3.11.2
     #   scienceplots
 mdurl==0.1.2
     # via markdown-it-py
-narwhals==2.27.1
+narwhals==2.28.0
     # via scikit-learn
 networkx==3.6.1 ; python_full_version < '3.12'
     # via fractal-dmd-autoencoder (pyproject.toml)
 networkx==3.7 ; python_full_version >= '3.12'
     # via fractal-dmd-autoencoder (pyproject.toml)
-nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@41ab7fcaccd947da6eabd0692bb274f6f2bbd6b9#egg=nneuroutil
+nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@18cff189b43c9359cd7392c6e4360270805c34cf#egg=nneuroutil
     # via fractal-dmd-autoencoder (pyproject.toml)
 numpy==2.4.6 ; python_full_version < '3.12'
     # via
@@ -91,5 +91,5 @@ threadpoolctl==3.7.0
     # via scikit-learn
 typing-extensions==4.16.0
     # via nneuroutil
-tzdata==2026.5
+tzdata==2026.6
     # via python-dateutil
