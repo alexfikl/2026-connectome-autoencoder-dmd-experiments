@@ -7,9 +7,10 @@ import logging
 import pathlib
 from typing import Any, NamedTuple
 
+import array_api_compat
 import numpy as np
 
-from nneuroutil.typing import Array1D, Array3D, Array4D
+from nneuroutil.typing import Array1D, Array2D, Array3D, Array4D
 
 log = logging.getLogger("lib.check_dataset")
 
@@ -21,9 +22,16 @@ Constructs the dataset in the same way as autoencoder-dmd-quadratic-network.py
 and plots statistics about it: how many points escape, how fast they escape and
 how many steps are spent in the pinned (clipped) state.
 
+With ``--all``, it instead computes the effective rank (at a few cumulative
+spectral energy thresholds) for every matrix in the file and plots it against
+the matrix index. Pass ``--cache FILE`` to load the data for the plots from a
+previously saved file instead of recomputing it.
+
 Example:
 
     > {SCRIPT_PATH.name} task-emotion.npz
+    > {SCRIPT_PATH.name} --all task-emotion.npz
+    > {SCRIPT_PATH.name} --all --cache task-emotion-cache.npz task-empotion.npz
 """
 
 
@@ -31,7 +39,7 @@ Example:
 
 
 class DatasetStatistics(NamedTuple):
-    escape_time: Array3D[np.integer[Any]]
+    escape_time: Array2D[np.integer[Any]]
     """First iteration at which each trajectory escaped (``n_levels`` if never)."""
     escaped: Array3D[np.bool]
     """Boolean mask of pinned (clipped) states of shape ``(n_levels, nx, ny)``."""
@@ -82,77 +90,231 @@ def compute_cumulative_energy(
     return np.cumsum(s_sq) / (np.sum(s_sq) + 1e-15)
 
 
+def compute_effective_rank(
+    z: Array4D[np.complexfloating[Any]],
+    escaped: Array3D[np.bool],
+    *,
+    thresholds: tuple[float, ...] = (0.999, 0.9999, 0.99999),
+) -> Array1D[np.integer[Any]]:
+    """Compute the effective rank of the real interleaved snapshot matrix.
+
+    :arg z: trajectories of shape ``(n_levels, nx, ny, d)``.
+    :arg escaped: boolean mask of shape ``(n_levels, nx, ny)`` denoting pinned
+        states.
+    :arg thresholds: cumulative spectral energy thresholds in ``(0, 1)``.
+    """
+    threshold = np.asarray(thresholds, dtype=np.float64)
+    if np.any(threshold <= 0.0) or np.any(threshold >= 1.0):
+        raise ValueError(f"'thresholds' must be in (0, 1): {thresholds}")
+
+    # NOTE: same real interleaved layout as nn-autoencoder-dmd.py
+    active = z[np.logical_not(escaped)]
+    snapshots = np.stack([active.real, active.imag], axis=-1)
+    snapshots = snapshots.reshape(snapshots.shape[0], -1)
+
+    s = np.linalg.svd(snapshots, compute_uv=False)
+    s_sq = s**2
+    energy = np.cumsum(s_sq) / (np.sum(s_sq) + 1e-15)
+
+    return np.minimum(np.searchsorted(energy, threshold) + 1, energy.size)
+
+
 # }}}
 
-# {{{ main
+# {{{ compute effective ranks for a whole dataset
 
 
-def main(
-    filename: pathlib.Path,
+def load_cache(cache: pathlib.Path, keys: tuple[str, ...]) -> dict[str, Any] | None:
+    """Load the given *keys* from a cache file."""
+    if not cache.exists():
+        log.error("Cache file does not exist: '%s'.", cache)
+        return None
+
+    with np.load(cache) as data:
+        missing = [key for key in keys if key not in data]
+        if missing:
+            log.error("Cache file '%s' does not contain %s.", cache, missing)
+            return None
+
+        return {key: data[key] for key in keys}
+
+
+def compute_ranks(
+    matrices: Array3D[np.number[Any]],
     *,
-    datakey: str = "matrices",
-    dataidx: int = 5,
     bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
     escape_radius: float = 10.0,
     resolution: int = 128,
     maxit: int = 32,
-    min_escape_iters: int | None = None,
-    basename: pathlib.Path | None = None,
+    thresholds: tuple[float, ...] = (0.999, 0.9999, 0.99999),
+) -> Array2D[np.integer[Any]]:
+    """Compute the effective rank for every matrix in *matrices*."""
+    from commonlib import generate_timeseries
+
+    # NOTE: the dataset generation is the slow part, so we try to do it on the GPU
+    xp = array_api_compat.array_namespace(np.empty(0))
+    device = "cpu"
+    try:
+        import torch
+
+        from nneuroutil.interop.torch import available_device_names
+
+        if any(dev.startswith("cuda") for dev in available_device_names()):
+            xp = array_api_compat.array_namespace(torch.empty(0))
+            device = "cuda"
+    except ImportError:
+        pass
+
+    log.info("Generating dataset using '%s' (%s).", xp.__name__, device)
+
+    labels = [f"{100.0 * t:g}%" for t in thresholds]
+    ranks = np.empty((matrices.shape[0], len(thresholds)), dtype=np.int64)
+
+    for i, mat in enumerate(matrices):
+        cmat = xp.astype(xp.asarray(mat), xp.complex64)
+        cmat = array_api_compat.to_device(cmat, device)
+
+        z, _ = generate_timeseries(
+            cmat,
+            bbox=bbox,
+            escape_radius=escape_radius,
+            resolution=resolution,
+            # NOTE: we add 1 so that z.shape == (maxit + 1, nx, ny, d)
+            maxit=maxit + 1,
+            xp=xp,
+        )
+        z = np.asarray(array_api_compat.to_device(z, "cpu"))
+
+        stats = compute_statistics(z, escape_radius)
+        # NOTE: nn-autoencoder-dmd.py drops the last timestep (`x = z[:, :-1]`)
+        ranks[i] = compute_effective_rank(
+            z[:-1], stats.escaped[:-1], thresholds=thresholds
+        )
+        log.info(
+            "[%02d/%d] %s",
+            i + 1,
+            len(matrices),
+            "  ".join(
+                f"{label} = {rank:4d}"
+                for label, rank in zip(labels, ranks[i], strict=True)
+            ),
+        )
+
+        del z, stats
+
+    return ranks
+
+
+def compute_dataset_ranks(
+    matrices: Array3D[np.number[Any]],
+    *,
+    bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
+    escape_radius: float = 10.0,
+    resolution: int = 128,
+    maxit: int = 32,
+    thresholds: tuple[float, ...] = (0.999, 0.9999, 0.99999),
+    cache: pathlib.Path | None = None,
+    basename: pathlib.Path,
     overwrite: bool = False,
 ) -> int:
-    from commonlib import generate_timeseries, post_process_dataset
-    from nneuroutil.visualization import figure, make_colorbar_axes
+    """Compute (or load) and plot the effective rank for every matrix."""
+    from matplotlib.ticker import MaxNLocator
 
-    # {{{ validate inputs
+    from nneuroutil.visualization import figure
 
-    if not filename.exists():
-        log.error("File does not exist: '%s'.", filename)
+    if matrices.shape[1] != matrices.shape[2]:
+        log.error("Expected square matrices: %s.", matrices.shape)
         return 1
 
-    try:
-        data = np.load(filename)
-    except Exception:
-        log.error("Failed to load data from file: '%s'.", filename)
-        return 1
-
-    if datakey not in data:
-        log.error("File does not contain '%s' dataset: '%s'.", datakey, filename)
-        return 1
-
-    matrices = data[datakey]
-    if matrices.ndim != 3:
-        log.error("Expected a 3 dimensional array: %s.", matrices.shape)
-        return 1
-
-    if not 0 <= dataidx < matrices.shape[0]:
-        log.error("Index out of range: %d (max %d)", dataidx, matrices.shape[0] - 1)
-        return 1
-
-    mat = np.asarray(matrices[dataidx], dtype=np.complex64)
-    if mat.shape[0] != mat.shape[1]:
-        log.error("Expected a square matrix: %s.", mat.shape)
-        return 1
-
-    if min_escape_iters is None:
-        # NOTE: same as autoencoder-dmd-quadratic-network.py
-        min_escape_iters = 1 * (maxit + 1) // 4
-
-    if basename is None:
-        basename = filename.with_suffix("")
-
-    basename = basename.with_stem(
-        f"{basename.stem}-dataset-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}"
+    outfile = basename.with_stem(
+        f"{basename.stem}-energy-ranks-r{resolution:04d}-n{maxit:04d}"
     )
 
-    # }}}
+    if cache is not None:
+        data = load_cache(cache, ("ranks", "thresholds"))
+        if data is None:
+            return 1
 
-    # {{{ construct dataset (same as autoencoder-dmd-quadratic-network.py)
+        ranks = data["ranks"]
+        thresholds = tuple(data["thresholds"].tolist())
+        log.info("Loading ranks from '%s'.", cache)
+    else:
+        ranks = compute_ranks(
+            matrices,
+            bbox=bbox,
+            escape_radius=escape_radius,
+            resolution=resolution,
+            maxit=maxit,
+            thresholds=thresholds,
+        )
+        np.savez(
+            outfile.with_suffix(".npz"),
+            ranks=ranks,
+            thresholds=np.asarray(thresholds),
+            bbox=np.asarray(bbox),
+            escape_radius=escape_radius,
+            resolution=resolution,
+            maxit=maxit,
+        )
 
-    d = mat.shape[0]
-    n_levels = maxit + 1
-    max_z = (escape_radius + 1) / d**0.5
+    labels = [f"{100.0 * t:g}%" for t in thresholds]
+    positions = np.arange(1, len(labels) + 1)
 
-    z, _c = generate_timeseries(
+    with figure(outfile, overwrite=overwrite) as fig:
+        ax = fig.gca()
+
+        boxplot = ax.boxplot(
+            [ranks[:, j] for j in range(len(labels))],
+            positions=positions,
+            widths=0.5,
+            patch_artist=True,
+            showfliers=False,
+            showmeans=True,
+        )
+        for j, box in enumerate(boxplot["boxes"]):
+            box.set_facecolor(f"C{j}")
+            box.set_alpha(0.4)
+
+        rng = np.random.default_rng(0)
+        for j, position in enumerate(positions):
+            r = ranks[:, j]
+            ax.plot(
+                position + rng.uniform(-0.15, 0.15, size=r.size),
+                r,
+                "o",
+                ms=5,
+                alpha=0.6,
+                color=f"C{j}",
+            )
+
+        ax.set_xticks(positions)
+        ax.set_xticklabels(labels)
+        ax.set_xlabel("Cumulative energy threshold")
+        ax.set_ylabel("Effective rank")
+        ax.set_ylim((0, 2 * matrices.shape[1]))
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+    return 0
+
+
+# }}}
+
+# {{{ compute and plot dataset statistics
+
+
+def compute_dataset_statistics(
+    mat: Array2D[np.complexfloating[Any]],
+    *,
+    bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
+    escape_radius: float = 10.0,
+    resolution: int = 128,
+    maxit: int = 32,
+    min_escape_iters: int,
+) -> dict[str, Any]:
+    """Compute the data needed by the single-connectome plots."""
+    from commonlib import generate_timeseries
+
+    z, _ = generate_timeseries(
         mat,
         bbox=bbox,
         escape_radius=escape_radius,
@@ -162,19 +324,40 @@ def main(
         maxit=maxit + 1,
     )
 
-    # NOTE: this is what generate_timeseries_dataset uses to get the training mask
-    z_kept, kept = post_process_dataset(
-        z, escape_radius, interleaved=True, min_escape_iters=min_escape_iters
-    )
-    assert z_kept.shape[0] == np.sum(kept)
-
     stats = compute_statistics(z, escape_radius)
     escape_time = stats.escape_time
 
+    return {
+        "escape_time": escape_time,
+        "kept": np.asarray(escape_time) >= min_escape_iters,
+        "znorm": stats.znorm,
+        "energy": compute_cumulative_energy(z, stats.escaped),
+    }
+
+
+def plot_dataset_statistics(
+    basename: pathlib.Path,
+    *,
+    escape_time: Array2D[np.integer[Any]],
+    kept: Array2D[np.bool],
+    znorm: Array3D[np.floating[Any]],
+    energy: Array1D[np.floating[Any]],
+    d: int,
+    bbox: tuple[float, float, float, float],
+    escape_radius: float,
+    maxit: int,
+    min_escape_iters: int,
+    dataidx: int,
+    filename: pathlib.Path,
+    overwrite: bool = False,
+) -> None:
+    """Log the dataset statistics and plot them."""
+    from nneuroutil.visualization import figure, make_colorbar_axes
+
+    n_levels = maxit + 1
+    max_z = (escape_radius + 1) / d**0.5
     converged = escape_time == n_levels
     escapers = np.logical_not(converged)
-
-    # }}}
 
     # {{{ log statistics
 
@@ -245,14 +428,13 @@ def main(
     )
 
     if nconverged:
-        zconv = stats.znorm[:, converged]
+        zconv = znorm[:, converged]
         log.info(
             "    Converged |z|: median %.3e, max %.3e",
             np.median(zconv),
             np.max(zconv),
         )
 
-    energy = compute_cumulative_energy(z, stats.escaped)
     r9999 = np.searchsorted(energy, 0.9999) + 1
     log.info("    Cumulative energy: r_99.9%% = %d of %d", r9999, d)
 
@@ -293,7 +475,7 @@ def main(
 
         bins = np.arange(1, n_levels + 2) - 0.5
         ax.hist(
-            escape_time[escapers].ravel(),
+            np.asarray(escape_time)[escapers].ravel(),
             bins=bins,  # ty: ignore[invalid-argument-type]
             color="C0",
             label="Escaped",
@@ -381,7 +563,7 @@ def main(
             (converged, "C0", "Converged"),
             (kept & escapers, "C3", "Escaped"),
         ]:
-            zgroup = stats.znorm[:, mask]
+            zgroup = znorm[:, mask]
             if not zgroup.size:
                 continue
 
@@ -433,6 +615,153 @@ def main(
 
     # }}}
 
+
+# }}}
+
+# {{{ main
+
+
+def main(
+    filename: pathlib.Path,
+    *,
+    datakey: str = "matrices",
+    dataidx: int = 5,
+    bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
+    escape_radius: float = 10.0,
+    resolution: int = 128,
+    maxit: int = 32,
+    min_escape_iters: int | None = None,
+    all_matrices: bool = False,
+    thresholds: tuple[float, ...] = (0.999, 0.9999, 0.99999),
+    cache: pathlib.Path | None = None,
+    basename: pathlib.Path | None = None,
+    overwrite: bool = False,
+) -> int:
+    from commonlib import set_matplotlib_style
+
+    set_matplotlib_style()
+
+    # {{{ validate inputs
+
+    if not filename.exists():
+        log.error("File does not exist: '%s'.", filename)
+        return 1
+
+    try:
+        data = np.load(filename)
+    except Exception:
+        log.error("Failed to load data from file: '%s'.", filename)
+        return 1
+
+    if datakey not in data:
+        log.error("File does not contain '%s' dataset: '%s'.", datakey, filename)
+        return 1
+
+    matrices = data[datakey]
+    if matrices.ndim != 3:
+        log.error("Expected a 3 dimensional array: %s.", matrices.shape)
+        return 1
+
+    if basename is None:
+        basename = filename.with_suffix("")
+
+    if all_matrices:
+        return compute_dataset_ranks(
+            matrices,
+            bbox=bbox,
+            escape_radius=escape_radius,
+            resolution=resolution,
+            maxit=maxit,
+            thresholds=thresholds,
+            cache=cache,
+            basename=basename,
+            overwrite=overwrite,
+        )
+
+    if not 0 <= dataidx < matrices.shape[0]:
+        log.error("Index out of range: %d (max %d)", dataidx, matrices.shape[0] - 1)
+        return 1
+
+    mat = np.asarray(matrices[dataidx], dtype=np.complex64)
+    if mat.shape[0] != mat.shape[1]:
+        log.error("Expected a square matrix: %s.", mat.shape)
+        return 1
+
+    if min_escape_iters is None:
+        # NOTE: same as autoencoder-dmd-quadratic-network.py
+        min_escape_iters = 1 * (maxit + 1) // 4
+
+    outfile = basename.with_stem(
+        f"{basename.stem}-dataset-{dataidx:02d}-r{resolution:04d}-n{maxit:04d}"
+    )
+
+    # }}}
+
+    # {{{ construct or load dataset statistics
+
+    if cache is not None:
+        keys = (
+            "escape_time",
+            "kept",
+            "znorm",
+            "energy",
+            "d",
+            "bbox",
+            "escape_radius",
+            "maxit",
+            "min_escape_iters",
+        )
+        data = load_cache(cache, keys)
+        if data is None:
+            return 1
+
+        d = int(data.pop("d"))
+        bbox_data = data.pop("bbox")
+        bbox = (
+            float(bbox_data[0]),
+            float(bbox_data[1]),
+            float(bbox_data[2]),
+            float(bbox_data[3]),
+        )
+        escape_radius = float(data.pop("escape_radius"))
+        maxit = int(data.pop("maxit"))
+        min_escape_iters = int(data.pop("min_escape_iters"))
+        log.info("Loading dataset statistics from '%s'.", cache)
+    else:
+        d = mat.shape[0]
+        data = compute_dataset_statistics(
+            mat,
+            bbox=bbox,
+            escape_radius=escape_radius,
+            resolution=resolution,
+            maxit=maxit,
+            min_escape_iters=min_escape_iters,
+        )
+        np.savez(
+            outfile.with_suffix(".npz"),
+            **data,
+            d=d,
+            bbox=np.asarray(bbox),
+            escape_radius=escape_radius,
+            maxit=maxit,
+            min_escape_iters=min_escape_iters,
+        )
+
+    # }}}
+
+    plot_dataset_statistics(
+        outfile,
+        **data,
+        d=d,
+        bbox=bbox,
+        escape_radius=escape_radius,
+        maxit=maxit,
+        min_escape_iters=min_escape_iters,
+        dataidx=dataidx,
+        filename=filename,
+        overwrite=overwrite,
+    )
+
     return 0
 
 
@@ -463,7 +792,29 @@ if __name__ == "__main__":
         "--dataidx",
         type=int,
         default=5,
-        help="Index of the matrix to analyze",
+        help="Index of the matrix to analyze (ignored with --all)",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_matrices",
+        help="Compute the effective rank at the given thresholds for every "
+        "matrix in the file",
+    )
+    parser.add_argument(
+        "--thresholds",
+        type=float,
+        nargs="+",
+        default=(0.999, 0.9999, 0.99999),
+        metavar="T",
+        help="Cumulative spectral energy thresholds for --all",
+    )
+    parser.add_argument(
+        "--cache",
+        type=pathlib.Path,
+        default=None,
+        metavar="FILE",
+        help="Load the data for the plots from FILE instead of computing it",
     )
     parser.add_argument(
         "-r",
@@ -483,7 +834,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--escape-radius",
         type=float,
-        default=10.0,
+        default=100.0,
         help="Escape radius for the iteration",
     )
     parser.add_argument(
@@ -532,6 +883,9 @@ if __name__ == "__main__":
             resolution=args.resolution,
             maxit=args.maxit,
             min_escape_iters=args.min_escape_iters,
+            all_matrices=args.all_matrices,
+            thresholds=tuple(args.thresholds),
+            cache=args.cache,
             basename=args.outfile,
             overwrite=args.force,
         )
