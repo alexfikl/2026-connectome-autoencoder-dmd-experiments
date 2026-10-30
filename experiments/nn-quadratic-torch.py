@@ -14,6 +14,7 @@ from torch import nn
 from torch.utils.data import TensorDataset
 
 from commonlib import Config, make_argument_parser
+from nneuroutil.array_api_extras import default_rng
 from nneuroutil.helpers import machine_info
 from nneuroutil.interop.torch import (
     TorchMemoryTracker,
@@ -338,7 +339,7 @@ def train(
             tuple[torch.Tensor, torch.Tensor],
         ],
         split_timeseries_datasets(
-            x, y, config.split, rng=np.random.default_rng(config.seed)
+            x, y, config.split, rng=default_rng(torch, config.seed)
         ),
     )
 

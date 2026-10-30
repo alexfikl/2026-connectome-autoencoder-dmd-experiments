@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Self
 import array_api_compat
 import numpy as np
 
-from nneuroutil.array_api_extras import interleave
+import nneuroutil.array_api_extras as xpx
 from nneuroutil.helpers import FuzzyChoiceAction, dc_stringify, set_up_logging, tictoc
 from nneuroutil.typing import Array1D, Array2D, Array3D, Array4D
 
@@ -602,7 +602,7 @@ def post_process_dataset(
 
     # 3. interleave
     if interleaved:
-        z = interleave(z.real, z.imag, axis=-1)
+        z = xpx.view_as_real(z, copy=True)
     else:
         z = xp.concat([z.real, z.imag], axis=-1)
 
@@ -674,7 +674,12 @@ def generate_timeseries_dataset(
 
     # create datasets
     x = z[:, :-1, :]
-    y = interleave(z[:, 1:, ::2] - c.real, z[:, 1:, 1::2] - c.imag, axis=-1)
+    y_real = z[:, 1:, ::2] - c.real
+    y_imag = z[:, 1:, 1::2] - c.imag
+    y = xp.reshape(
+        xp.stack([y_real, y_imag], axis=-1),
+        (*y_real.shape[:-1], 2 * y_real.shape[-1]),
+    )
     assert x.shape == y.shape
 
     del c
@@ -699,7 +704,7 @@ def split_timeseries_datasets(
     lengths: tuple[float, float, float] | None = None,
     *,
     mask: Array2D[np.bool] | None = None,
-    rng: np.random.Generator | None = None,
+    rng: xpx.RandomGenerator | None = None,
     xp: Any = None,
 ) -> tuple[
     tuple[Array2D[np.floating[Any]], Array2D[np.floating[Any]]],

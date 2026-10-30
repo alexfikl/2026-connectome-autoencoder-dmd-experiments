@@ -17,6 +17,7 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from commonlib import Config, compute_trajectory_mask, make_argument_parser
+from nneuroutil.array_api_extras import default_rng
 from nneuroutil.dmdc import DenseDMDc, build_dense_dmdc
 from nneuroutil.helpers import (
     TicTocTimer,
@@ -1244,7 +1245,7 @@ def train(
             tuple[torch.Tensor, torch.Tensor],
             tuple[torch.Tensor, torch.Tensor],
         ],
-        random_split((x, c), config.split, rng=np.random.default_rng(config.seed)),
+        random_split((x, c), config.split, rng=default_rng(torch, config.seed)),
     )
 
     if checkpoint is None:

@@ -16,6 +16,7 @@ import optax
 from flax import nnx
 
 from commonlib import Config, make_argument_parser
+from nneuroutil.array_api_extras import default_rng
 from nneuroutil.helpers import machine_info, to_complex
 from nneuroutil.interop.flax import JaxMemoryTracker, available_device_names
 from nneuroutil.visualization import figure, make_colorbar_axes
@@ -526,7 +527,7 @@ def train(
             tuple[jax.Array, jax.Array],
         ],
         split_timeseries_datasets(
-            x, y, config.split, rng=np.random.default_rng(config.seed)
+            x, y, config.split, rng=default_rng(jax, config.seed)
         ),
     )
 

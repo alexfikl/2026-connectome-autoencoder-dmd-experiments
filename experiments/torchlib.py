@@ -8,11 +8,11 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
-import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import TensorDataset
 
+import nneuroutil.array_api_extras as xpx
 from nneuroutil.data import SlicedDataLoader
 from nneuroutil.helpers import TicTocTimer
 
@@ -146,7 +146,7 @@ def classify_multilayer_perceptron(
     validation_fraction: float = 0.1,
     n_iter_no_change: int = 10,
     tol: float = 1.0e-4,
-    rng: np.random.Generator | None = None,
+    rng: xpx.RandomGenerator | None = None,
 ) -> MultilayerPerceptronClassifier:
     """Train a multi-layer perceptron (MLP) classifier for multi-class data.
 
