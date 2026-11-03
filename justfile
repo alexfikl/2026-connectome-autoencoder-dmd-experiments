@@ -173,7 +173,7 @@ train:
 ablation_latent filename dataidx="0" *ARGS:
     {{ PYTHON }} experiments/nn-autoencoder-dmd.py \
         --device cuda --force \
-        --resolution 64 --maxit 32 --epochs 30 --batch-size 1024 \
+        --resolution 64 --maxit 32 --epochs 60 --batch-size 1024 \
         {{ ARGS }} \
         sweep {{ filename }} --dataidx {{ dataidx }} \
         --hidden-size 256 --c-features 8 --c-depth 4 \
@@ -184,7 +184,7 @@ ablation_latent filename dataidx="0" *ARGS:
 ablation_control filename dataidx="0" *ARGS:
     {{ PYTHON }} experiments/nn-autoencoder-dmd.py \
         --device cuda --force \
-        --resolution 64 --maxit 32 --epochs 30 --batch-size 1024 \
+        --resolution 64 --maxit 32 --epochs 60 --batch-size 1024 \
         {{ ARGS }} \
         sweep {{ filename }} --dataidx {{ dataidx }} \
         --npod 48 --latent-size 128 --hidden-size 256 \
