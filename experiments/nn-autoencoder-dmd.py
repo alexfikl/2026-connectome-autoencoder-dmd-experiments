@@ -74,9 +74,6 @@ class DMDConfig(Config):
     max_norm: float = 5.0
     ridge_eps: float = 1.0e-4
     dmd_method: Literal["pinv", "ridge"] = "ridge"
-    # number of trajectories sampled per step to fit the operator in training
-    # (None -> all the training trajectories)
-    dmd_subset: int | None = None
 
     # weights of the reconstruction, latent linearity, and prediction losses
     gamma_rec: float = 1.0
@@ -145,11 +142,11 @@ class DMDAutoencoderResult(NamedTuple):
     """Decoded direction of the encoded states."""
     rec_logn: torch.Tensor
     """Decoded log-norm of the encoded states."""
-    lin_pred: torch.Tensor | None = None
-    """One-step latent prediction ``[g_n, 1] A`` of shape ``(batch, steps - 1, r)``."""
-    roll_direction: torch.Tensor | None = None
+    lin_pred: torch.Tensor | None
+    """One-step latent prediction ``g_n A`` of shape ``(batch, steps - 1, r)``."""
+    roll_direction: torch.Tensor | None
     """Decoded direction of the latent rollout from the initial state."""
-    roll_logn: torch.Tensor | None = None
+    roll_logn: torch.Tensor | None
     """Decoded log-norm of the latent rollout from the initial state."""
 
 
@@ -225,7 +222,11 @@ class DMDAutoencoder(nn.Module):
 
         self.encoder = nn.Sequential(
             nn.Linear(
-                npod + 3 + 2 * c_features, hidden_size, device=device, dtype=dtype
+                # NOTE: (u, log z, Re c, Im c, Re chi(c), Im chi(c))
+                npod + 3 + 2 * c_features,
+                hidden_size,
+                device=device,
+                dtype=dtype,
             ),
             nn.Tanh(),
             nn.Linear(hidden_size, hidden_size, device=device, dtype=dtype),
@@ -317,29 +318,35 @@ class DMDAutoencoder(nn.Module):
         self,
         x: torch.Tensor,
         c: torch.Tensor,
+        *,
         dmdc: DenseDMDc[Any] | None = None,
         horizon: int = 0,
     ) -> DMDAutoencoderResult:
         obs = self.observe(x)
         enc = self.encode(obs.direction, obs.logn, c)
         rec_direction, rec_logn = self.decode(enc)
+        lin_pred = roll_direction = roll_logn = None
 
-        result = DMDAutoencoderResult(
-            obs=obs, enc=enc, rec_direction=rec_direction, rec_logn=rec_logn
+        if dmdc is not None:
+            u = torch.ones_like(enc[:, :-1, :1])
+            lin_pred = cast(torch.Tensor, dmdc.evolve(enc[:, :-1], u))
+
+            if not 0 <= horizon < x.shape[1]:
+                raise ValueError(f"out of bounds horizon: {horizon}")
+
+            if horizon > 0:
+                roll = self.rollout(enc[:, 0], dmdc, horizon)
+                roll_direction, roll_logn = self.decode(roll)
+
+        return DMDAutoencoderResult(
+            obs=obs,
+            enc=enc,
+            rec_direction=rec_direction,
+            rec_logn=rec_logn,
+            lin_pred=lin_pred,
+            roll_direction=roll_direction,
+            roll_logn=roll_logn,
         )
-        if dmdc is None:
-            return result
-
-        u = torch.ones_like(enc[:, :-1, :1])
-        result = result._replace(lin_pred=dmdc.evolve(enc[:, :-1], u))  # ty: ignore[invalid-argument-type]
-
-        horizon = min(horizon, x.shape[1] - 1)
-        if horizon > 0:
-            roll = self.rollout(enc[:, 0], dmdc, horizon)
-            roll_direction, roll_logn = self.decode(roll)
-            result = result._replace(roll_direction=roll_direction, roll_logn=roll_logn)
-
-        return result
 
 
 # }}}
@@ -498,19 +505,13 @@ def build_latent_dmd(
     C: torch.Tensor,
     *,
     grad: bool = False,
-    subset: int | None = None,
 ) -> DenseDMDc[Any]:
     r"""Build the DMD operator in the latent space from the full dataset.
 
     ``X`` has shape ``(ntraj, maxit, 2 d)`` and ``C`` has shape ``(ntraj, 2)``.
     Only transitions between unpinned states are used. With *grad*, the fit is
-    differentiable with respect to the encoder. With *subset*, the fit uses that
-    many randomly sampled trajectories.
+    differentiable with respect to the encoder.
     """
-    if subset is not None and subset < X.shape[0]:
-        idx = torch.randperm(X.shape[0], device=X.device)[:subset]
-        X, C = X[idx], C[idx]
-
     with torch.set_grad_enabled(grad):
         obs = model.observe(X)
         enc = model.encode(obs.direction, obs.logn, C)
@@ -558,15 +559,13 @@ def torch_train(
     max_norm: float = 5.0,
     epochs: int = 60,
     batch_size: int = 512,
-    dmd_subset: int | None = None,
     callback: TrainCallback | None = None,
 ) -> tuple[DMDAutoencoder, torch.Tensor, TrainMetrics]:
     """Train the model in *stages* of *epochs* epochs each.
 
-    The model is not compiled and the DMD operator is fit (and differentiated
-    through) at every optimizer step on *dmd_subset* random training
-    trajectories (all of them by default). Validation always uses the full
-    training set.
+    The model is not compiled and the DMD operator is fit once per epoch
+    on the full training set (when DMD is active). Validation also uses the
+    full training set.
     """
     device = X_train.device
 
@@ -603,24 +602,22 @@ def torch_train(
         for stage_epoch in range(epochs):
             # {{{ training
 
+            timer.tic()
+
+            with torch.no_grad():
+                dmdc = (
+                    build_latent_dmd(model, X_train, c_train) if stage.use_dmd else None
+                )
+
             model.train()
             train_metrics.lr[epoch] = optimizer.param_groups[0]["lr"]
 
             loss_epoch = torch.zeros(criterion.dim, device=device)
             num_batches = 0
 
-            timer.tic()
             for batch_x, batch_c in loader:
-                dmdc = (
-                    build_latent_dmd(
-                        model, X_train, c_train, grad=True, subset=dmd_subset
-                    )
-                    if stage.use_dmd
-                    else None
-                )
-
                 optimizer.zero_grad()
-                result = model(batch_x, batch_c, dmdc, stage.horizon)
+                result = model(batch_x, batch_c, dmdc=dmdc, horizon=stage.horizon)
                 loss = criterion(result)
 
                 loss.backward()
@@ -1305,7 +1302,6 @@ def train(
         max_norm=config.max_norm,
         epochs=config.epochs,
         batch_size=config.batch_size,
-        dmd_subset=config.dmd_subset,
         callback=plot_predict,
     )
     dmdc = build_latent_dmd(model, x_train, c_train)
@@ -1620,15 +1616,6 @@ if __name__ == "__main__":
         choices=["pinv", "ridge"],
         default=None,
         help="DMD solver method: 'pinv' (truncated SVD) or 'ridge' (L2-regularized)",
-    )
-    parser.add_argument(
-        "--dmd-subset",
-        type=int,
-        default=None,
-        help=(
-            "Number of training trajectories used to fit the DMD operator at each "
-            "training step (default: all)"
-        ),
     )
     parser.add_argument(
         "--c-features",
