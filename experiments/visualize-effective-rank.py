@@ -74,9 +74,14 @@ def compute_ranks(
     labels = [f"{100.0 * t:g}%" for t in thresholds]
     ranks = np.empty((matrices.shape[0], len(thresholds)), dtype=np.int64)
 
+    from nneuroutil.helpers import TicTocTimer
+
+    time = TicTocTimer()
     for i, mat in enumerate(matrices):
         cmat = xp.astype(xp.asarray(mat), xp.complex64)
         cmat = array_api_compat.to_device(cmat, device)
+
+        time.tic()
 
         z, _ = generate_timeseries(
             cmat,
@@ -93,14 +98,17 @@ def compute_ranks(
 
         # NOTE: nn-autoencoder-dmd.py drops the last timestep (`x = z[:, :-1]`)
         ranks[i] = compute_effective_rank(z[:-1], escaped[:-1], thresholds)
+        time.toc()
+
         log.info(
-            "[%02d/%d] %s",
+            "[%02d/%d] %s (%s)",
             i + 1,
             len(matrices),
             "  ".join(
                 f"{label} = {rank:4d}"
                 for label, rank in zip(labels, ranks[i], strict=True)
             ),
+            time.short(),
         )
 
     return ranks
