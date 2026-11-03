@@ -81,7 +81,7 @@ class DMDConfig(Config):
     gamma_pre: float = 1.0
 
     # number of POD directions, latent size, and hidden width of the networks
-    npod: int = 24
+    npod: int = 64
     latent_size: int = 32
     hidden_size: int = 128
     # number of complex features of the control c (0 disables the branch) and the
@@ -541,7 +541,9 @@ def _evaluate(
     with torch.no_grad():
         total = torch.zeros(criterion.dim, device=next(model.parameters()).device)
         for batch_x, batch_c in loader:
-            total += criterion(model(batch_x, batch_c, dmdc, horizon)).tensor()
+            total += criterion(
+                model(batch_x, batch_c, dmdc=dmdc, horizon=horizon)
+            ).tensor()
 
     return total / len(loader)
 
@@ -563,9 +565,9 @@ def torch_train(
 ) -> tuple[DMDAutoencoder, torch.Tensor, TrainMetrics]:
     """Train the model in *stages* of *epochs* epochs each.
 
-    The model is not compiled and the DMD operator is fit once per epoch
-    on the full training set (when DMD is active). Validation also uses the
-    full training set.
+    The model is not compiled and the DMD operator is fit (and differentiated
+    through) at every optimizer step on the current batch data. Validation uses
+    the full training set.
     """
     device = X_train.device
 
@@ -602,20 +604,20 @@ def torch_train(
         for stage_epoch in range(epochs):
             # {{{ training
 
-            timer.tic()
-
-            with torch.no_grad():
-                dmdc = (
-                    build_latent_dmd(model, X_train, c_train) if stage.use_dmd else None
-                )
-
             model.train()
             train_metrics.lr[epoch] = optimizer.param_groups[0]["lr"]
 
             loss_epoch = torch.zeros(criterion.dim, device=device)
             num_batches = 0
 
+            timer.tic()
             for batch_x, batch_c in loader:
+                dmdc = (
+                    build_latent_dmd(model, batch_x, batch_c, grad=True)
+                    if stage.use_dmd
+                    else None
+                )
+
                 optimizer.zero_grad()
                 result = model(batch_x, batch_c, dmdc=dmdc, horizon=stage.horizon)
                 loss = criterion(result)
@@ -655,7 +657,7 @@ def torch_train(
 
             radius = _spectral_radius(dmdc.A) if dmdc is not None else None  # ty: ignore[invalid-argument-type]
             log.info(
-                "[%s %03d/%03d] total %.5e rec %.3e lin %.3e pre %.3e | "
+                "[%s %03d/%03d] total %.3e rec %.3e lin %.3e pre %.3e | "
                 "val rec %.3e lin %.3e pre %.3e | lam %s (%s)",
                 stage.name,
                 stage_epoch + 1,
@@ -1242,7 +1244,9 @@ def train(
             tuple[torch.Tensor, torch.Tensor],
             tuple[torch.Tensor, torch.Tensor],
         ],
-        random_split((x, c), config.split, rng=default_rng(torch, config.seed)),
+        random_split(
+            (x, c), config.split, rng=default_rng(torch, config.seed, device=device)
+        ),
     )
 
     if checkpoint is None:
