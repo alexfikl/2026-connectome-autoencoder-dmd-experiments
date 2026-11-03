@@ -173,16 +173,16 @@ train:
 
 # {{{ figures
 
+[private]
+figure2_run filename *ARGS:
+    {{ PYTHON }} experiments/visualize-effective-rank.py \
+        --maxit 32 --resolution 128 --escape-radius 100 {{ ARGS }} \
+        {{ filename }}
+
 [doc("Generate plots for Figure 2")]
 figure2:
-    {{ PYTHON }} experiments/visualize-effective-rank.py \
-        --bbox '-0.03' '0.03' '-0.03' '0.03' \
-        data/Emotion_LR_Task.npz
-    {{ PYTHON }} experiments/visualize-effective-rank.py \
-        --bbox '-0.03' '0.03' '-0.03' '0.03' \
-        data/Rest_LR_Task.npz
-    {{ PYTHON }} experiments/visualize-effective-rank.py \
-        --bbox '-0.8' '0.3' '-0.55' '0.55' \
-        data/Structural_LR.npz
+    @just figure2_run data/Rest_LR_Task.npz --bbox '-0.03' '0.03' '-0.03' '0.03'
+    @just figure2_run data/Emotion_LR_Task.npz --bbox '-0.03' '0.03' '-0.03' '0.03'
+    @just figure2_run data/Structural_LR.npz --bbox '-0.8' '0.3' '-0.55' '0.55'
 
 # }}}
