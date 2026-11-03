@@ -7,7 +7,6 @@ import logging
 import pathlib
 from typing import Any, NamedTuple
 
-import array_api_compat
 import numpy as np
 
 from nneuroutil.typing import Array1D, Array2D, Array3D, Array4D
@@ -20,18 +19,14 @@ Analyzes the timeseries dataset used by the DMD autoencoder scripts.
 
 Constructs the dataset in the same way as autoencoder-dmd-quadratic-network.py
 and plots statistics about it: how many points escape, how fast they escape and
-how many steps are spent in the pinned (clipped) state.
-
-With ``--all``, it instead computes the effective rank (at a few cumulative
-spectral energy thresholds) for every matrix in the file and plots it against
-the matrix index. Pass ``--cache FILE`` to load the data for the plots from a
-previously saved file instead of recomputing it.
+how many steps are spent in the pinned (clipped) state. Pass ``--cache FILE``
+to load the data for the plots from a previously saved file instead of
+recomputing it.
 
 Example:
 
     > {SCRIPT_PATH.name} task-emotion.npz
-    > {SCRIPT_PATH.name} --all task-emotion.npz
-    > {SCRIPT_PATH.name} --all --cache task-emotion-cache.npz task-empotion.npz
+    > {SCRIPT_PATH.name} --cache task-emotion-cache.npz task-emotion.npz
 """
 
 
@@ -59,17 +54,18 @@ def compute_statistics(
     :arg z: trajectories of shape ``(n_levels, nx, ny, d)`` as returned by
         :func:`commonlib.generate_timeseries`.
     """
-    sqr_norm = np.sum(np.real(z) ** 2 + np.imag(z) ** 2, axis=-1)
-    escaped = sqr_norm > escape_radius**2
+    from commonlib import compute_escaped_mask
+
+    escaped = compute_escaped_mask(z, escape_radius)
 
     never_escaped = np.all(np.logical_not(escaped), axis=0)
-    first_escaped = np.argmax(escaped.astype(np.int32), axis=0)
+    first_escaped = np.argmax(np.asarray(escaped, dtype=np.int32), axis=0)
     escape_time = np.where(never_escaped, z.shape[0], first_escaped)
 
     return DatasetStatistics(
         escape_time=escape_time,
-        escaped=escaped,  # ty: ignore[invalid-argument-type]
-        znorm=np.sqrt(sqr_norm),
+        escaped=escaped,
+        znorm=np.linalg.norm(z, axis=-1),
     )
 
 
@@ -90,38 +86,9 @@ def compute_cumulative_energy(
     return np.cumsum(s_sq) / (np.sum(s_sq) + 1e-15)
 
 
-def compute_effective_rank(
-    z: Array4D[np.complexfloating[Any]],
-    escaped: Array3D[np.bool],
-    *,
-    thresholds: tuple[float, ...] = (0.999, 0.9999, 0.99999),
-) -> Array1D[np.integer[Any]]:
-    """Compute the effective rank of the real interleaved snapshot matrix.
-
-    :arg z: trajectories of shape ``(n_levels, nx, ny, d)``.
-    :arg escaped: boolean mask of shape ``(n_levels, nx, ny)`` denoting pinned
-        states.
-    :arg thresholds: cumulative spectral energy thresholds in ``(0, 1)``.
-    """
-    threshold = np.asarray(thresholds, dtype=np.float64)
-    if np.any(threshold <= 0.0) or np.any(threshold >= 1.0):
-        raise ValueError(f"'thresholds' must be in (0, 1): {thresholds}")
-
-    # NOTE: same real interleaved layout as nn-autoencoder-dmd.py
-    active = z[np.logical_not(escaped)]
-    snapshots = np.stack([active.real, active.imag], axis=-1)
-    snapshots = snapshots.reshape(snapshots.shape[0], -1)
-
-    s = np.linalg.svd(snapshots, compute_uv=False)
-    s_sq = s**2
-    energy = np.cumsum(s_sq) / (np.sum(s_sq) + 1e-15)
-
-    return np.minimum(np.searchsorted(energy, threshold) + 1, energy.size)
-
-
 # }}}
 
-# {{{ compute effective ranks for a whole dataset
+# {{{ cache loading
 
 
 def load_cache(cache: pathlib.Path, keys: tuple[str, ...]) -> dict[str, Any] | None:
@@ -137,164 +104,6 @@ def load_cache(cache: pathlib.Path, keys: tuple[str, ...]) -> dict[str, Any] | N
             return None
 
         return {key: data[key] for key in keys}
-
-
-def compute_ranks(
-    matrices: Array3D[np.number[Any]],
-    *,
-    bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
-    escape_radius: float = 10.0,
-    resolution: int = 128,
-    maxit: int = 32,
-    thresholds: tuple[float, ...] = (0.999, 0.9999, 0.99999),
-) -> Array2D[np.integer[Any]]:
-    """Compute the effective rank for every matrix in *matrices*."""
-    from commonlib import generate_timeseries
-
-    # NOTE: the dataset generation is the slow part, so we try to do it on the GPU
-    xp = array_api_compat.array_namespace(np.empty(0))
-    device = "cpu"
-    try:
-        import torch
-
-        from nneuroutil.interop.torch import available_device_names
-
-        if any(dev.startswith("cuda") for dev in available_device_names()):
-            xp = array_api_compat.array_namespace(torch.empty(0))
-            device = "cuda"
-    except ImportError:
-        pass
-
-    log.info("Generating dataset using '%s' (%s).", xp.__name__, device)
-
-    labels = [f"{100.0 * t:g}%" for t in thresholds]
-    ranks = np.empty((matrices.shape[0], len(thresholds)), dtype=np.int64)
-
-    for i, mat in enumerate(matrices):
-        cmat = xp.astype(xp.asarray(mat), xp.complex64)
-        cmat = array_api_compat.to_device(cmat, device)
-
-        z, _ = generate_timeseries(
-            cmat,
-            bbox=bbox,
-            escape_radius=escape_radius,
-            resolution=resolution,
-            # NOTE: we add 1 so that z.shape == (maxit + 1, nx, ny, d)
-            maxit=maxit + 1,
-            xp=xp,
-        )
-        z = np.asarray(array_api_compat.to_device(z, "cpu"))
-
-        stats = compute_statistics(z, escape_radius)
-        # NOTE: nn-autoencoder-dmd.py drops the last timestep (`x = z[:, :-1]`)
-        ranks[i] = compute_effective_rank(
-            z[:-1], stats.escaped[:-1], thresholds=thresholds
-        )
-        log.info(
-            "[%02d/%d] %s",
-            i + 1,
-            len(matrices),
-            "  ".join(
-                f"{label} = {rank:4d}"
-                for label, rank in zip(labels, ranks[i], strict=True)
-            ),
-        )
-
-        del z, stats
-
-    return ranks
-
-
-def compute_dataset_ranks(
-    matrices: Array3D[np.number[Any]],
-    *,
-    bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
-    escape_radius: float = 10.0,
-    resolution: int = 128,
-    maxit: int = 32,
-    thresholds: tuple[float, ...] = (0.999, 0.9999, 0.99999),
-    cache: pathlib.Path | None = None,
-    basename: pathlib.Path,
-    overwrite: bool = False,
-) -> int:
-    """Compute (or load) and plot the effective rank for every matrix."""
-    from matplotlib.ticker import MaxNLocator
-
-    from nneuroutil.visualization import figure
-
-    if matrices.shape[1] != matrices.shape[2]:
-        log.error("Expected square matrices: %s.", matrices.shape)
-        return 1
-
-    outfile = basename.with_stem(
-        f"{basename.stem}-energy-ranks-r{resolution:04d}-n{maxit:04d}"
-    )
-
-    if cache is not None:
-        data = load_cache(cache, ("ranks", "thresholds"))
-        if data is None:
-            return 1
-
-        ranks = data["ranks"]
-        thresholds = tuple(data["thresholds"].tolist())
-        log.info("Loading ranks from '%s'.", cache)
-    else:
-        ranks = compute_ranks(
-            matrices,
-            bbox=bbox,
-            escape_radius=escape_radius,
-            resolution=resolution,
-            maxit=maxit,
-            thresholds=thresholds,
-        )
-        np.savez(
-            outfile.with_suffix(".npz"),
-            ranks=ranks,
-            thresholds=np.asarray(thresholds),
-            bbox=np.asarray(bbox),
-            escape_radius=escape_radius,
-            resolution=resolution,
-            maxit=maxit,
-        )
-
-    labels = [f"{100.0 * t:g}%" for t in thresholds]
-    positions = np.arange(1, len(labels) + 1)
-
-    with figure(outfile, overwrite=overwrite) as fig:
-        ax = fig.gca()
-
-        boxplot = ax.boxplot(
-            [ranks[:, j] for j in range(len(labels))],
-            positions=positions,
-            widths=0.5,
-            patch_artist=True,
-            showfliers=False,
-            showmeans=True,
-        )
-        for j, box in enumerate(boxplot["boxes"]):
-            box.set_facecolor(f"C{j}")
-            box.set_alpha(0.4)
-
-        rng = np.random.default_rng(0)
-        for j, position in enumerate(positions):
-            r = ranks[:, j]
-            ax.plot(
-                position + rng.uniform(-0.15, 0.15, size=r.size),
-                r,
-                "o",
-                ms=5,
-                alpha=0.6,
-                color=f"C{j}",
-            )
-
-        ax.set_xticks(positions)
-        ax.set_xticklabels(labels)
-        ax.set_xlabel("Cumulative energy threshold")
-        ax.set_ylabel("Effective rank")
-        ax.set_ylim((0, 2 * matrices.shape[1]))
-        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-
-    return 0
 
 
 # }}}
@@ -631,8 +440,6 @@ def main(
     resolution: int = 128,
     maxit: int = 32,
     min_escape_iters: int | None = None,
-    all_matrices: bool = False,
-    thresholds: tuple[float, ...] = (0.999, 0.9999, 0.99999),
     cache: pathlib.Path | None = None,
     basename: pathlib.Path | None = None,
     overwrite: bool = False,
@@ -664,19 +471,6 @@ def main(
 
     if basename is None:
         basename = filename.with_suffix("")
-
-    if all_matrices:
-        return compute_dataset_ranks(
-            matrices,
-            bbox=bbox,
-            escape_radius=escape_radius,
-            resolution=resolution,
-            maxit=maxit,
-            thresholds=thresholds,
-            cache=cache,
-            basename=basename,
-            overwrite=overwrite,
-        )
 
     if not 0 <= dataidx < matrices.shape[0]:
         log.error("Index out of range: %d (max %d)", dataidx, matrices.shape[0] - 1)
@@ -792,22 +586,7 @@ if __name__ == "__main__":
         "--dataidx",
         type=int,
         default=5,
-        help="Index of the matrix to analyze (ignored with --all)",
-    )
-    parser.add_argument(
-        "--all",
-        action="store_true",
-        dest="all_matrices",
-        help="Compute the effective rank at the given thresholds for every "
-        "matrix in the file",
-    )
-    parser.add_argument(
-        "--thresholds",
-        type=float,
-        nargs="+",
-        default=(0.999, 0.9999, 0.99999),
-        metavar="T",
-        help="Cumulative spectral energy thresholds for --all",
+        help="Index of the matrix to analyze",
     )
     parser.add_argument(
         "--cache",
@@ -883,8 +662,6 @@ if __name__ == "__main__":
             resolution=args.resolution,
             maxit=args.maxit,
             min_escape_iters=args.min_escape_iters,
-            all_matrices=args.all_matrices,
-            thresholds=tuple(args.thresholds),
             cache=args.cache,
             basename=args.outfile,
             overwrite=args.force,

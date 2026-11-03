@@ -555,6 +555,25 @@ def generate_timeseries(
     return z, c.squeeze(-1)
 
 
+def compute_escaped_mask(
+    z: Array4D[np.complexfloating[Any]],
+    escape_radius: float,
+) -> Array3D[np.bool]:
+    """Compute a boolean mask of the pinned (escaped) states of *z*.
+
+    This uses the same escape criterion as :func:`generate_timeseries`.
+
+    :arg z: trajectories of shape ``(n_levels, nx, ny, d)``.
+    """
+    xp = array_api_compat.array_namespace(z)
+    sqr_norm = xp.sum(xp.real(z) ** 2 + xp.imag(z) ** 2, axis=-1)
+
+    return xp.astype(
+        sqr_norm > escape_radius**2,
+        xp.bool,
+    )
+
+
 def post_process_dataset(
     z: Array4D[np.complexfloating[Any]],
     escape_radius: float,
