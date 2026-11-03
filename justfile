@@ -147,7 +147,7 @@ train_autoencoder_dmd filename *ARGS:
         {{ PYTHON }} experiments/nn-autoencoder-dmd.py \
             --device cuda --force -o $out.npz \
             --seed 0 \
-            --resolution 64 --epochs 60 --batch-size 1024 --dmd-subset 1024 \
+            --resolution 64 --epochs 60 --batch-size 1024 \
             --maxit 32 --c-features 8 --c-depth 2 \
             {{ ARGS }} \
             train --dataidx $idx {{ filename }} || exit 1; \
@@ -168,6 +168,33 @@ train:
     @just train_autoencoder_dmd data/Structural_LR.npz \
         --resolution 128 \
         --bbox '-0.8' '0.3' '-0.55' '0.55'
+
+[private]
+ablation_latent filename dataidx="0" *ARGS:
+    {{ PYTHON }} experiments/nn-autoencoder-dmd.py \
+        --device cuda --force \
+        --resolution 64 --maxit 32 --epochs 30 --batch-size 1024 \
+        {{ ARGS }} \
+        sweep {{ filename }} --dataidx {{ dataidx }} \
+        --hidden-size 256 --c-features 8 --c-depth 4 \
+        --npod 24 36 48 \
+        --latent-size 48 64 96 128
+
+[private]
+ablation_control filename dataidx="0" *ARGS:
+    {{ PYTHON }} experiments/nn-autoencoder-dmd.py \
+        --device cuda --force \
+        --resolution 64 --maxit 32 --epochs 30 --batch-size 1024 \
+        {{ ARGS }} \
+        sweep {{ filename }} --dataidx {{ dataidx }} \
+        --npod 48 --latent-size 128 --hidden-size 256 \
+        --c-features 0 4 8 16 \
+        --c-depth 1 2 4
+
+[doc("Run ablation studies for a connectome matrix (default: dataidx 0)")]
+ablation filename dataidx="0":
+    @just ablation_latent {{ filename }} {{ dataidx }}
+    @just ablation_control {{ filename }} {{ dataidx }}
 
 # }}}
 

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import csv
+import itertools
 import logging
 import pathlib
 import re
@@ -1601,6 +1603,253 @@ def merge(
 # }}}
 
 
+# {{{ sweep
+
+
+def sweep(
+    filename: pathlib.Path,
+    *,
+    outfile: pathlib.Path | None = None,
+    npod_list: Sequence[int] = (24, 48),
+    latent_size_list: Sequence[int] = (64, 128),
+    hidden_size_list: Sequence[int] = (256,),
+    c_features_list: Sequence[int] = (0, 8),
+    c_depth_list: Sequence[int] = (2, 4),
+    overwrite: bool = False,
+    **overrides: Any,
+) -> int:
+    """Run a grid search parameter sweep over model architecture parameters."""
+    from commonlib import (
+        generate_grid,
+        generate_timeseries_dataset,
+        load_matrix_datasets,
+    )
+    from nneuroutil.data import random_split
+
+    device = torch.get_default_device()
+    config = DMDConfig.from_sources(overrides)
+
+    try:
+        matrices = cast(
+            torch.Tensor,
+            load_matrix_datasets(filename, key=config.datakey, device=device, xp=torch),
+        )
+        mat = matrices[config.dataidx].to(torch.complex64)
+    except Exception as exc:
+        log.error("Failed to load dataset '%s': %s", filename.name, exc)
+        return 1
+
+    d = mat.shape[0]
+
+    # Generate dataset once for all sweep runs
+    x, _, mask, zmask = cast(
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        generate_timeseries_dataset(
+            mat,
+            bbox=config.bbox,
+            resolution=config.resolution,
+            maxit=config.maxit + 1,
+            escape_radius=config.escape_radius,
+            min_escape_iters=0,
+        ),
+    )
+
+    c = generate_grid(
+        *config.bbox,
+        nx=config.resolution,
+        ny=config.resolution,
+        dtype=mat.dtype,
+        xp=array_api_compat.array_namespace(mat),
+        device=device,
+    )
+    c = _normalize_control(c[mask], config.bbox)
+
+    (x_train, c_train), (x_validate, c_validate), (x_test, c_test) = cast(
+        tuple[
+            tuple[torch.Tensor, torch.Tensor],
+            tuple[torch.Tensor, torch.Tensor],
+            tuple[torch.Tensor, torch.Tensor],
+        ],
+        random_split(
+            (x, c), config.split, rng=default_rng(torch, config.seed, device=device)
+        ),
+    )
+
+    # Prune combinations
+    combinations: list[tuple[int, int, int, int, int]] = []
+    seen = set()
+    for npod, latent_size, hidden_size, c_features, c_depth in itertools.product(
+        npod_list, latent_size_list, hidden_size_list, c_features_list, c_depth_list
+    ):
+        if latent_size < npod:
+            continue
+        effective_depth = 1 if c_features == 0 else c_depth
+        key = (npod, latent_size, hidden_size, c_features, effective_depth)
+        if key in seen:
+            continue
+        seen.add(key)
+        combinations.append(key)
+
+    if not combinations:
+        log.error("No valid parameter combinations to sweep.")
+        return 1
+
+    log.info("Starting sweep over %d configurations...", len(combinations))
+
+    stages = make_stages(config)
+    results: list[dict[str, Any]] = []
+
+    for i, (npod, latent_size, hidden_size, c_features, c_depth) in enumerate(
+        combinations, start=1
+    ):
+        log.info(
+            "[%02d/%02d] "
+            "npod=%d latent_size=%d hidden_size=%d c_features=%d c_depth=%d",
+            i,
+            len(combinations),
+            npod,
+            latent_size,
+            hidden_size,
+            c_features,
+            c_depth,
+        )
+
+        torch.manual_seed(config.seed)
+        model = DMDAutoencoder(
+            input_size=d,
+            npod=npod,
+            latent_size=latent_size,
+            hidden_size=hidden_size,
+            c_features=c_features,
+            c_depth=c_depth,
+            escape_radius=config.escape_radius,
+            dmd_method=config.dmd_method,
+            ridge_eps=config.ridge_eps,
+            device=device,
+            dtype=mat.dtype.to_real(),
+        )
+        model.fit_observables(x_train)
+
+        criterion = DMDLoss(
+            logn_clip=model.logn_clip,
+            gamma_rec=config.gamma_rec,
+            gamma_lin=config.gamma_lin,
+            gamma_pre=config.gamma_pre,
+        )
+
+        _, losses, _ = torch_train(
+            model,
+            criterion,
+            x_train,
+            x_validate,
+            c_train=c_train,
+            c_validate=c_validate,
+            stages=stages,
+            lr=config.lr,
+            max_norm=config.max_norm,
+            epochs=config.epochs,
+            batch_size=config.batch_size,
+        )
+
+        with torch.no_grad():
+            dmdc = build_latent_dmd(model, x_train, c_train)
+            metrics = _plot_predict(
+                filename,
+                model,
+                dmdc,
+                config,
+                zmask=zmask,
+                tag="sweep",
+                overwrite=False,
+                plot=False,
+            )
+
+            test_loader = DataLoader(
+                TensorDataset(x_test, c_test), batch_size=config.batch_size
+            )
+            loss_test = _evaluate(
+                model,
+                criterion,
+                test_loader,
+                dmdc,
+                stages[-1].horizon,
+            )
+
+        row = {
+            "npod": npod,
+            "latent_size": latent_size,
+            "hidden_size": hidden_size,
+            "c_features": c_features,
+            "c_depth": c_depth,
+            "dice": float(metrics.dice),
+            "iou": float(metrics.iou),
+            "spectral_radius": float(metrics.a_radius),
+            "loss_train": float(losses[-1, 0, 0]),
+            "loss_val": float(losses[-1, 1, 0]),
+            "loss_test": float(loss_test[0]),
+        }
+        results.append(row)
+        log.info(
+            "       -> Dice: %.4f | IoU: %.4f | |lam|max: %.3f | test loss: %.3e",
+            row["dice"],
+            row["iou"],
+            row["spectral_radius"],
+            row["loss_test"],
+        )
+
+        del model
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    results.sort(key=lambda r: r["dice"], reverse=True)
+
+    log.info("\n%s", "=" * 80)
+    log.info("SWEEP SUMMARY (sorted by Dice):")
+    log.info(
+        "%-6s %-8s %-8s %-8s %-8s | %-8s %-8s %-8s | %-10s",
+        "npod",
+        "latent",
+        "hidden",
+        "c_feat",
+        "c_depth",
+        "Dice",
+        "IoU",
+        "|lam|max",
+        "Loss(test)",
+    )
+    log.info("-" * 80)
+    for r in results:
+        log.info(
+            "%-6d %-8d %-8d %-8d %-8d | %-8.4f %-8.4f %-8.3f | %-10.4e",
+            r["npod"],
+            r["latent_size"],
+            r["hidden_size"],
+            r["c_features"],
+            r["c_depth"],
+            r["dice"],
+            r["iou"],
+            r["spectral_radius"],
+            r["loss_test"],
+        )
+    log.info("=" * 80)
+
+    if outfile is None:
+        outfile = filename.parent / f"{filename.stem}-sweep-m{config.dataidx}.csv"
+    else:
+        outfile = outfile.with_suffix(".csv")
+
+    with open(outfile, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(results[0].keys()))
+        writer.writeheader()
+        writer.writerows(results)
+
+    log.info("Saved sweep results to '%s'.", outfile)
+    return 0
+
+
+# }}}
+
+
 if __name__ == "__main__":
     parser, subparsers = make_argument_parser(
         description=SCRIPT_LONG_HELP,
@@ -1714,6 +1963,54 @@ if __name__ == "__main__":
         help="Glob pattern used to find the feature files in each directory",
     )
 
+    subparser = subparsers.add_parser(
+        "sweep",
+        formatter_class=parser.formatter_class,
+        description="Run a hyperparameter sweep over model architecture parameters.",
+    )
+    subparser.add_argument("filename", type=pathlib.Path)
+    subparser.add_argument(
+        "--dataidx",
+        type=int,
+        default=0,
+        help="Index of the matrix to sweep on",
+    )
+    subparser.add_argument(
+        "--npod",
+        type=int,
+        nargs="+",
+        default=[24, 48],
+        help="POD directions to sweep (default: 24 48)",
+    )
+    subparser.add_argument(
+        "--latent-size",
+        type=int,
+        nargs="+",
+        default=[64, 128],
+        help="Latent sizes to sweep (default: 64 128)",
+    )
+    subparser.add_argument(
+        "--hidden-size",
+        type=int,
+        nargs="+",
+        default=[256],
+        help="Hidden widths to sweep (default: 256)",
+    )
+    subparser.add_argument(
+        "--c-features",
+        type=int,
+        nargs="+",
+        default=[0, 8],
+        help="Control feature sizes to sweep (default: 0 8)",
+    )
+    subparser.add_argument(
+        "--c-depth",
+        type=int,
+        nargs="+",
+        default=[2, 4],
+        help="Control depths to sweep (default: 2 4)",
+    )
+
     args = parser.parse_args()
 
     if not args.quiet:
@@ -1750,6 +2047,38 @@ if __name__ == "__main__":
                     pattern=args.pattern,
                     outfile=args.outfile,
                     overwrite=args.force,
+                )
+            )
+        elif args.command == "sweep":
+            overrides = {
+                k: v
+                for k, v in vars(args).items()
+                if v is not None
+                and k
+                not in {
+                    "command",
+                    "filename",
+                    "device",
+                    "outfile",
+                    "npod",
+                    "latent_size",
+                    "hidden_size",
+                    "c_features",
+                    "c_depth",
+                    "force",
+                }
+            }
+            raise SystemExit(
+                sweep(
+                    args.filename,
+                    outfile=args.outfile,
+                    npod_list=args.npod,
+                    latent_size_list=args.latent_size,
+                    hidden_size_list=args.hidden_size,
+                    c_features_list=args.c_features,
+                    c_depth_list=args.c_depth,
+                    overwrite=args.force,
+                    **overrides,
                 )
             )
         else:
