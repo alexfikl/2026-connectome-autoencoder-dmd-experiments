@@ -35,34 +35,12 @@ Example:
 # {{{ compute effective ranks for a whole dataset
 
 
-def load_cache(cache: pathlib.Path, keys: tuple[str, ...]) -> dict[str, Any] | None:
-    """Load the given *keys* from a cache file."""
-    if not cache.exists():
-        log.error("Cache file does not exist: '%s'.", cache)
-        return None
-
-    with np.load(cache) as data:
-        missing = [key for key in keys if key not in data]
-        if missing:
-            log.error("Cache file '%s' does not contain %s.", cache, missing)
-            return None
-
-        return {key: data[key] for key in keys}
-
-
 def compute_effective_rank(
     z: Array4D[np.complexfloating[Any]],
     escaped: Array3D[np.bool],
-    *,
-    thresholds: tuple[float, ...] = (0.999, 0.9999, 0.99999),
+    thresholds: tuple[float, ...],
 ) -> Array1D[np.integer[Any]]:
-    """Compute the effective rank of the real interleaved snapshot matrix.
-
-    :arg z: trajectories of shape ``(n_levels, nx, ny, d)``.
-    :arg escaped: boolean mask of shape ``(n_levels, nx, ny)`` denoting pinned
-        states.
-    :arg thresholds: cumulative spectral energy thresholds in ``(0, 1)``.
-    """
+    """Compute the effective rank of the real interleaved snapshot matrix."""
 
     # NOTE: same real interleaved layout as nn-autoencoder-dmd.py
     active = z[np.logical_not(escaped)]
@@ -70,38 +48,27 @@ def compute_effective_rank(
     snapshots = snapshots.reshape(snapshots.shape[0], -1)
 
     s = np.linalg.svd(snapshots, compute_uv=False)
-    s_sq = s**2
-    energy = np.cumsum(s_sq) / (np.sum(s_sq) + 1e-15)
+
+    energy = np.cumsum(s**2)
+    energy = energy / (energy[-1] + 1e-15)
 
     return np.minimum(np.searchsorted(energy, thresholds) + 1, energy.size)
 
 
 def compute_ranks(
     matrices: Array3D[np.number[Any]],
+    thresholds: tuple[float, ...],
     *,
     bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
-    escape_radius: float = 10.0,
+    escape_radius: float = 100.0,
     resolution: int = 128,
     maxit: int = 32,
-    thresholds: tuple[float, ...] = (0.999, 0.9999, 0.99999),
 ) -> Array2D[np.integer[Any]]:
     """Compute the effective rank for every matrix in *matrices*."""
-    from commonlib import compute_escaped_mask, generate_timeseries
+    from commonlib import compute_escaped_mask, generate_timeseries, gpu_array_namespace
 
     # NOTE: the dataset generation is the slow part, so we try to do it on the GPU
-    xp = array_api_compat.array_namespace(np.empty(0))
-    device = "cpu"
-    try:
-        import torch
-
-        from nneuroutil.interop.torch import available_device_names
-
-        if any(dev.startswith("cuda") for dev in available_device_names()):
-            xp = array_api_compat.array_namespace(torch.empty(0))
-            device = "cuda"
-    except ImportError:
-        pass
-
+    xp, device = gpu_array_namespace()
     log.info("Generating dataset using '%s' (%s).", xp.__name__, device)
 
     labels = [f"{100.0 * t:g}%" for t in thresholds]
@@ -125,7 +92,7 @@ def compute_ranks(
         escaped = compute_escaped_mask(z, escape_radius)
 
         # NOTE: nn-autoencoder-dmd.py drops the last timestep (`x = z[:, :-1]`)
-        ranks[i] = compute_effective_rank(z[:-1], escaped[:-1], thresholds=thresholds)
+        ranks[i] = compute_effective_rank(z[:-1], escaped[:-1], thresholds)
         log.info(
             "[%02d/%d] %s",
             i + 1,
@@ -135,8 +102,6 @@ def compute_ranks(
                 for label, rank in zip(labels, ranks[i], strict=True)
             ),
         )
-
-        del z
 
     return ranks
 
@@ -151,16 +116,14 @@ def main(
     *,
     datakey: str = "matrices",
     bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
-    escape_radius: float = 10.0,
+    escape_radius: float = 100.0,
     resolution: int = 128,
     maxit: int = 32,
     thresholds: tuple[float, ...] = (0.999, 0.9999, 0.99999),
-    cache: pathlib.Path | None = None,
+    cachefile: pathlib.Path | None = None,
     basename: pathlib.Path | None = None,
     overwrite: bool = False,
 ) -> int:
-    from matplotlib.ticker import MaxNLocator
-
     from commonlib import set_matplotlib_style
     from nneuroutil.visualization import figure
 
@@ -207,23 +170,30 @@ def main(
 
     # {{{ load or compute ranks
 
-    if cache is not None:
-        data = load_cache(cache, ("ranks", "thresholds"))
-        if data is None:
+    if cachefile is not None:
+        if not cachefile.exists():
+            log.error("Cache file does not exist: '%s'.", cachefile)
+            return 1
+
+        try:
+            data = np.load(cachefile)
+        except Exception:
+            log.error("Failed to load data from file: '%s'.", cachefile)
             return 1
 
         ranks = data["ranks"]
         thresholds = tuple(data["thresholds"].tolist())
-        log.info("Loading ranks from '%s'.", cache)
+        log.info("Loading ranks from '%s'.", cachefile)
     else:
         ranks = compute_ranks(
             matrices,
+            thresholds,
             bbox=bbox,
             escape_radius=escape_radius,
             resolution=resolution,
             maxit=maxit,
-            thresholds=thresholds,
         )
+
         np.savez(
             outfile.with_suffix(".npz"),
             ranks=ranks,
@@ -237,6 +207,8 @@ def main(
     # }}}
 
     # {{{ plot ranks
+
+    from matplotlib.ticker import MaxNLocator
 
     labels = [f"{100.0 * t:g}%" for t in thresholds]
     positions = np.arange(1, len(labels) + 1)
@@ -336,7 +308,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--escape-radius",
         type=float,
-        default=10.0,
+        default=100.0,
         help="Escape radius for the iteration",
     )
     parser.add_argument(
@@ -377,7 +349,7 @@ if __name__ == "__main__":
             resolution=args.resolution,
             maxit=args.maxit,
             thresholds=tuple(args.thresholds),
-            cache=args.cache,
+            cachefile=args.cache,
             basename=args.outfile,
             overwrite=args.force,
         )

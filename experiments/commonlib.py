@@ -58,6 +58,30 @@ set_matplotlib_style()
 # }}}
 
 
+# {{{ gpu_array_namespace
+
+
+def gpu_array_namespace() -> tuple[Any, str]:
+    xp = array_api_compat.array_namespace(np.empty(0))
+    device = "cpu"
+
+    try:
+        import torch
+    except ImportError:
+        return xp, device
+
+    from nneuroutil.interop.torch import available_device_names
+
+    if any(dev.startswith("cuda") for dev in available_device_names()):
+        xp = array_api_compat.array_namespace(torch.empty(0))
+        device = "cuda"
+
+    return xp, device
+
+
+# }}}
+
+
 # {{{ load_feature_datasets
 
 

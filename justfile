@@ -170,3 +170,19 @@ train:
         --bbox '-0.8' '0.3' '-0.55' '0.55'
 
 # }}}
+
+# {{{ figures
+
+[doc("Generate plots for Figure 2")]
+figure2:
+    {{ PYTHON }} experiments/visualize-effective-rank.py \
+        --bbox '-0.03' '0.03' '-0.03' '0.03' \
+        data/Emotion_LR_Task.npz
+    {{ PYTHON }} experiments/visualize-effective-rank.py \
+        --bbox '-0.03' '0.03' '-0.03' '0.03' \
+        data/Rest_LR_Task.npz
+    {{ PYTHON }} experiments/visualize-effective-rank.py \
+        --bbox '-0.8' '0.3' '-0.55' '0.55' \
+        data/Structural_LR.npz
+
+# }}}
