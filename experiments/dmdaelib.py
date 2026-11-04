@@ -8,13 +8,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple, Protocol, cast
 
-import array_api_compat
 import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from commonlib import Config, compute_trajectory_mask
+from commonlib import Config, compute_trajectory_mask, generate_timeseries_dataset
+from nneuroutil.array_api_extras import default_rng
+from nneuroutil.data import random_split
 from nneuroutil.dmdc import DenseDMDc, build_dense_dmdc
 from nneuroutil.helpers import TicTocTimer
 from nneuroutil.interop.torch import (
@@ -154,7 +155,6 @@ class DMDAutoencoder(nn.Module):
         c_features: int = 0,
         c_depth: int = 1,
         c_alpha: float = 0.5,
-        activation: Literal["tanh", "silu", "siren"] = "siren",
         dmd_method: Literal["pinv", "ridge"] = "ridge",
         ridge_eps: float = 1.0e-4,
         device: Any = None,
@@ -210,9 +210,14 @@ class DMDAutoencoder(nn.Module):
 
             self.c_branch = nn.Sequential(*layers)
 
-        def make_activation(omega: float) -> nn.Module:
+        # NOTE: the activation and its frequencies are fixed here; flip
+        # `activation` manually to experiment with the other options
+        activation = "siren"
+        omega = 5
+
+        def make_activation(frequency: float) -> nn.Module:
             if activation == "siren":
-                return SIREN(omega=omega)
+                return SIREN(omega=frequency)
             elif activation == "silu":
                 return nn.SiLU()
             elif activation == "tanh":
@@ -224,12 +229,13 @@ class DMDAutoencoder(nn.Module):
             n_in: int, n_out: int, *, omega: float | None = None
         ) -> nn.Linear:
             layer = nn.Linear(n_in, n_out, device=device, dtype=dtype)
-            if omega is None or activation != "siren":
+            # NOTE: layers followed by an activation use the frequency-aware
+            # initialization; output layers keep the default initialization
+            if omega is not None:
                 kaiming_uniform_(layer.weight, nonlinearity=activation, param=omega)
 
             return layer
 
-        omega = 5
         self.encoder = nn.Sequential(
             make_linear(
                 # NOTE: (u, log z, Re c, Im c, Re chi(c), Im chi(c))
@@ -238,12 +244,12 @@ class DMDAutoencoder(nn.Module):
                 omega=4 * omega,
             ),
             make_activation(4 * omega),
-            make_linear(hidden_size, hidden_size, omega=1),
+            make_linear(hidden_size, hidden_size, omega=omega),
             make_activation(omega),
             make_linear(hidden_size, latent_size),
         )
         self.decoder_mlp = nn.Sequential(
-            make_linear(latent_size, hidden_size, omega=1),
+            make_linear(latent_size, hidden_size, omega=omega),
             make_activation(omega),
             make_linear(hidden_size, npod + 1),
         )
@@ -356,6 +362,30 @@ class DMDAutoencoder(nn.Module):
             roll_direction=roll_direction,
             roll_logn=roll_logn,
         )
+
+
+def make_dmd_autoencoder(
+    config: DMDConfig,
+    input_size: int,
+    *,
+    device: Any = None,
+    dtype: torch.dtype = torch.float32,
+) -> DMDAutoencoder:
+    """Build a DMD autoencoder from a configuration."""
+    return DMDAutoencoder(
+        input_size=input_size,
+        npod=config.npod,
+        latent_size=config.latent_size,
+        hidden_size=config.hidden_size,
+        c_features=config.c_features,
+        c_depth=config.c_depth,
+        c_alpha=config.c_alpha,
+        escape_radius=config.escape_radius,
+        dmd_method=config.dmd_method,
+        ridge_eps=config.ridge_eps,
+        device=device,
+        dtype=dtype,
+    )
 
 
 # }}}
@@ -505,16 +535,18 @@ def normalize_control(
 
 
 def grid_control(
-    model: DMDAutoencoder,
     bbox: tuple[float, float, float, float],
     resolution: int,
     *,
-    like: torch.Tensor,
+    dtype: torch.dtype,
+    device: Any = None,
 ) -> torch.Tensor:
     """Normalized controls of shape ``(resolution ** 2, 2)`` on the grid."""
+    from array_api_compat import torch as xp
+
     from commonlib import generate_grid
 
-    assert model.dtype.is_floating_point
+    assert dtype.is_floating_point or dtype.is_complex
 
     c = cast(
         "torch.Tensor",
@@ -522,8 +554,9 @@ def grid_control(
             *bbox,
             nx=resolution,
             ny=resolution,
-            dtype=model.dtype.to_complex(),
-            xp=array_api_compat.array_namespace(like),
+            dtype=dtype,
+            xp=xp,
+            device=device,
         ),
     )
     return normalize_control(c.reshape(-1), bbox)
@@ -562,7 +595,12 @@ def torch_predict(
     assert dtype.is_floating_point
 
     with torch.no_grad():
-        c = grid_control(model, bbox, resolution, like=dmdc.A)  # ty: ignore[invalid-argument-type]
+        c = grid_control(
+            bbox,
+            resolution,
+            dtype=model.dtype,
+            device=next(model.parameters()).device,
+        )
         g0 = encode_origin(model, c)
         _, logn_final = model.decode(model.rollout(g0, dmdc, maxit)[:, -1])
 
@@ -778,6 +816,163 @@ def torch_train(
             epoch += 1
 
     return model, losses, train_metrics
+
+
+# }}}
+
+
+# {{{ pipeline
+
+
+class DMDDataset(NamedTuple):
+    input_size: int
+    x_train: torch.Tensor
+    c_train: torch.Tensor
+    x_validate: torch.Tensor
+    c_validate: torch.Tensor
+    x_test: torch.Tensor
+    c_test: torch.Tensor
+    zmask: torch.Tensor
+    test_mask: torch.Tensor
+
+
+class RunResult(NamedTuple):
+    model: DMDAutoencoder
+    dmdc: DenseDMDc[Any]
+    losses: torch.Tensor
+    train_metrics: TrainMetrics
+    loss_test: torch.Tensor
+
+
+def make_test_mask(config: DMDConfig, device: Any) -> torch.Tensor:
+    """Mask of the grid pixels in the test split."""
+    n = config.resolution**2
+    indices = torch.arange(n, device=device)
+    split_indices = random_split(
+        (indices,),
+        config.split,
+        rng=default_rng(torch, config.seed, device=device),
+    )
+    idx_test = split_indices[2][0]
+
+    test_mask = torch.zeros(n, dtype=torch.bool, device=device)
+    test_mask[idx_test] = True  # ty: ignore[invalid-assignment]
+
+    return test_mask.reshape(config.resolution, config.resolution)
+
+
+def prepare_dataset(config: DMDConfig, mat: torch.Tensor) -> DMDDataset:
+    # NOTE: `min_escape_iters=0` keeps all the trajectories, including the ones
+    # that escape early: they carry the escape dynamics
+    x, _, mask, zmask = cast(
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        generate_timeseries_dataset(
+            mat,
+            bbox=config.bbox,
+            resolution=config.resolution,
+            # NOTE: we add 1 so that x.shape == (n, maxit, 2d)
+            maxit=config.maxit + 1,
+            escape_radius=config.escape_radius,
+            min_escape_iters=0,
+        ),
+    )
+
+    # NOTE: the test mask assumes every grid point is present
+    assert x.shape[0] == config.resolution**2
+
+    # NOTE: the control is constant along a trajectory, so it is kept per
+    # realization (shape `(n, 2)`) instead of being replicated over the window
+    c = grid_control(config.bbox, config.resolution, dtype=mat.dtype, device=mat.device)
+    c = c[mask.reshape(-1)]
+
+    (x_train, c_train), (x_validate, c_validate), (x_test, c_test) = cast(
+        tuple[
+            tuple[torch.Tensor, torch.Tensor],
+            tuple[torch.Tensor, torch.Tensor],
+            tuple[torch.Tensor, torch.Tensor],
+        ],
+        random_split(
+            (x, c),
+            config.split,
+            rng=default_rng(torch, config.seed, device=mat.device),
+        ),
+    )
+
+    return DMDDataset(
+        input_size=mat.shape[0],
+        x_train=x_train,
+        c_train=c_train,
+        x_validate=x_validate,
+        c_validate=c_validate,
+        x_test=x_test,
+        c_test=c_test,
+        zmask=zmask,
+        test_mask=make_test_mask(config, mat.device),
+    )
+
+
+def run_once(
+    config: DMDConfig,
+    dataset: DMDDataset,
+    *,
+    model: DMDAutoencoder | None = None,
+    stages: Sequence[Stage] | None = None,
+    callback: TrainCallback | None = None,
+) -> RunResult:
+    """Train a model on *dataset* and evaluate it on the test split."""
+    if model is None:
+        model = make_dmd_autoencoder(
+            config,
+            dataset.input_size,
+            device=dataset.x_train.device,
+            dtype=dataset.x_train.dtype,
+        )
+        model.fit_observables(dataset.x_train)
+
+    if stages is None:
+        stages = make_stages(config)
+
+    criterion = DMDLoss(
+        logn_clip=model.logn_clip,
+        gamma_rec=config.gamma_rec,
+        gamma_lin=config.gamma_lin,
+        gamma_pre=config.gamma_pre,
+    )
+
+    _, losses, train_metrics = torch_train(
+        model,
+        criterion,
+        dataset.x_train,
+        dataset.x_validate,
+        c_train=dataset.c_train,
+        c_validate=dataset.c_validate,
+        stages=stages,
+        lr=config.lr,
+        max_norm=config.max_norm,
+        epochs=config.epochs,
+        batch_size=config.batch_size,
+        callback=callback,
+    )
+    dmdc = build_latent_dmd(model, dataset.x_train, dataset.c_train)
+
+    loss_test = evaluate(
+        model,
+        criterion,
+        DataLoader(
+            TensorDataset(dataset.x_test, dataset.c_test),
+            batch_size=config.batch_size,
+        ),
+        dmdc,
+        stages[-1].horizon,
+    )
+
+    return RunResult(
+        model=model,
+        dmdc=dmdc,
+        losses=losses,
+        train_metrics=train_metrics,
+        loss_test=loss_test,
+    )
 
 
 # }}}

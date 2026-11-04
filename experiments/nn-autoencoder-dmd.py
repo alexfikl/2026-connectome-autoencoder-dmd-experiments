@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import itertools
 import logging
 import pathlib
@@ -10,14 +11,11 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-import array_api_compat
 import dmdaelib
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, TensorDataset
 
 from commonlib import make_argument_parser
-from nneuroutil.array_api_extras import default_rng
 from nneuroutil.dmdc import DenseDMDc
 from nneuroutil.helpers import machine_info
 from nneuroutil.interop.torch import (
@@ -91,7 +89,12 @@ def compute_features(
 
     # {{{ sensitivity to the control
 
-    c = dmdaelib.grid_control(model, bbox, resolution, like=dmdc.A)  # ty: ignore[invalid-argument-type]
+    c = dmdaelib.grid_control(
+        bbox,
+        resolution,
+        dtype=model.dtype,
+        device=next(model.parameters()).device,
+    )
     c = c.detach().clone().requires_grad_()
     g_final = model.rollout(dmdaelib.encode_origin(model, c), dmdc, maxit)[:, -1]
     _, logn_final = model.decode(g_final)
@@ -411,12 +414,7 @@ def train(
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
 ) -> int:
-    from commonlib import (
-        generate_grid,
-        generate_timeseries_dataset,
-        load_matrix_datasets,
-    )
-    from nneuroutil.data import random_split
+    from commonlib import load_matrix_datasets
 
     machine = machine_info(SCRIPT_PATH)
     log.info("Machine:\n%s", machine.pretty())
@@ -485,79 +483,33 @@ def train(
     log.info("Using seed: %d", config.seed)
     torch.manual_seed(config.seed)
 
-    # NOTE: when resuming, the stored model configuration is used
-    model_config: dict[str, Any]
-    if checkpoint is not None:
-        model_config = checkpoint["model_config"]
-    else:
-        model_config = {
-            "input_size": d,
-            "npod": config.npod,
-            "latent_size": config.latent_size,
-            "hidden_size": config.hidden_size,
-            "c_features": config.c_features,
-            "c_depth": config.c_depth,
-            "c_alpha": config.c_alpha,
-            "escape_radius": config.escape_radius,
-            "dmd_method": config.dmd_method,
-            "ridge_eps": config.ridge_eps,
-        }
-
-    model = dmdaelib.DMDAutoencoder(
-        **model_config, device=device, dtype=mat.dtype.to_real()
+    model = dmdaelib.make_dmd_autoencoder(
+        config, d, device=device, dtype=mat.dtype.to_real()
     )
     log.info("Network:\n%s", model)
 
     # NOTE: the staged schedule restarts from the loaded weights
     if checkpoint is not None:
-        model.load_state_dict(checkpoint["model"])
+        try:
+            model.load_state_dict(checkpoint["model"])
+        except RuntimeError as exc:
+            log.error(
+                "Cannot resume from '%s': the model architecture does not match "
+                "the current configuration.\n%s",
+                weights,
+                exc,
+            )
+            return 1
         log.info("Initialized from '%s'", weights)
 
     # }}}
 
-    # {{{ generate dataset
+    # {{{ dataset
 
-    # NOTE: `min_escape_iters=0` keeps all the trajectories, including the ones
-    # that escape early: they carry the escape dynamics
-    x, _, mask, zmask = cast(
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        generate_timeseries_dataset(
-            mat,
-            bbox=config.bbox,
-            resolution=config.resolution,
-            # NOTE: we add 1 so that x.shape == (n, maxit, 2d)
-            maxit=config.maxit + 1,
-            escape_radius=config.escape_radius,
-            min_escape_iters=0,
-        ),
-    )
-
-    c = generate_grid(
-        *config.bbox,
-        nx=config.resolution,
-        ny=config.resolution,
-        dtype=mat.dtype,
-        xp=array_api_compat.array_namespace(mat),
-        device=device,
-    )
-
-    # NOTE: the control is constant along a trajectory, so it is kept per
-    # realization (shape `(n, 2)`) instead of being replicated over the window
-    c = dmdaelib.normalize_control(c[mask], config.bbox)
-
-    (x_train, c_train), (x_validate, c_validate), (x_test, c_test) = cast(
-        tuple[
-            tuple[torch.Tensor, torch.Tensor],
-            tuple[torch.Tensor, torch.Tensor],
-            tuple[torch.Tensor, torch.Tensor],
-        ],
-        random_split(
-            (x, c), config.split, rng=default_rng(torch, config.seed, device=device)
-        ),
-    )
+    dataset = dmdaelib.prepare_dataset(config, mat)
 
     if checkpoint is None:
-        model.fit_observables(x_train)
+        model.fit_observables(dataset.x_train)
 
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -578,13 +530,13 @@ def train(
         if not stage.use_dmd:
             return
 
-        dmdc = dmdaelib.build_latent_dmd(model, x_train, c_train)
+        dmdc = dmdaelib.build_latent_dmd(model, dataset.x_train, dataset.c_train)
         metrics = _plot_predict(
             outfile,
             model,
             dmdc,
             config,
-            zmask=zmask,
+            zmask=dataset.zmask,
             tag=stage.name,
             overwrite=overwrite,
             plot=last,
@@ -594,38 +546,18 @@ def train(
         error_metrics.dice[epoch] = metrics.dice
         error_metrics.a_radius[epoch] = metrics.a_radius
 
-    criterion = dmdaelib.DMDLoss(
-        logn_clip=model.logn_clip,
-        gamma_rec=config.gamma_rec,
-        gamma_lin=config.gamma_lin,
-        gamma_pre=config.gamma_pre,
+    result = dmdaelib.run_once(
+        config, dataset, model=model, stages=stages, callback=plot_predict
     )
-
-    _, losses, train_metrics = dmdaelib.torch_train(
-        model,
-        criterion,
-        x_train,
-        x_validate,
-        c_train=c_train,
-        c_validate=c_validate,
-        stages=stages,
-        lr=config.lr,
-        max_norm=config.max_norm,
-        epochs=config.epochs,
-        batch_size=config.batch_size,
-        callback=plot_predict,
-    )
-    dmdc = dmdaelib.build_latent_dmd(model, x_train, c_train)
+    model = result.model
+    losses = result.losses
+    train_metrics = result.train_metrics
+    dmdc = result.dmdc
+    loss_test = result.loss_test
+    num_epochs = len(losses)
 
     mem.add_record("After training")
 
-    loss_test = dmdaelib.evaluate(
-        model,
-        criterion,
-        DataLoader(TensorDataset(x_test, c_test), batch_size=config.batch_size),
-        dmdc,
-        stages[-1].horizon,
-    )
     log.info(
         "[%03d/%03d] test_total %.5e test_rec %.5e test_lin %.5e test_pre %.5e",
         num_epochs,
@@ -641,7 +573,7 @@ def train(
         model,
         dmdc,
         config,
-        zmask=zmask,
+        zmask=dataset.zmask,
         tag="final",
         overwrite=overwrite,
     )
@@ -659,7 +591,6 @@ def train(
             # model
             "provenance": provenance,
             "model": model.state_dict(),
-            "model_config": model_config,
             "dmdc": {"A": dmdc.A, "B": dmdc.B},
             # loss and metrics
             "num_epochs_trained": len(losses),
@@ -671,7 +602,7 @@ def train(
             # dataset
             "inputfile": str(filename),
             "mat": mat,
-            "zmask": zmask,
+            "zmask": dataset.zmask,
             # parameters
             "config": asdict(config),
         },
@@ -685,7 +616,7 @@ def train(
 
     # {{{ plot
 
-    _plot_dataset(outfile, zmask, bbox=config.bbox, overwrite=overwrite)
+    _plot_dataset(outfile, dataset.zmask, bbox=config.bbox, overwrite=overwrite)
     _plot_loss(outfile, losses, overwrite=overwrite)
     _plot_train_metrics(outfile, train_metrics, overwrite=overwrite)
     _plot_error_metrics(
@@ -749,9 +680,22 @@ def infer(
 
     # {{{ load model
 
-    model_config = checkpoint["model_config"]
-    model = dmdaelib.DMDAutoencoder(**model_config, device=device, dtype=torch.float32)
-    model.load_state_dict(checkpoint["model"])
+    model = dmdaelib.make_dmd_autoencoder(
+        config,
+        checkpoint["mat"].shape[0],
+        device=device,
+        dtype=torch.float32,
+    )
+    try:
+        model.load_state_dict(checkpoint["model"])
+    except RuntimeError as exc:
+        log.error(
+            "Cannot load '%s': the model architecture does not match the "
+            "checkpoint.\n%s",
+            weightsfile,
+            exc,
+        )
+        return 1
     model.eval()
 
     mem.add_record("After model load")
@@ -1112,12 +1056,7 @@ def sweep(
     """Train missing sweep configurations and plot all available results."""
     from dataclasses import asdict, replace
 
-    from commonlib import (
-        generate_grid,
-        generate_timeseries_dataset,
-        load_matrix_datasets,
-    )
-    from nneuroutil.data import random_split
+    from commonlib import load_matrix_datasets
 
     device = torch.get_default_device()
     config = dmdaelib.DMDConfig.from_sources(overrides)
@@ -1174,18 +1113,39 @@ def sweep(
 
     current_keys = {run_config.suffix for run_config in run_configs}
 
-    # NOTE: reconstruct the test pixels from the same split used for training
-    n = config.resolution**2
-    indices = torch.arange(n, device=device)
-    split_indices = random_split(
-        (indices,),
-        config.split,
-        rng=default_rng(torch, config.seed, device=device),
+    missing = [
+        run_config
+        for run_config in run_configs
+        if overwrite or run_config.suffix not in results
+    ]
+    log.info(
+        "Sweep has %d configurations (%d missing, %d cached).",
+        len(run_configs),
+        len(missing),
+        len(run_configs) - len(missing),
     )
-    idx_test = split_indices[2][0]
-    test_mask = torch.zeros(n, dtype=torch.bool, device=device)
-    test_mask[idx_test] = True  # ty: ignore[invalid-assignment]
-    test_mask = test_mask.reshape(config.resolution, config.resolution)
+
+    dataset: dmdaelib.DMDDataset | None = None
+    if missing:
+        try:
+            matrices = cast(
+                torch.Tensor,
+                load_matrix_datasets(
+                    filename, key=config.datakey, device=device, xp=torch
+                ),
+            )
+            mat = matrices[config.dataidx].to(torch.complex64)
+        except Exception as exc:
+            log.error("Failed to load dataset '%s': %s", filename.name, exc)
+            return 1
+
+        # NOTE: the dataset is generated once and shared by all runs
+        dataset = dmdaelib.prepare_dataset(config, mat)
+        test_mask = dataset.test_mask
+    else:
+        # NOTE: no dataset is needed, but the cached metrics still have to be
+        # recomputed on the test split
+        test_mask = dmdaelib.make_test_mask(config, device)
 
     # NOTE: cached records may have been evaluated on the full grid
     for record in results.values():
@@ -1212,69 +1172,7 @@ def sweep(
         record["metrics"]["dice"] = float(dice)
         record["metrics"]["iou"] = float(iou)
 
-    missing = [
-        run_config
-        for run_config in run_configs
-        if overwrite or run_config.suffix not in results
-    ]
-    log.info(
-        "Sweep has %d configurations (%d missing, %d cached).",
-        len(run_configs),
-        len(missing),
-        len(run_configs) - len(missing),
-    )
-
-    if missing:
-        try:
-            matrices = cast(
-                torch.Tensor,
-                load_matrix_datasets(
-                    filename, key=config.datakey, device=device, xp=torch
-                ),
-            )
-            mat = matrices[config.dataidx].to(torch.complex64)
-        except Exception as exc:
-            log.error("Failed to load dataset '%s': %s", filename.name, exc)
-            return 1
-
-        d = mat.shape[0]
-
-        # NOTE: the dataset is generated once and shared by all runs
-        x, _, mask, zmask = cast(
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-            generate_timeseries_dataset(
-                mat,
-                bbox=config.bbox,
-                resolution=config.resolution,
-                maxit=config.maxit + 1,
-                escape_radius=config.escape_radius,
-                min_escape_iters=0,
-            ),
-        )
-
-        c = generate_grid(
-            *config.bbox,
-            nx=config.resolution,
-            ny=config.resolution,
-            dtype=mat.dtype,
-            xp=array_api_compat.array_namespace(mat),
-            device=device,
-        )
-        c = dmdaelib.normalize_control(c[mask], config.bbox)
-
-        (x_train, c_train), (x_validate, c_validate), (x_test, c_test) = cast(
-            tuple[
-                tuple[torch.Tensor, torch.Tensor],
-                tuple[torch.Tensor, torch.Tensor],
-                tuple[torch.Tensor, torch.Tensor],
-            ],
-            random_split(
-                (x, c),
-                config.split,
-                rng=default_rng(torch, config.seed, device=device),
-            ),
-        )
-
+    if dataset is not None:
         for i, run_config in enumerate(missing, start=1):
             log.info(
                 "[%02d/%02d] npod=%d latent_size=%d hidden_size=%d "
@@ -1289,62 +1187,18 @@ def sweep(
             )
 
             torch.manual_seed(run_config.seed)
-            model = dmdaelib.DMDAutoencoder(
-                input_size=d,
-                npod=run_config.npod,
-                latent_size=run_config.latent_size,
-                hidden_size=run_config.hidden_size,
-                c_features=run_config.c_features,
-                c_depth=run_config.c_depth,
-                c_alpha=run_config.c_alpha,
-                escape_radius=run_config.escape_radius,
-                dmd_method=run_config.dmd_method,
-                ridge_eps=run_config.ridge_eps,
-                device=device,
-                dtype=mat.dtype.to_real(),
-            )
-            model.fit_observables(x_train)
-
-            criterion = dmdaelib.DMDLoss(
-                logn_clip=model.logn_clip,
-                gamma_rec=run_config.gamma_rec,
-                gamma_lin=run_config.gamma_lin,
-                gamma_pre=run_config.gamma_pre,
-            )
-            stages = dmdaelib.make_stages(run_config)
-
-            _, losses, train_metrics = dmdaelib.torch_train(
-                model,
-                criterion,
-                x_train,
-                x_validate,
-                c_train=c_train,
-                c_validate=c_validate,
-                stages=stages,
-                lr=run_config.lr,
-                max_norm=run_config.max_norm,
-                epochs=run_config.epochs,
-                batch_size=run_config.batch_size,
-            )
+            result = dmdaelib.run_once(run_config, dataset)
 
             with torch.no_grad():
-                dmdc = dmdaelib.build_latent_dmd(model, x_train, c_train)
                 metrics, in_set = _predict_metrics(
-                    model, dmdc, run_config, zmask=zmask, eval_mask=test_mask
+                    result.model,
+                    result.dmdc,
+                    run_config,
+                    zmask=dataset.zmask,
+                    eval_mask=dataset.test_mask,
                 )
 
-                test_loader = DataLoader(
-                    TensorDataset(x_test, c_test),
-                    batch_size=run_config.batch_size,
-                )
-                loss_test = dmdaelib.evaluate(
-                    model,
-                    criterion,
-                    test_loader,
-                    dmdc,
-                    stages[-1].horizon,
-                )
-
+            losses = result.losses
             record = {
                 "config": asdict(run_config),
                 "metrics": {
@@ -1353,16 +1207,16 @@ def sweep(
                     "dmdaelib.spectral_radius": float(metrics.a_radius),
                     "loss_train": float(losses[-1, 0, 0]),
                     "loss_val": float(losses[-1, 1, 0]),
-                    "loss_test": float(loss_test[0]),
+                    "loss_test": float(result.loss_test[0]),
                 },
                 "losses": losses.detach().cpu().numpy(),
-                "loss_test": loss_test.detach().cpu().numpy(),
+                "loss_test": result.loss_test.detach().cpu().numpy(),
                 "train_metrics": {
                     name: value.detach().cpu().numpy()
-                    for name, value in train_metrics._asdict().items()
+                    for name, value in result.train_metrics._asdict().items()
                 },
                 "pred_mask": in_set.numpy().astype(np.uint8),
-                "zmask": zmask.detach().cpu().numpy().astype(np.uint8),
+                "zmask": dataset.zmask.detach().cpu().numpy().astype(np.uint8),
             }
             results[run_config.suffix] = record
 
@@ -1378,7 +1232,7 @@ def sweep(
                 record["metrics"]["loss_test"],
             )
 
-            del model
+            del result
             if device.type == "cuda":
                 torch.cuda.empty_cache()
     else:
@@ -1496,6 +1350,12 @@ if __name__ == "__main__":
             "and skip the plots"
         ),
     )
+    parser.add_argument(
+        "--study",
+        choices=[*SWEEP_STUDIES, "all"],
+        default=None,
+        help="Named sweep study to run (default: all)",
+    )
 
     subparser = subparsers.add_parser(
         "merge",
@@ -1537,9 +1397,9 @@ if __name__ == "__main__":
     )
     subparser.add_argument(
         "--study",
-        choices=["latent", "control", "all"],
-        default="all",
-        help="Named study to run",
+        choices=[*SWEEP_STUDIES, "all"],
+        default=argparse.SUPPRESS,
+        help="Named study to run (default: all)",
     )
 
     args = parser.parse_args()
@@ -1613,7 +1473,7 @@ if __name__ == "__main__":
                 sweep(
                     args.filename,
                     outfile=args.outfile,
-                    study=args.study,
+                    study=args.study or "all",
                     overwrite=args.force,
                     **overrides,
                 )

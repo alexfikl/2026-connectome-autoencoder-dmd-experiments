@@ -174,8 +174,9 @@ ablation filename dataidx="0" *ARGS:
     {{ PYTHON }} experiments/nn-autoencoder-dmd.py \
         --device cuda \
         --resolution 64 --maxit 32 --epochs 60 --batch-size 1024 --seed 0 \
+        --study all \
         {{ ARGS }} \
-        sweep {{ filename }} --dataidx {{ dataidx }} --study all
+        sweep {{ filename }} --dataidx {{ dataidx }}
 
 # }}}
 
