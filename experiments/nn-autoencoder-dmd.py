@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import csv
 import itertools
 import logging
 import pathlib
@@ -260,17 +259,13 @@ def _plot_loss(
         ax.legend(ncols=2)
 
 
-def _plot_predict(
-    filename: pathlib.Path,
+def _predict_metrics(
     model: DMDAutoencoder,
     dmdc: DenseDMDc[Any],
     config: DMDConfig,
     *,
     zmask: torch.Tensor,
-    tag: str,
-    overwrite: bool,
-    plot: bool = True,
-) -> ErrorMetrics:
+) -> tuple[ErrorMetrics, torch.Tensor]:
     norm = torch_predict(
         model,
         dmdc,
@@ -288,6 +283,22 @@ def _plot_predict(
         a_radius=spectral_radius(dmdc.A),  # ty: ignore[invalid-argument-type]
     )
 
+    return metrics, in_set.detach().cpu()
+
+
+def _plot_predict(
+    filename: pathlib.Path,
+    model: DMDAutoencoder,
+    dmdc: DenseDMDc[Any],
+    config: DMDConfig,
+    *,
+    zmask: torch.Tensor,
+    tag: str,
+    overwrite: bool,
+    plot: bool = True,
+) -> ErrorMetrics:
+    metrics, in_set = _predict_metrics(model, dmdc, config, zmask=zmask)
+
     if not plot:
         return metrics
 
@@ -301,7 +312,7 @@ def _plot_predict(
         overwrite=overwrite,
     ) as fig:
         ax = fig.gca()
-        ax.imshow(in_set.cpu().numpy(), extent=config.bbox, cmap="binary")
+        ax.imshow(in_set.numpy(), extent=config.bbox, cmap="binary")
 
         # NOTE: overlay the true converged set as a red outline
         xmin, xmax, ymin, ymax = config.bbox
@@ -895,20 +906,202 @@ def merge(
 
 # {{{ sweep
 
+SWEEP_STUDIES: dict[str, dict[str, Sequence[int]]] = {
+    "latent": {
+        "npod": (24, 36, 48),
+        "latent_size": (48, 64, 96, 128),
+        "hidden_size": (256,),
+        "c_features": (8,),
+        "c_depth": (4,),
+    },
+    "control": {
+        "npod": (48,),
+        "latent_size": (128,),
+        "hidden_size": (256,),
+        "c_features": (0, 4, 8, 16),
+        "c_depth": (1, 2, 4),
+    },
+}
+
+
+def _print_sweep_summary(
+    results: Mapping[str, Mapping[str, Any]], *, title: str
+) -> None:
+    from rich.console import Console
+    from rich.table import Table
+
+    table = Table(title=title, header_style="bold")
+    table.add_column("npod", justify="right")
+    table.add_column("latent", justify="right")
+    table.add_column("hidden", justify="right")
+    table.add_column("c_feat", justify="right")
+    table.add_column("c_depth", justify="right")
+    table.add_column("loss(train)", justify="right")
+    table.add_column("loss(valid)", justify="right")
+    table.add_column("loss(test)", justify="right")
+    table.add_column("Dice", justify="right")
+    table.add_column("IoU", justify="right")
+    table.add_column("|lam|max", justify="right")
+
+    # NOTE: order by the test loss, not by Dice/IoU
+    records = sorted(results.values(), key=lambda r: r["metrics"]["loss_test"])
+
+    for record in records:
+        config = cast(Mapping[str, Any], record["config"])
+        metrics = cast(Mapping[str, float], record["metrics"])
+        table.add_row(
+            str(config["npod"]),
+            str(config["latent_size"]),
+            str(config["hidden_size"]),
+            str(config["c_features"]),
+            str(config["c_depth"]),
+            f"{metrics['loss_train']:.3e}",
+            f"{metrics['loss_val']:.3e}",
+            f"{metrics['loss_test']:.3e}",
+            f"{metrics['dice']:.4f}",
+            f"{metrics['iou']:.4f}",
+            f"{metrics['spectral_radius']:.3f}",
+        )
+
+    Console().print(table)
+
+
+def _plot_sweep(
+    filename: pathlib.Path,
+    results: Mapping[str, Mapping[str, Any]],
+    *,
+    overwrite: bool = True,
+) -> None:
+    if not results:
+        return
+
+    stem = filename.with_suffix("")
+    records = list(results.values())
+    configs = [cast(Mapping[str, Any], record["config"]) for record in records]
+    metrics = [cast(Mapping[str, float], record["metrics"]) for record in records]
+
+    # {{{ summary
+
+    param_names = [
+        name
+        for name in ("npod", "latent_size", "hidden_size", "c_features", "c_depth")
+        if len({config[name] for config in configs}) > 1
+    ]
+    if not param_names:
+        param_names = ["npod"]
+
+    with figure(
+        stem.with_stem(f"{stem.stem}-sweep-summary"),
+        nrows=2,
+        ncols=len(param_names),
+        overwrite=overwrite,
+    ) as fig:
+        axes = np.reshape(fig.axes, (2, len(param_names)))
+        quantities = (
+            ("dice", "Dice", False, (0.0, 1.0)),
+            ("loss_test", "Test loss", True, None),
+        )
+        for col, name in enumerate(param_names):
+            x = np.array([config[name] for config in configs])
+            for row, (key, label, log_scale, ylim) in enumerate(quantities):
+                ax = axes[row, col]
+                y = np.array([metric[key] for metric in metrics], dtype=float)
+                ax.scatter(x, y, s=18, alpha=0.7)
+                ux = np.unique(x)
+                uy = np.array([np.nanmean(y[x == u]) for u in ux])
+                ax.plot(ux, uy, color="C1", marker="o")
+                ax.set_xlabel(name)
+                ax.set_title(label)
+                if row == 0:
+                    ax.set_ylabel(label)
+                if log_scale:
+                    ax.set_yscale("log")
+                if ylim is not None:
+                    ax.set_ylim(*ylim)
+
+    # }}}
+
+    # {{{ losses
+
+    max_epochs = max(int(np.asarray(r["losses"]).shape[0]) for r in records)
+    losses = np.full((len(records), max_epochs, 2, 4), np.nan)
+    for i, record in enumerate(records):
+        value = np.asarray(record["losses"], dtype=float)
+        losses[i, : value.shape[0]] = value
+
+    labels = ("Total", "Rec", "Lin", "Pre")
+    with figure(
+        stem.with_stem(f"{stem.stem}-sweep-losses"),
+        ncols=len(labels),
+        overwrite=overwrite,
+    ) as fig:
+        for k, (ax, label) in enumerate(zip(fig.axes, labels, strict=True)):
+            for i in range(len(records)):
+                ax.plot(losses[i, :, 0, k], color="C0", alpha=0.15, lw=0.6)
+                ax.plot(
+                    losses[i, :, 1, k],
+                    color="C1",
+                    alpha=0.15,
+                    lw=0.6,
+                    ls="--",
+                )
+            train = np.nanmedian(losses[:, :, 0, k], axis=0)
+            valid = np.nanmedian(losses[:, :, 1, k], axis=0)
+            ax.plot(train, color="C0", lw=1.5, label="Train")
+            ax.plot(valid, color="C1", lw=1.5, ls="--", label="Valid.")
+            ax.set_yscale("log")
+            ax.set_xlabel("Epoch")
+            ax.set_title(label)
+            ax.legend()
+
+    # }}}
+
+    # {{{ predictions
+
+    valid = [record for record in records if "pred_mask" in record]
+    if valid:
+        bbox = cast(tuple[float, float, float, float], valid[0]["config"]["bbox"])
+        ncols = min(6, len(valid) + 1)
+        nrows = (len(valid) + 1 + ncols - 1) // ncols
+        with figure(
+            stem.with_stem(f"{stem.stem}-sweep-predict"),
+            nrows=nrows,
+            ncols=ncols,
+            overwrite=overwrite,
+        ) as fig:
+            axes = fig.axes
+            for ax in axes[len(valid) + 1 :]:
+                ax.set_axis_off()
+
+            ax = axes[0]
+            ax.imshow(np.asarray(valid[0]["zmask"]), extent=bbox, cmap="binary")
+            ax.set_title("True")
+            ax.set_axis_off()
+
+            for ax, record in zip(axes[1:], valid, strict=False):
+                config = cast(Mapping[str, Any], record["config"])
+                ax.imshow(np.asarray(record["pred_mask"]), extent=bbox, cmap="binary")
+                label = " ".join(
+                    f"{name}={config[name]}"
+                    for name in ("npod", "latent_size", "c_features", "c_depth")
+                )
+                ax.set_title(label, fontsize="small")
+                ax.set_axis_off()
+
+    # }}}
+
 
 def sweep(
     filename: pathlib.Path,
     *,
     outfile: pathlib.Path | None = None,
-    npod_list: Sequence[int] = (24, 48),
-    latent_size_list: Sequence[int] = (64, 128),
-    hidden_size_list: Sequence[int] = (256,),
-    c_features_list: Sequence[int] = (0, 8),
-    c_depth_list: Sequence[int] = (2, 4),
+    study: str = "all",
     overwrite: bool = False,
     **overrides: Any,
 ) -> int:
-    """Run a grid search parameter sweep over model architecture parameters."""
+    """Train missing sweep configurations and plot all available results."""
+    from dataclasses import asdict, replace
+
     from commonlib import (
         generate_grid,
         generate_timeseries_dataset,
@@ -919,221 +1112,236 @@ def sweep(
     device = torch.get_default_device()
     config = DMDConfig.from_sources(overrides)
 
-    try:
-        matrices = cast(
-            torch.Tensor,
-            load_matrix_datasets(filename, key=config.datakey, device=device, xp=torch),
+    if outfile is None:
+        outfile = filename.parent / "sweeps" / f"{filename.stem}-m{config.dataidx}.pkl"
+    else:
+        outfile = outfile.with_suffix(".pkl")
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+
+    results: dict[str, dict[str, Any]] = {}
+    if outfile.exists():
+        # NOTE: the results contain numpy arrays, so `weights_only=True` cannot
+        # load them; this is a locally generated file
+        results = cast(
+            dict[str, dict[str, Any]],
+            torch.load(outfile, map_location="cpu", weights_only=False),
         )
-        mat = matrices[config.dataidx].to(torch.complex64)
-    except Exception as exc:
-        log.error("Failed to load dataset '%s': %s", filename.name, exc)
-        return 1
+        log.info("Loaded %d sweep results from '%s'.", len(results), outfile)
 
-    d = mat.shape[0]
+    studies = SWEEP_STUDIES if study == "all" else {study: SWEEP_STUDIES[study]}
 
-    # Generate dataset once for all sweep runs
-    x, _, mask, zmask = cast(
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        generate_timeseries_dataset(
-            mat,
-            bbox=config.bbox,
-            resolution=config.resolution,
-            maxit=config.maxit + 1,
-            escape_radius=config.escape_radius,
-            min_escape_iters=0,
-        ),
-    )
-
-    c = generate_grid(
-        *config.bbox,
-        nx=config.resolution,
-        ny=config.resolution,
-        dtype=mat.dtype,
-        xp=array_api_compat.array_namespace(mat),
-        device=device,
-    )
-    c = normalize_control(c[mask], config.bbox)
-
-    (x_train, c_train), (x_validate, c_validate), (x_test, c_test) = cast(
-        tuple[
-            tuple[torch.Tensor, torch.Tensor],
-            tuple[torch.Tensor, torch.Tensor],
-            tuple[torch.Tensor, torch.Tensor],
-        ],
-        random_split(
-            (x, c), config.split, rng=default_rng(torch, config.seed, device=device)
-        ),
-    )
-
-    # Prune combinations
-    combinations: list[tuple[int, int, int, int, int]] = []
+    run_configs: list[DMDConfig] = []
     seen = set()
-    for npod, latent_size, hidden_size, c_features, c_depth in itertools.product(
-        npod_list, latent_size_list, hidden_size_list, c_features_list, c_depth_list
-    ):
-        if latent_size < npod:
-            continue
-        effective_depth = 1 if c_features == 0 else c_depth
-        key = (npod, latent_size, hidden_size, c_features, effective_depth)
-        if key in seen:
-            continue
-        seen.add(key)
-        combinations.append(key)
+    for axes in studies.values():
+        for values in itertools.product(
+            axes["npod"],
+            axes["latent_size"],
+            axes["hidden_size"],
+            axes["c_features"],
+            axes["c_depth"],
+        ):
+            npod, latent_size, hidden_size, c_features, c_depth = values
+            if latent_size < npod:
+                continue
+            effective_depth = 1 if c_features == 0 else c_depth
+            run_config = replace(
+                config,
+                npod=npod,
+                latent_size=latent_size,
+                hidden_size=hidden_size,
+                c_features=c_features,
+                c_depth=effective_depth,
+            )
+            key = run_config.suffix
+            if key in seen:
+                continue
+            seen.add(key)
+            run_configs.append(run_config)
 
-    if not combinations:
+    if not run_configs:
         log.error("No valid parameter combinations to sweep.")
         return 1
 
-    log.info("Starting sweep over %d configurations...", len(combinations))
+    current_keys = {run_config.suffix for run_config in run_configs}
+    missing = [
+        run_config
+        for run_config in run_configs
+        if overwrite or run_config.suffix not in results
+    ]
+    log.info(
+        "Sweep has %d configurations (%d missing, %d cached).",
+        len(run_configs),
+        len(missing),
+        len(run_configs) - len(missing),
+    )
 
-    stages = make_stages(config)
-    results: list[dict[str, Any]] = []
+    if missing:
+        try:
+            matrices = cast(
+                torch.Tensor,
+                load_matrix_datasets(
+                    filename, key=config.datakey, device=device, xp=torch
+                ),
+            )
+            mat = matrices[config.dataidx].to(torch.complex64)
+        except Exception as exc:
+            log.error("Failed to load dataset '%s': %s", filename.name, exc)
+            return 1
 
-    for i, (npod, latent_size, hidden_size, c_features, c_depth) in enumerate(
-        combinations, start=1
-    ):
-        log.info(
-            "[%02d/%02d] "
-            "npod=%d latent_size=%d hidden_size=%d c_features=%d c_depth=%d",
-            i,
-            len(combinations),
-            npod,
-            latent_size,
-            hidden_size,
-            c_features,
-            c_depth,
+        d = mat.shape[0]
+
+        # NOTE: the dataset is generated once and shared by all runs
+        x, _, mask, zmask = cast(
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+            generate_timeseries_dataset(
+                mat,
+                bbox=config.bbox,
+                resolution=config.resolution,
+                maxit=config.maxit + 1,
+                escape_radius=config.escape_radius,
+                min_escape_iters=0,
+            ),
         )
 
-        torch.manual_seed(config.seed)
-        model = DMDAutoencoder(
-            input_size=d,
-            npod=npod,
-            latent_size=latent_size,
-            hidden_size=hidden_size,
-            c_features=c_features,
-            c_depth=c_depth,
-            escape_radius=config.escape_radius,
-            dmd_method=config.dmd_method,
-            ridge_eps=config.ridge_eps,
+        c = generate_grid(
+            *config.bbox,
+            nx=config.resolution,
+            ny=config.resolution,
+            dtype=mat.dtype,
+            xp=array_api_compat.array_namespace(mat),
             device=device,
-            dtype=mat.dtype.to_real(),
         )
-        model.fit_observables(x_train)
+        c = normalize_control(c[mask], config.bbox)
 
-        criterion = DMDLoss(
-            logn_clip=model.logn_clip,
-            gamma_rec=config.gamma_rec,
-            gamma_lin=config.gamma_lin,
-            gamma_pre=config.gamma_pre,
-        )
-
-        _, losses, _ = torch_train(
-            model,
-            criterion,
-            x_train,
-            x_validate,
-            c_train=c_train,
-            c_validate=c_validate,
-            stages=stages,
-            lr=config.lr,
-            max_norm=config.max_norm,
-            epochs=config.epochs,
-            batch_size=config.batch_size,
+        (x_train, c_train), (x_validate, c_validate), (x_test, c_test) = cast(
+            tuple[
+                tuple[torch.Tensor, torch.Tensor],
+                tuple[torch.Tensor, torch.Tensor],
+                tuple[torch.Tensor, torch.Tensor],
+            ],
+            random_split(
+                (x, c),
+                config.split,
+                rng=default_rng(torch, config.seed, device=device),
+            ),
         )
 
-        with torch.no_grad():
-            dmdc = build_latent_dmd(model, x_train, c_train)
-            metrics = _plot_predict(
-                filename,
-                model,
-                dmdc,
-                config,
-                zmask=zmask,
-                tag="sweep",
-                overwrite=False,
-                plot=False,
+        for i, run_config in enumerate(missing, start=1):
+            log.info(
+                "[%02d/%02d] npod=%d latent_size=%d hidden_size=%d "
+                "c_features=%d c_depth=%d",
+                i,
+                len(missing),
+                run_config.npod,
+                run_config.latent_size,
+                run_config.hidden_size,
+                run_config.c_features,
+                run_config.c_depth,
             )
 
-            test_loader = DataLoader(
-                TensorDataset(x_test, c_test), batch_size=config.batch_size
+            torch.manual_seed(run_config.seed)
+            model = DMDAutoencoder(
+                input_size=d,
+                npod=run_config.npod,
+                latent_size=run_config.latent_size,
+                hidden_size=run_config.hidden_size,
+                c_features=run_config.c_features,
+                c_depth=run_config.c_depth,
+                escape_radius=run_config.escape_radius,
+                dmd_method=run_config.dmd_method,
+                ridge_eps=run_config.ridge_eps,
+                device=device,
+                dtype=mat.dtype.to_real(),
             )
-            loss_test = evaluate(
+            model.fit_observables(x_train)
+
+            criterion = DMDLoss(
+                logn_clip=model.logn_clip,
+                gamma_rec=run_config.gamma_rec,
+                gamma_lin=run_config.gamma_lin,
+                gamma_pre=run_config.gamma_pre,
+            )
+            stages = make_stages(run_config)
+
+            _, losses, train_metrics = torch_train(
                 model,
                 criterion,
-                test_loader,
-                dmdc,
-                stages[-1].horizon,
+                x_train,
+                x_validate,
+                c_train=c_train,
+                c_validate=c_validate,
+                stages=stages,
+                lr=run_config.lr,
+                max_norm=run_config.max_norm,
+                epochs=run_config.epochs,
+                batch_size=run_config.batch_size,
             )
 
-        row = {
-            "npod": npod,
-            "latent_size": latent_size,
-            "hidden_size": hidden_size,
-            "c_features": c_features,
-            "c_depth": c_depth,
-            "dice": float(metrics.dice),
-            "iou": float(metrics.iou),
-            "spectral_radius": float(metrics.a_radius),
-            "loss_train": float(losses[-1, 0, 0]),
-            "loss_val": float(losses[-1, 1, 0]),
-            "loss_test": float(loss_test[0]),
-        }
-        results.append(row)
-        log.info(
-            "       -> Dice: %.4f | IoU: %.4f | |lam|max: %.3f | test loss: %.3e",
-            row["dice"],
-            row["iou"],
-            row["spectral_radius"],
-            row["loss_test"],
-        )
+            with torch.no_grad():
+                dmdc = build_latent_dmd(model, x_train, c_train)
+                metrics, in_set = _predict_metrics(model, dmdc, run_config, zmask=zmask)
 
-        del model
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+                test_loader = DataLoader(
+                    TensorDataset(x_test, c_test),
+                    batch_size=run_config.batch_size,
+                )
+                loss_test = evaluate(
+                    model,
+                    criterion,
+                    test_loader,
+                    dmdc,
+                    stages[-1].horizon,
+                )
 
-    results.sort(key=lambda r: r["dice"], reverse=True)
+            record = {
+                "config": asdict(run_config),
+                "metrics": {
+                    "dice": float(metrics.dice),
+                    "iou": float(metrics.iou),
+                    "spectral_radius": float(metrics.a_radius),
+                    "loss_train": float(losses[-1, 0, 0]),
+                    "loss_val": float(losses[-1, 1, 0]),
+                    "loss_test": float(loss_test[0]),
+                },
+                "losses": losses.detach().cpu().numpy(),
+                "loss_test": loss_test.detach().cpu().numpy(),
+                "train_metrics": {
+                    name: value.detach().cpu().numpy()
+                    for name, value in train_metrics._asdict().items()
+                },
+                "pred_mask": in_set.numpy().astype(np.uint8),
+                "zmask": zmask.detach().cpu().numpy().astype(np.uint8),
+            }
+            results[run_config.suffix] = record
 
-    log.info("\n%s", "=" * 80)
-    log.info("SWEEP SUMMARY (sorted by Dice):")
-    log.info(
-        "%-6s %-8s %-8s %-8s %-8s | %-8s %-8s %-8s | %-10s",
-        "npod",
-        "latent",
-        "hidden",
-        "c_feat",
-        "c_depth",
-        "Dice",
-        "IoU",
-        "|lam|max",
-        "Loss(test)",
-    )
-    log.info("-" * 80)
-    for r in results:
-        log.info(
-            "%-6d %-8d %-8d %-8d %-8d | %-8.4f %-8.4f %-8.3f | %-10.4e",
-            r["npod"],
-            r["latent_size"],
-            r["hidden_size"],
-            r["c_features"],
-            r["c_depth"],
-            r["dice"],
-            r["iou"],
-            r["spectral_radius"],
-            r["loss_test"],
-        )
-    log.info("=" * 80)
+            tmpfile = outfile.with_name(f"{outfile.name}.tmp")
+            torch.save(results, tmpfile)
+            tmpfile.replace(outfile)
 
-    if outfile is None:
-        outfile = filename.parent / f"{filename.stem}-sweep-m{config.dataidx}.csv"
+            log.info(
+                "       -> Dice: %.4f | IoU: %.4f | |lam|max: %.3f | test loss: %.3e",
+                record["metrics"]["dice"],
+                record["metrics"]["iou"],
+                record["metrics"]["spectral_radius"],
+                record["metrics"]["loss_test"],
+            )
+
+            del model
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
     else:
-        outfile = outfile.with_suffix(".csv")
+        log.info("All requested sweep results are cached; only plotting.")
 
-    with open(outfile, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(results[0].keys()))
-        writer.writeheader()
-        writer.writerows(results)
+    current = {key: record for key, record in results.items() if key in current_keys}
+    log.info(
+        "Sweep results: '%s' (%d of %d runs match the current study).",
+        outfile,
+        len(current),
+        len(results),
+    )
+    _print_sweep_summary(current, title=f"Sweep: {filename.stem} (m{config.dataidx})")
+    _plot_sweep(outfile, current, overwrite=True)
 
-    log.info("Saved sweep results to '%s'.", outfile)
     return 0
 
 
@@ -1256,7 +1464,11 @@ if __name__ == "__main__":
     subparser = subparsers.add_parser(
         "sweep",
         formatter_class=parser.formatter_class,
-        description="Run a hyperparameter sweep over model architecture parameters.",
+        description=(
+            "Train missing configurations of a hyperparameter sweep and plot "
+            "all available results. Existing runs are reused unless --force is "
+            "given."
+        ),
     )
     subparser.add_argument("filename", type=pathlib.Path)
     subparser.add_argument(
@@ -1266,39 +1478,10 @@ if __name__ == "__main__":
         help="Index of the matrix to sweep on",
     )
     subparser.add_argument(
-        "--npod",
-        type=int,
-        nargs="+",
-        default=[24, 48],
-        help="POD directions to sweep (default: 24 48)",
-    )
-    subparser.add_argument(
-        "--latent-size",
-        type=int,
-        nargs="+",
-        default=[64, 128],
-        help="Latent sizes to sweep (default: 64 128)",
-    )
-    subparser.add_argument(
-        "--hidden-size",
-        type=int,
-        nargs="+",
-        default=[256],
-        help="Hidden widths to sweep (default: 256)",
-    )
-    subparser.add_argument(
-        "--c-features",
-        type=int,
-        nargs="+",
-        default=[0, 8],
-        help="Control feature sizes to sweep (default: 0 8)",
-    )
-    subparser.add_argument(
-        "--c-depth",
-        type=int,
-        nargs="+",
-        default=[2, 4],
-        help="Control depths to sweep (default: 2 4)",
+        "--study",
+        choices=["latent", "control", "all"],
+        default="all",
+        help="Named study to run",
     )
 
     args = parser.parse_args()
@@ -1340,6 +1523,19 @@ if __name__ == "__main__":
                 )
             )
         elif args.command == "sweep":
+            fixed = ("npod", "latent_size", "hidden_size", "c_features", "c_depth")
+            unsupported = {
+                name: getattr(args, name)
+                for name in fixed
+                if getattr(args, name) is not None
+            }
+            if unsupported:
+                log.error(
+                    "Sweep axes are fixed by the study; unsupported overrides: %s",
+                    unsupported,
+                )
+                raise SystemExit(1)
+
             overrides = {
                 k: v
                 for k, v in vars(args).items()
@@ -1350,11 +1546,8 @@ if __name__ == "__main__":
                     "filename",
                     "device",
                     "outfile",
-                    "npod",
-                    "latent_size",
-                    "hidden_size",
-                    "c_features",
-                    "c_depth",
+                    *fixed,
+                    "study",
                     "force",
                 }
             }
@@ -1362,11 +1555,7 @@ if __name__ == "__main__":
                 sweep(
                     args.filename,
                     outfile=args.outfile,
-                    npod_list=args.npod,
-                    latent_size_list=args.latent_size,
-                    hidden_size_list=args.hidden_size,
-                    c_features_list=args.c_features,
-                    c_depth_list=args.c_depth,
+                    study=args.study,
                     overwrite=args.force,
                     **overrides,
                 )
