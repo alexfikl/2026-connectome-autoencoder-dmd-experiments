@@ -18,6 +18,7 @@ from commonlib import Config, compute_trajectory_mask
 from nneuroutil.dmdc import DenseDMDc, build_dense_dmdc
 from nneuroutil.helpers import TicTocTimer
 from nneuroutil.interop.torch import (
+    SIREN,
     ComplexBlendedQuadratic,
     ComplexLinear,
     ComplexQuadratic,
@@ -153,6 +154,7 @@ class DMDAutoencoder(nn.Module):
         c_features: int = 0,
         c_depth: int = 1,
         c_alpha: float = 0.5,
+        activation: Literal["tanh", "silu", "siren"] = "siren",
         dmd_method: Literal["pinv", "ridge"] = "ridge",
         ridge_eps: float = 1.0e-4,
         device: Any = None,
@@ -208,25 +210,43 @@ class DMDAutoencoder(nn.Module):
 
             self.c_branch = nn.Sequential(*layers)
 
+        def make_activation(omega: float) -> nn.Module:
+            if activation == "siren":
+                return SIREN(omega=omega)
+            elif activation == "silu":
+                return nn.SiLU()
+            elif activation == "tanh":
+                return nn.Tanh()
+            else:
+                raise ValueError(f"unknown activation: {activation}")
+
+        def make_linear(
+            n_in: int, n_out: int, *, omega: float | None = None
+        ) -> nn.Linear:
+            layer = nn.Linear(n_in, n_out, device=device, dtype=dtype)
+            if omega is None or activation != "siren":
+                kaiming_uniform_(layer.weight, nonlinearity=activation, param=omega)
+
+            return layer
+
         self.encoder = nn.Sequential(
-            nn.Linear(
+            make_linear(
                 # NOTE: (u, log z, Re c, Im c, Re chi(c), Im chi(c))
                 npod + 3 + 2 * c_features,
                 hidden_size,
-                device=device,
-                dtype=dtype,
+                omega=5,
             ),
-            nn.Tanh(),
-            nn.Linear(hidden_size, hidden_size, device=device, dtype=dtype),
-            nn.Tanh(),
-            nn.Linear(hidden_size, latent_size, device=device, dtype=dtype),
+            make_activation(5),
+            make_linear(hidden_size, hidden_size, omega=1),
+            make_activation(1),
+            make_linear(hidden_size, latent_size),
         )
         self.decoder_mlp = nn.Sequential(
-            nn.Linear(latent_size, hidden_size, device=device, dtype=dtype),
-            nn.Tanh(),
-            nn.Linear(hidden_size, npod + 1, device=device, dtype=dtype),
+            make_linear(latent_size, hidden_size, omega=1),
+            make_activation(1),
+            make_linear(hidden_size, npod + 1),
         )
-        self.decoder_lin = nn.Linear(latent_size, npod + 1, device=device, dtype=dtype)
+        self.decoder_lin = make_linear(latent_size, npod + 1)
 
     @torch.no_grad()
     def fit_observables(self, x: torch.Tensor) -> None:
