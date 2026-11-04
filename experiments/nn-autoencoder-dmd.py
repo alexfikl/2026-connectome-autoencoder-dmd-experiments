@@ -11,29 +11,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 import array_api_compat
+import dmdaelib
 import numpy as np
 import torch
-from dmdaelib import (
-    LOG_EPS,
-    LOG_SCALE,
-    DMDAutoencoder,
-    DMDConfig,
-    DMDLoss,
-    ErrorMetrics,
-    Stage,
-    TrainMetrics,
-    build_latent_dmd,
-    empty_error_metrics,
-    encode_origin,
-    evaluate,
-    grid_control,
-    load_latent_dmd,
-    make_stages,
-    normalize_control,
-    spectral_radius,
-    torch_predict,
-    torch_train,
-)
 from torch.utils.data import DataLoader, TensorDataset
 
 from commonlib import make_argument_parser
@@ -70,7 +50,7 @@ Examples:
 
 
 def compute_features(
-    model: DMDAutoencoder,
+    model: dmdaelib.DMDAutoencoder,
     dmdc: DenseDMDc[Any],
     *,
     bbox: tuple[float, float, float, float],
@@ -111,14 +91,14 @@ def compute_features(
 
     # {{{ sensitivity to the control
 
-    c = grid_control(model, bbox, resolution, like=dmdc.A)  # ty: ignore[invalid-argument-type]
+    c = dmdaelib.grid_control(model, bbox, resolution, like=dmdc.A)  # ty: ignore[invalid-argument-type]
     c = c.detach().clone().requires_grad_()
-    g_final = model.rollout(encode_origin(model, c), dmdc, maxit)[:, -1]
+    g_final = model.rollout(dmdaelib.encode_origin(model, c), dmdc, maxit)[:, -1]
     _, logn_final = model.decode(g_final)
     (grad,) = torch.autograd.grad(logn_final.sum(), c)
 
-    # NOTE: `c` is normalized by `scale` and the log-norm by `LOG_SCALE`
-    jac = torch.linalg.vector_norm(grad, dim=-1) * (LOG_SCALE / scale)
+    # NOTE: `c` is normalized by `scale` and the log-norm by `dmdaelib.LOG_SCALE`
+    jac = torch.linalg.vector_norm(grad, dim=-1) * (dmdaelib.LOG_SCALE / scale)
     jac = jac.detach().cpu()
     jac_stats = torch.stack([
         jac.mean(),
@@ -135,9 +115,9 @@ def compute_features(
     # NOTE: states of the in-set points at the end of the rollout, rebuilt from
     # the decoded direction (unit, in the orthonormal POD basis) and norm
     with torch.no_grad():
-        g_last = model.rollout(encode_origin(model, c.detach()), dmdc, maxit)
+        g_last = model.rollout(dmdaelib.encode_origin(model, c.detach()), dmdc, maxit)
         direction, logn = model.decode(g_last[:, -1])
-        norm = (torch.exp(logn * LOG_SCALE) - LOG_EPS).clamp(min=0.0)
+        norm = (torch.exp(logn * dmdaelib.LOG_SCALE) - dmdaelib.LOG_EPS).clamp(min=0.0)
         states = norm[:, None] * (direction @ cast(torch.Tensor, model.basis).T)
 
         inset = norm < model.escape_radius
@@ -260,13 +240,13 @@ def _plot_loss(
 
 
 def _predict_metrics(
-    model: DMDAutoencoder,
+    model: dmdaelib.DMDAutoencoder,
     dmdc: DenseDMDc[Any],
-    config: DMDConfig,
+    config: dmdaelib.DMDConfig,
     *,
     zmask: torch.Tensor,
-) -> tuple[ErrorMetrics, torch.Tensor]:
-    norm = torch_predict(
+) -> tuple[dmdaelib.ErrorMetrics, torch.Tensor]:
+    norm = dmdaelib.torch_predict(
         model,
         dmdc,
         bbox=config.bbox,
@@ -277,10 +257,10 @@ def _predict_metrics(
     from nneuroutil.scores import dice_score, jaccard_index
 
     in_set = norm < config.escape_radius
-    metrics = ErrorMetrics(
+    metrics = dmdaelib.ErrorMetrics(
         iou=cast(torch.Tensor, jaccard_index(in_set, zmask)).detach().cpu(),
         dice=cast(torch.Tensor, dice_score(in_set, zmask)).detach().cpu(),
-        a_radius=spectral_radius(dmdc.A),  # ty: ignore[invalid-argument-type]
+        a_radius=dmdaelib.spectral_radius(dmdc.A),  # ty: ignore[invalid-argument-type]
     )
 
     return metrics, in_set.detach().cpu()
@@ -288,15 +268,15 @@ def _predict_metrics(
 
 def _plot_predict(
     filename: pathlib.Path,
-    model: DMDAutoencoder,
+    model: dmdaelib.DMDAutoencoder,
     dmdc: DenseDMDc[Any],
-    config: DMDConfig,
+    config: dmdaelib.DMDConfig,
     *,
     zmask: torch.Tensor,
     tag: str,
     overwrite: bool,
     plot: bool = True,
-) -> ErrorMetrics:
+) -> dmdaelib.ErrorMetrics:
     metrics, in_set = _predict_metrics(model, dmdc, config, zmask=zmask)
 
     if not plot:
@@ -332,9 +312,9 @@ def _plot_predict(
 
 def _plot_error_metrics(
     filename: pathlib.Path,
-    metrics: ErrorMetrics,
+    metrics: dmdaelib.ErrorMetrics,
     *,
-    final: ErrorMetrics | None = None,
+    final: dmdaelib.ErrorMetrics | None = None,
     overwrite: bool,
 ) -> None:
     with figure(
@@ -371,7 +351,7 @@ def _plot_error_metrics(
 
 def _plot_train_metrics(
     filename: pathlib.Path,
-    metrics: TrainMetrics,
+    metrics: dmdaelib.TrainMetrics,
     *,
     overwrite: bool,
 ) -> None:
@@ -443,10 +423,10 @@ def train(
             return 1
 
         checkpoint = torch.load(weights, map_location=device, weights_only=True)
-        config = DMDConfig.from_sources(checkpoint["config"], overrides)
+        config = dmdaelib.DMDConfig.from_sources(checkpoint["config"], overrides)
         mat = checkpoint["mat"]
     else:
-        config = DMDConfig.from_sources(overrides)
+        config = dmdaelib.DMDConfig.from_sources(overrides)
 
         try:
             matrices = cast(
@@ -505,7 +485,9 @@ def train(
             "ridge_eps": config.ridge_eps,
         }
 
-    model = DMDAutoencoder(**model_config, device=device, dtype=mat.dtype.to_real())
+    model = dmdaelib.DMDAutoencoder(
+        **model_config, device=device, dtype=mat.dtype.to_real()
+    )
     log.info("Network:\n%s", model)
 
     # NOTE: the staged schedule restarts from the loaded weights
@@ -543,7 +525,7 @@ def train(
 
     # NOTE: the control is constant along a trajectory, so it is kept per
     # realization (shape `(n, 2)`) instead of being replicated over the window
-    c = normalize_control(c[mask], config.bbox)
+    c = dmdaelib.normalize_control(c[mask], config.bbox)
 
     (x_train, c_train), (x_validate, c_validate), (x_test, c_test) = cast(
         tuple[
@@ -568,17 +550,17 @@ def train(
 
     # {{{ train
 
-    stages = make_stages(config)
+    stages = dmdaelib.make_stages(config)
     num_epochs = config.epochs * len(stages)
-    error_metrics = empty_error_metrics(num_epochs)
+    error_metrics = dmdaelib.empty_error_metrics(num_epochs)
 
     def plot_predict(
-        epoch: int, stage: Stage, model: DMDAutoencoder, *, last: bool
+        epoch: int, stage: dmdaelib.Stage, model: dmdaelib.DMDAutoencoder, *, last: bool
     ) -> None:
         if not stage.use_dmd:
             return
 
-        dmdc = build_latent_dmd(model, x_train, c_train)
+        dmdc = dmdaelib.build_latent_dmd(model, x_train, c_train)
         metrics = _plot_predict(
             outfile,
             model,
@@ -594,14 +576,14 @@ def train(
         error_metrics.dice[epoch] = metrics.dice
         error_metrics.a_radius[epoch] = metrics.a_radius
 
-    criterion = DMDLoss(
+    criterion = dmdaelib.DMDLoss(
         logn_clip=model.logn_clip,
         gamma_rec=config.gamma_rec,
         gamma_lin=config.gamma_lin,
         gamma_pre=config.gamma_pre,
     )
 
-    _, losses, train_metrics = torch_train(
+    _, losses, train_metrics = dmdaelib.torch_train(
         model,
         criterion,
         x_train,
@@ -615,11 +597,11 @@ def train(
         batch_size=config.batch_size,
         callback=plot_predict,
     )
-    dmdc = build_latent_dmd(model, x_train, c_train)
+    dmdc = dmdaelib.build_latent_dmd(model, x_train, c_train)
 
     mem.add_record("After training")
 
-    loss_test = evaluate(
+    loss_test = dmdaelib.evaluate(
         model,
         criterion,
         DataLoader(TensorDataset(x_test, c_test), batch_size=config.batch_size),
@@ -733,11 +715,11 @@ def infer(
         overrides = {}
 
     checkpoint = torch.load(weightsfile, map_location=device, weights_only=True)
-    config = DMDConfig.from_sources(checkpoint["config"], overrides)
+    config = dmdaelib.DMDConfig.from_sources(checkpoint["config"], overrides)
 
     losses = checkpoint["losses"]
     zmask = checkpoint["zmask"]
-    dmdc = load_latent_dmd(checkpoint)
+    dmdc = dmdaelib.load_latent_dmd(checkpoint)
     train_metrics = checkpoint.get("train_metrics")
     error_metrics = checkpoint.get("error_metrics")
 
@@ -750,7 +732,7 @@ def infer(
     # {{{ load model
 
     model_config = checkpoint["model_config"]
-    model = DMDAutoencoder(**model_config, device=device, dtype=torch.float32)
+    model = dmdaelib.DMDAutoencoder(**model_config, device=device, dtype=torch.float32)
     model.load_state_dict(checkpoint["model"])
     model.eval()
 
@@ -809,12 +791,14 @@ def infer(
     )
 
     if train_metrics is not None:
-        _plot_train_metrics(outfile, TrainMetrics(**train_metrics), overwrite=overwrite)
+        _plot_train_metrics(
+            outfile, dmdaelib.TrainMetrics(**train_metrics), overwrite=overwrite
+        )
 
     if error_metrics is not None:
         _plot_error_metrics(
             outfile,
-            ErrorMetrics(**error_metrics),
+            dmdaelib.ErrorMetrics(**error_metrics),
             final=final_metrics,
             overwrite=overwrite,
         )
@@ -961,7 +945,7 @@ def _print_sweep_summary(
             f"{metrics['loss_test']:.3e}",
             f"{metrics['dice']:.4f}",
             f"{metrics['iou']:.4f}",
-            f"{metrics['spectral_radius']:.3f}",
+            f"{metrics['dmdaelib.spectral_radius']:.3f}",
         )
 
     Console().print(table)
@@ -1111,7 +1095,7 @@ def sweep(
     from nneuroutil.data import random_split
 
     device = torch.get_default_device()
-    config = DMDConfig.from_sources(overrides)
+    config = dmdaelib.DMDConfig.from_sources(overrides)
 
     if outfile is None:
         outfile = filename.parent / "sweeps" / f"{filename.stem}-m{config.dataidx}.pkl"
@@ -1131,7 +1115,7 @@ def sweep(
 
     studies = SWEEP_STUDIES if study == "all" else {study: SWEEP_STUDIES[study]}
 
-    run_configs: list[DMDConfig] = []
+    run_configs: list[dmdaelib.DMDConfig] = []
     seen = set()
     for axes in studies.values():
         for values in itertools.product(
@@ -1212,7 +1196,7 @@ def sweep(
             xp=array_api_compat.array_namespace(mat),
             device=device,
         )
-        c = normalize_control(c[mask], config.bbox)
+        c = dmdaelib.normalize_control(c[mask], config.bbox)
 
         (x_train, c_train), (x_validate, c_validate), (x_test, c_test) = cast(
             tuple[
@@ -1241,7 +1225,7 @@ def sweep(
             )
 
             torch.manual_seed(run_config.seed)
-            model = DMDAutoencoder(
+            model = dmdaelib.DMDAutoencoder(
                 input_size=d,
                 npod=run_config.npod,
                 latent_size=run_config.latent_size,
@@ -1257,15 +1241,15 @@ def sweep(
             )
             model.fit_observables(x_train)
 
-            criterion = DMDLoss(
+            criterion = dmdaelib.DMDLoss(
                 logn_clip=model.logn_clip,
                 gamma_rec=run_config.gamma_rec,
                 gamma_lin=run_config.gamma_lin,
                 gamma_pre=run_config.gamma_pre,
             )
-            stages = make_stages(run_config)
+            stages = dmdaelib.make_stages(run_config)
 
-            _, losses, train_metrics = torch_train(
+            _, losses, train_metrics = dmdaelib.torch_train(
                 model,
                 criterion,
                 x_train,
@@ -1280,14 +1264,14 @@ def sweep(
             )
 
             with torch.no_grad():
-                dmdc = build_latent_dmd(model, x_train, c_train)
+                dmdc = dmdaelib.build_latent_dmd(model, x_train, c_train)
                 metrics, in_set = _predict_metrics(model, dmdc, run_config, zmask=zmask)
 
                 test_loader = DataLoader(
                     TensorDataset(x_test, c_test),
                     batch_size=run_config.batch_size,
                 )
-                loss_test = evaluate(
+                loss_test = dmdaelib.evaluate(
                     model,
                     criterion,
                     test_loader,
@@ -1300,7 +1284,7 @@ def sweep(
                 "metrics": {
                     "dice": float(metrics.dice),
                     "iou": float(metrics.iou),
-                    "spectral_radius": float(metrics.a_radius),
+                    "dmdaelib.spectral_radius": float(metrics.a_radius),
                     "loss_train": float(losses[-1, 0, 0]),
                     "loss_val": float(losses[-1, 1, 0]),
                     "loss_test": float(loss_test[0]),
@@ -1324,7 +1308,7 @@ def sweep(
                 "       -> Dice: %.4f | IoU: %.4f | |lam|max: %.3f | test loss: %.3e",
                 record["metrics"]["dice"],
                 record["metrics"]["iou"],
-                record["metrics"]["spectral_radius"],
+                record["metrics"]["dmdaelib.spectral_radius"],
                 record["metrics"]["loss_test"],
             )
 
