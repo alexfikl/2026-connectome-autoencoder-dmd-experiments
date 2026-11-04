@@ -229,21 +229,22 @@ class DMDAutoencoder(nn.Module):
 
             return layer
 
+        omega = 5
         self.encoder = nn.Sequential(
             make_linear(
                 # NOTE: (u, log z, Re c, Im c, Re chi(c), Im chi(c))
                 npod + 3 + 2 * c_features,
                 hidden_size,
-                omega=5,
+                omega=4 * omega,
             ),
-            make_activation(5),
+            make_activation(4 * omega),
             make_linear(hidden_size, hidden_size, omega=1),
-            make_activation(1),
+            make_activation(omega),
             make_linear(hidden_size, latent_size),
         )
         self.decoder_mlp = nn.Sequential(
             make_linear(latent_size, hidden_size, omega=1),
-            make_activation(1),
+            make_activation(omega),
             make_linear(hidden_size, npod + 1),
         )
         self.decoder_lin = make_linear(latent_size, npod + 1)
