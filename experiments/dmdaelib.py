@@ -241,9 +241,9 @@ class DMDAutoencoder(nn.Module):
                 # NOTE: (u, log z, Re c, Im c, Re chi(c), Im chi(c))
                 npod + 3 + 2 * c_features,
                 hidden_size,
-                omega=4 * omega,
+                omega=5 * omega,
             ),
-            make_activation(4 * omega),
+            make_activation(5 * omega),
             make_linear(hidden_size, hidden_size, omega=omega),
             make_activation(omega),
             make_linear(hidden_size, latent_size),
