@@ -17,7 +17,12 @@ from torch.utils.data import DataLoader, TensorDataset
 from commonlib import Config, compute_trajectory_mask
 from nneuroutil.dmdc import DenseDMDc, build_dense_dmdc
 from nneuroutil.helpers import TicTocTimer
-from nneuroutil.interop.torch import ComplexLinear, ComplexQuadratic
+from nneuroutil.interop.torch import (
+    ComplexBlendedQuadratic,
+    ComplexLinear,
+    ComplexQuadratic,
+    kaiming_uniform_,
+)
 
 log = logging.getLogger("lib.dmdaelib")
 
@@ -59,6 +64,8 @@ class DMDConfig(Config):
     # number of (complex linear, complex square) blocks in it
     c_features: int = 0
     c_depth: int = 1
+    # blending parameter for ComplexBlendedQuadratic (0.0 for pure quadratic)
+    c_alpha: float = 0.5
     # horizons of the multi-step prediction stages (None -> 2, 4, 8, maxit - 1)
     horizons: tuple[int, ...] | None = None
 
@@ -145,6 +152,7 @@ class DMDAutoencoder(nn.Module):
         escape_radius: float,
         c_features: int = 0,
         c_depth: int = 1,
+        c_alpha: float = 0.5,
         dmd_method: Literal["pinv", "ridge"] = "ridge",
         ridge_eps: float = 1.0e-4,
         device: Any = None,
@@ -156,6 +164,7 @@ class DMDAutoencoder(nn.Module):
         self.npod = npod
         self.latent_size = latent_size
         self.escape_radius = escape_radius
+        self.c_alpha = c_alpha
         self.dmd_method = dmd_method
         self.ridge_eps = ridge_eps
         self.dtype = dtype
@@ -177,12 +186,24 @@ class DMDAutoencoder(nn.Module):
             layers: list[nn.Module] = []
             width = 1
             for _ in range(c_depth):
-                layers.append(
-                    ComplexLinear(
-                        width, c_features, bias=True, device=device, dtype=dtype
-                    )
+                layer = ComplexLinear(
+                    width, c_features, bias=True, device=device, dtype=dtype
                 )
-                layers.append(ComplexQuadratic())
+                if c_alpha > 0.0:
+                    kaiming_uniform_(
+                        layer.weight,
+                        nonlinearity="cblended_quadratic",
+                        param=c_alpha,
+                    )
+                    act: nn.Module = ComplexBlendedQuadratic(
+                        alpha=c_alpha, device=device, dtype=dtype
+                    )
+                else:
+                    kaiming_uniform_(layer.weight, nonlinearity="cquadratic")
+                    act = ComplexQuadratic()
+
+                layers.append(layer)
+                layers.append(act)
                 width = c_features
 
             self.c_branch = nn.Sequential(*layers)

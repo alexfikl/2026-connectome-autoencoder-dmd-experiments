@@ -499,6 +499,7 @@ def train(
             "hidden_size": config.hidden_size,
             "c_features": config.c_features,
             "c_depth": config.c_depth,
+            "c_alpha": config.c_alpha,
             "escape_radius": config.escape_radius,
             "dmd_method": config.dmd_method,
             "ridge_eps": config.ridge_eps,
@@ -1247,6 +1248,7 @@ def sweep(
                 hidden_size=run_config.hidden_size,
                 c_features=run_config.c_features,
                 c_depth=run_config.c_depth,
+                c_alpha=run_config.c_alpha,
                 escape_radius=run_config.escape_radius,
                 dmd_method=run_config.dmd_method,
                 ridge_eps=run_config.ridge_eps,
@@ -1379,6 +1381,12 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Number of (complex linear, complex square) blocks for c (default: 1)",
+    )
+    parser.add_argument(
+        "--c-alpha",
+        type=float,
+        default=None,
+        help="Blending parameter alpha for ComplexBlendedQuadratic (default: 0.5)",
     )
     parser.add_argument(
         "--npod",
