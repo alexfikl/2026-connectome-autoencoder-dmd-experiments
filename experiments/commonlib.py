@@ -270,7 +270,7 @@ class Config:
         payload = json.dumps(asdict(self), sort_keys=True, default=str).encode()
         digest = hashlib.sha256(payload).hexdigest()[:12]
 
-        return f"r{self.resolution}-n{self.maxit}-{digest}"
+        return f"m{self.dataidx:02d}-r{self.resolution}-n{self.maxit}-{digest}"
 
     @classmethod
     def from_sources(cls, *sources: Mapping[str, Any] | None) -> Self:

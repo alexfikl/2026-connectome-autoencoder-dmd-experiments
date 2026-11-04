@@ -213,7 +213,7 @@ class DMDAutoencoder(nn.Module):
         # NOTE: the activation and its frequencies are fixed here; flip
         # `activation` manually to experiment with the other options
         activation = "siren"
-        omega = 5
+        omega = 1
 
         def make_activation(frequency: float) -> nn.Module:
             if activation == "siren":
