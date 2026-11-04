@@ -239,12 +239,31 @@ def _plot_loss(
         ax.legend(ncols=2)
 
 
+def _mask_scores(
+    pred: torch.Tensor,
+    true: torch.Tensor,
+    *,
+    eval_mask: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from nneuroutil.scores import dice_score, jaccard_index
+
+    if eval_mask is not None:
+        pred = pred[eval_mask]
+        true = true[eval_mask]
+
+    iou = cast(torch.Tensor, jaccard_index(pred, true))
+    dice = cast(torch.Tensor, dice_score(pred, true))
+
+    return iou, dice
+
+
 def _predict_metrics(
     model: dmdaelib.DMDAutoencoder,
     dmdc: DenseDMDc[Any],
     config: dmdaelib.DMDConfig,
     *,
     zmask: torch.Tensor,
+    eval_mask: torch.Tensor | None = None,
 ) -> tuple[dmdaelib.ErrorMetrics, torch.Tensor]:
     norm = dmdaelib.torch_predict(
         model,
@@ -254,12 +273,11 @@ def _predict_metrics(
         maxit=config.maxit,
     )
 
-    from nneuroutil.scores import dice_score, jaccard_index
-
     in_set = norm < config.escape_radius
+    iou, dice = _mask_scores(in_set, zmask, eval_mask=eval_mask)
     metrics = dmdaelib.ErrorMetrics(
-        iou=cast(torch.Tensor, jaccard_index(in_set, zmask)).detach().cpu(),
-        dice=cast(torch.Tensor, dice_score(in_set, zmask)).detach().cpu(),
+        iou=iou.detach().cpu(),
+        dice=dice.detach().cpu(),
         a_radius=dmdaelib.spectral_radius(dmdc.A),  # ty: ignore[invalid-argument-type]
     )
 
@@ -893,18 +911,25 @@ def merge(
 
 SWEEP_STUDIES: dict[str, dict[str, Sequence[int]]] = {
     "latent": {
-        "npod": (24, 36, 48),
-        "latent_size": (48, 64, 96, 128),
+        "npod": (24, 36, 48, 64),
+        "latent_size": (48, 64, 96, 128, 192),
         "hidden_size": (256,),
-        "c_features": (16,),
-        "c_depth": (2,),
+        "c_features": (32,),
+        "c_depth": (1,),
     },
     "control": {
         "npod": (48,),
         "latent_size": (128,),
         "hidden_size": (256,),
-        "c_features": (0, 4, 8, 16, 32),
-        "c_depth": (1, 2, 4),
+        "c_features": (8, 16, 32, 64, 96),
+        "c_depth": (1, 2),
+    },
+    "width": {
+        "npod": (48,),
+        "latent_size": (128,),
+        "hidden_size": (128, 256, 512),
+        "c_features": (32,),
+        "c_depth": (1,),
     },
 }
 
@@ -924,8 +949,8 @@ def _print_sweep_summary(
     table.add_column("loss(train)", justify="right")
     table.add_column("loss(valid)", justify="right")
     table.add_column("loss(test)", justify="right")
-    table.add_column("Dice", justify="right")
-    table.add_column("IoU", justify="right")
+    table.add_column("Dice(test)", justify="right")
+    table.add_column("IoU(test)", justify="right")
     table.add_column("|lam|max", justify="right")
 
     # NOTE: order by the test loss, not by Dice/IoU
@@ -983,7 +1008,7 @@ def _plot_sweep(
     ) as fig:
         axes = np.reshape(fig.axes, (2, len(param_names)))
         quantities = (
-            ("dice", "Dice", False, (0.0, 1.0)),
+            ("dice", "Dice (test)", False, (0.0, 1.0)),
             ("loss_test", "Test loss", True, None),
         )
         for col, name in enumerate(param_names):
@@ -1148,6 +1173,45 @@ def sweep(
         return 1
 
     current_keys = {run_config.suffix for run_config in run_configs}
+
+    # NOTE: reconstruct the test pixels from the same split used for training
+    n = config.resolution**2
+    indices = torch.arange(n, device=device)
+    split_indices = random_split(
+        (indices,),
+        config.split,
+        rng=default_rng(torch, config.seed, device=device),
+    )
+    idx_test = split_indices[2][0]
+    test_mask = torch.zeros(n, dtype=torch.bool, device=device)
+    test_mask[idx_test] = True  # ty: ignore[invalid-assignment]
+    test_mask = test_mask.reshape(config.resolution, config.resolution)
+
+    # NOTE: cached records may have been evaluated on the full grid
+    for record in results.values():
+        record_config = record.get("config", {})
+        if (
+            record_config.get("dataidx") != config.dataidx
+            or record_config.get("resolution") != config.resolution
+            or record_config.get("seed") != config.seed
+            or tuple(record_config.get("split", ())) != tuple(config.split)
+        ):
+            continue
+
+        pred = record.get("pred_mask")
+        true = record.get("zmask")
+        if pred is None or true is None:
+            continue
+
+        pred_t = torch.as_tensor(pred, dtype=torch.bool, device=device)
+        true_t = torch.as_tensor(true, dtype=torch.bool, device=device)
+        if pred_t.shape != test_mask.shape:
+            continue
+
+        iou, dice = _mask_scores(pred_t, true_t, eval_mask=test_mask)
+        record["metrics"]["dice"] = float(dice)
+        record["metrics"]["iou"] = float(iou)
+
     missing = [
         run_config
         for run_config in run_configs
@@ -1265,7 +1329,9 @@ def sweep(
 
             with torch.no_grad():
                 dmdc = dmdaelib.build_latent_dmd(model, x_train, c_train)
-                metrics, in_set = _predict_metrics(model, dmdc, run_config, zmask=zmask)
+                metrics, in_set = _predict_metrics(
+                    model, dmdc, run_config, zmask=zmask, eval_mask=test_mask
+                )
 
                 test_loader = DataLoader(
                     TensorDataset(x_test, c_test),
