@@ -43,10 +43,10 @@ class DMDConfig(Config):
     # NOTE: `epochs` is the number of epochs *per stage*
     epochs: int = 60
     lr: float = 2.0e-3
-    batch_size: int = 512
+    batch_size: int = 1024
 
     resolution: int = 64
-    maxit: int = 16
+    maxit: int = 32
     escape_radius: float = 100.0
 
     max_norm: float = 5.0
@@ -60,12 +60,12 @@ class DMDConfig(Config):
 
     # number of POD directions, latent size, and hidden width of the networks
     npod: int = 24
-    latent_size: int = 96
+    latent_size: int = 48
     hidden_size: int = 256
     # number of complex features of the control c (0 disables the branch) and the
     # number of (complex linear, complex square) blocks in it
-    c_features: int = 16
-    c_depth: int = 2
+    c_features: int = 32
+    c_depth: int = 1
     # blending parameter for ComplexBlendedQuadratic (0.0 for pure quadratic)
     c_alpha: float = 0.5
     # horizons of the multi-step prediction stages (None -> 2, 4, 8, maxit - 1)
