@@ -896,14 +896,14 @@ SWEEP_STUDIES: dict[str, dict[str, Sequence[int]]] = {
         "npod": (24, 36, 48),
         "latent_size": (48, 64, 96, 128),
         "hidden_size": (256,),
-        "c_features": (8,),
-        "c_depth": (4,),
+        "c_features": (16,),
+        "c_depth": (2,),
     },
     "control": {
         "npod": (48,),
         "latent_size": (128,),
         "hidden_size": (256,),
-        "c_features": (0, 4, 8, 16),
+        "c_features": (0, 4, 8, 16, 32),
         "c_depth": (1, 2, 4),
     },
 }
