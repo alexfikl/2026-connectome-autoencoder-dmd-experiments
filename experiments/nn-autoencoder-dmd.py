@@ -1358,13 +1358,13 @@ if __name__ == "__main__":
         "--c-features",
         type=int,
         default=None,
-        help="Number of complex features of c in the encoder (default: 0, disabled)",
+        help="Number of complex features of c in the encoder (default: 16)",
     )
     parser.add_argument(
         "--c-depth",
         type=int,
         default=None,
-        help="Number of (complex linear, complex square) blocks for c (default: 1)",
+        help="Number of (complex linear, complex square) blocks for c (default: 2)",
     )
     parser.add_argument(
         "--c-alpha",
@@ -1382,13 +1382,13 @@ if __name__ == "__main__":
         "--latent-size",
         type=int,
         default=None,
-        help="Size of the latent space (default: 32)",
+        help="Size of the latent space (default: 96)",
     )
     parser.add_argument(
         "--hidden-size",
         type=int,
         default=None,
-        help="Hidden width of the encoder and decoder (default: 128)",
+        help="Hidden width of the encoder and decoder (default: 256)",
     )
     parser.add_argument(
         "--horizons",

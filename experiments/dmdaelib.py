@@ -58,12 +58,12 @@ class DMDConfig(Config):
 
     # number of POD directions, latent size, and hidden width of the networks
     npod: int = 24
-    latent_size: int = 32
-    hidden_size: int = 128
+    latent_size: int = 96
+    hidden_size: int = 256
     # number of complex features of the control c (0 disables the branch) and the
     # number of (complex linear, complex square) blocks in it
-    c_features: int = 0
-    c_depth: int = 1
+    c_features: int = 16
+    c_depth: int = 2
     # blending parameter for ComplexBlendedQuadratic (0.0 for pure quadratic)
     c_alpha: float = 0.5
     # horizons of the multi-step prediction stages (None -> 2, 4, 8, maxit - 1)
