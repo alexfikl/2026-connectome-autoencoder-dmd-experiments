@@ -346,34 +346,39 @@ def make_dmd_features(
         maxit=maxit,
     )
 
-    # NOTE: only keep the data we actually use from here on out
-    mask = xp.sum(Z[-1].real ** 2 + Z[-1].imag ** 2, axis=-1) < escape_radius**2
-    Z = Z[:, mask, :]
-    c = c[mask]
+    from commonlib import compute_trajectory_mask
+    from nneuroutil.array_api_extras import view_as_real
+
+    # NOTE: permute to (num_traj, maxit, n) and interleave to (num_traj, maxit, 2 * n)
+    Z_perm = xp.permute_dims(xp.reshape(Z, (maxit, -1, n)), (1, 0, 2))
+    X_real = view_as_real(Z_perm)
+    c_real = xp.stack([c.real, c.imag], axis=-1).reshape(-1, 2)
 
     # cull down the solutions, since a lot of them converge to the same value
-    Z = Z[:, ::stride, :]
-    c = c[::stride]
-    num_samples = Z.shape[1]
+    if stride > 1:
+        X_real = X_real[::stride]
+        c_real = c_real[::stride]
+
+    num_samples = X_real.shape[0]
 
     # }}}
 
     # {{{ build dataset
 
-    # NOTE: Z has shape (maxit, num_samples, d)
-    X1 = xp.reshape(Z[:-1], (-1, n))
-    X2 = xp.reshape(Z[1:], (-1, n))
-    U = xp.reshape(
-        xp.broadcast_to(c[None, :, None], (maxit - 1, num_samples, 1)),
-        (-1, 1),
-    )
+    tmask = compute_trajectory_mask(X_real, escape_radius=escape_radius, xp=xp)
+
+    X1 = X_real[:, :-1, :][tmask.transition]
+    X2 = X_real[:, 1:, :][tmask.transition]
+    U = xp.broadcast_to(c_real[:, None, :], (num_samples, maxit - 1, 2))[
+        tmask.transition
+    ]
 
     # }}}
 
     # {{{ features
 
     dmd = build_dense_symmetric_dmdc(X1, U, X2, method="ridge")
-    G = xp.conj(X1).T @ X1
+    G = X1.T @ X1
 
     G = np.asarray(array_api_compat.to_device(G, "cpu"), dtype=mat.dtype)
     A = np.asarray(array_api_compat.to_device(dmd.A, "cpu"), dtype=mat.dtype)
@@ -420,7 +425,7 @@ def make_fourier_features(
     eps: float = 5.0e-4,
     normalize: bool = True,
 ) -> FeatureDataset:
-    import cv2  # ty: ignore[unresolved-import]
+    import cv2  # ty: ignore[import-not-found]
 
     xmin, xmax, ymin, ymax = bbox
     height, width = binary.shape

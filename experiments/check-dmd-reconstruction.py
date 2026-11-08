@@ -111,12 +111,11 @@ def main(
             ),
         )
 
-        # NOTE: only keep the data we actually use from here on out
+        # NOTE: keep initial/final states for convergence tracking
         Z_init = Z[0].clone()
         Z_final = Z[-1].clone()
 
         mask = torch.sum(Z_final.real**2 + Z_final.imag**2, dim=-1) < escape_radius**2
-        Z = Z[:, mask, :]
 
     mem.add_record("After data generation")
 
@@ -138,17 +137,34 @@ def main(
     # {{{ build dataset
 
     # NOTE: To build the dataset we
-    #   1. Remove all entries that escaped (no point there)
-    #   2. Treat c as an external parameter/control input U
-    #   3. Reshape and get the `X1, U, X2` blocks for DMDc
+    #   1. Interleave complex coordinates into real states (num_traj, maxit, 2d)
+    #   2. Filter transitions using compute_trajectory_mask (matching autoencoder)
+    #   3. Treat stacked [Re(c), Im(c)] as control inputs U
+    #   4. Select valid pre-escape pairs (z_n, z_{n+1}) where both have not escaped
 
     with tictoc("Build dataset"):
-        # NOTE: Z has shape (maxit, converged, d)
-        X1 = Z[:-1].reshape(-1, d)
-        X2 = Z[1:].reshape(-1, d)
-        U = c[mask, None].unsqueeze(0).expand(maxit - 1, -1, -1).reshape(-1, 1)
+        from commonlib import compute_trajectory_mask
+        from nneuroutil.array_api_extras import view_as_real
 
-        log.info("Dataset: X1 = %s, U = %s, X2 = %s", X1.shape, U.shape, X2.shape)
+        # NOTE: Z has shape (maxit, resolution, resolution, d)
+        Z_traj = Z.permute(1, 2, 0, 3).reshape(-1, maxit, d)
+        X_real = view_as_real(Z_traj)
+        c_real = torch.stack([c.real, c.imag], dim=-1).reshape(-1, 2)
+
+        tmask = compute_trajectory_mask(X_real, escape_radius=escape_radius)
+
+        X1 = X_real[:, :-1, :][tmask.transition]
+        X2 = X_real[:, 1:, :][tmask.transition]
+        U = c_real.unsqueeze(1).expand(-1, maxit - 1, 2)[tmask.transition]
+
+        log.info(
+            "Dataset: X1 = %s, U = %s, X2 = %s (transitions: %d/%d)",
+            X1.shape,
+            U.shape,
+            X2.shape,
+            X1.shape[0],
+            Z_traj.shape[0] * (maxit - 1),
+        )
 
     mem.add_record("Built dataset")
 
@@ -165,11 +181,13 @@ def main(
             # NOTE: we know our system, so we choose some nice observables:
             #   x, (A x)^2, (A x)^4
             # This might be missing some cross terms, but it is what it is.
+            from nneuroutil.array_api_extras import view_as_complex
+
             dmd = build_dense_extended_dmdc(
                 [
-                    lambda x, A=mat: x,
-                    lambda x, A=mat: torch.einsum("...j,ij->...i", x, A) ** 2,
-                    lambda x, A=mat: torch.einsum("...j,ij->...i", x, A) ** 4,
+                    lambda x: x,
+                    lambda x, A=mat: view_as_real((view_as_complex(x) @ A.T) ** 2),
+                    lambda x, A=mat: view_as_real((view_as_complex(x) @ A.T) ** 4),
                 ],
                 X1,
                 U,
@@ -234,15 +252,20 @@ def main(
             device=device,
         )
         Zpredict[0] = Z_init
-        Xpredict = dmd.encode(Z_init)
+        c_grid_real = torch.stack([c.real, c.imag], dim=-1)
+        Xinit = view_as_real(Z_init)
+        Xpredict = dmd.encode(Xinit)
         del Z_init
 
         for i in range(1, maxit):
-            Xpredict = dmd.evolve(Xpredict, c[:, :, None])
-            Zpredict[i] = cast("torch.Tensor", dmd.decode(Xpredict))
+            Xpredict = dmd.evolve(Xpredict, c_grid_real)
+            Xdecoded = cast("torch.Tensor", dmd.decode(Xpredict))
+            Zpredict[i] = torch.view_as_complex(
+                Xdecoded.reshape(*Xdecoded.shape[:-1], -1, 2)
+            )
 
         Zpredict_final = Zpredict[-1].clone()
-        Zpredict = Zpredict[:, mask, :]
+        Zpredict_converged = Zpredict[:, mask, :]
 
     mem.add_record("After predicting")
 
@@ -256,8 +279,10 @@ def main(
         ax = fig.gca()
 
         Upredict = c[mask, None].unsqueeze(0).expand(maxit, -1, -1)
-        error = relative_forecast_error(dmd, Z, Upredict, Zpredict)
-        del Z, Zpredict, Upredict
+        error = relative_forecast_error(
+            dmd, Z[:, mask, :], Upredict, Zpredict_converged
+        )
+        del Zpredict_converged, Upredict
 
         error = cast("torch.Tensor", error).cpu().numpy()
         assert error.shape == (maxit, torch.sum(mask))
@@ -280,13 +305,13 @@ def main(
 
     if method == "dmd":
         obs_labels = (r"$z$",)
-        obs_slices = (slice(0, d),)
+        obs_slices = (slice(0, 2 * d),)
     elif method == "edmd":
         obs_labels = (r"$z$", r"$(A z)^2$", r"$(A z)^4$")
         obs_slices = (
-            slice(0, d),
-            slice(d, 2 * d),
-            slice(2 * d, 3 * d),
+            slice(0, 2 * d),
+            slice(2 * d, 4 * d),
+            slice(4 * d, 6 * d),
         )
     else:
         raise AssertionError
