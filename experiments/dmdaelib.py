@@ -328,7 +328,6 @@ class DMDAutoencoder(nn.Module):
 
         return torch.stack(out, dim=1)  # ty: ignore[invalid-argument-type]
 
-    # ty: ignore[invalid-mutable-override]
     def forward(
         self,
         x: torch.Tensor,
@@ -462,7 +461,6 @@ class DMDLoss(nn.Module):
 
         return error + error_logn
 
-    # ty: ignore[invalid-mutable-override]
     def forward(self, result: DMDAutoencoderResult) -> DMDLossResult:
         obs = result.obs
 

@@ -84,7 +84,6 @@ class QuadraticNetwork(nn.Module):
             Bias(2 * output_size, device=device, dtype=dtype),
         )
 
-    # ty: ignore[invalid-mutable-override]
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
 
