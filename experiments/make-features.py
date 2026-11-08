@@ -352,7 +352,7 @@ def make_dmd_features(
     # NOTE: permute to (num_traj, maxit, n) and interleave to (num_traj, maxit, 2 * n)
     Z_perm = xp.permute_dims(xp.reshape(Z, (maxit, -1, n)), (1, 0, 2))
     X_real = view_as_real(Z_perm)
-    c_real = xp.stack([c.real, c.imag], axis=-1).reshape(-1, 2)
+    c_real = xp.stack([c.real, c.imag], axis=-1).reshape(-1, 2)  # ty: ignore[unresolved-attribute]
 
     # cull down the solutions, since a lot of them converge to the same value
     if stride > 1:
