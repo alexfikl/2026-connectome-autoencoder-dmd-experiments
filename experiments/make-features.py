@@ -224,29 +224,6 @@ def make_unsigned_graph_features(
 # {{{ make_global_unsigned_graph_features
 
 
-def _bct_assortativity(mat: Array2D[np.floating[Any]]) -> float:
-    """Weighted undirected assortativity (BCT ``assortativity_wei``)."""
-    n, _ = mat.shape
-    strength = np.sum(mat, axis=0)
-
-    rows, cols = np.triu_indices(n, k=1)
-    mask = mat[rows, cols] > 0.0
-    stri = strength[rows[mask]]
-    strj = strength[cols[mask]]
-
-    count = stri.size
-    if count == 0:
-        return np.nan
-
-    term1 = np.sum(stri * strj) / count
-    term2 = (np.sum(0.5 * (stri + strj)) / count) ** 2
-    term3 = np.sum(0.5 * (stri**2 + strj**2)) / count
-    if term3 - term2 == 0:
-        return np.nan
-
-    return float((term1 - term2) / (term3 - term2))
-
-
 def _local_efficiency(
     mat: Array2D[np.floating[Any]],
     graph: Any,
@@ -312,13 +289,15 @@ def _make_global_unsigned_graph_features(
     starts = [0]
     descrs = []
 
+    import orbitkit.metrics as okm
+
     # Betweenness Centrality: average weighted betweenness
     features.append(2.0 * np.mean(g.betweenness(weights="length")))
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Betweenness Centrality")
 
     # Assortativity: weighted strength assortativity
-    features.append(_bct_assortativity(mat))
+    features.append(okm.compute_assortativity_newman(mat, eps=eps))
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Assortativity")
 
