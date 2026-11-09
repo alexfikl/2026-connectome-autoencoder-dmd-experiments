@@ -129,6 +129,7 @@ features:
     @just make_features matrix data/*_LR_*.npz data/Structural_LR.npz
     @just make_features eig data/*_LR_*.npz data/Structural_LR.npz
     @just make_features ugraph data/*_LR_*.npz data/Structural_LR.npz
+    @just make_features ggraph data/*_LR_*.npz data/Structural_LR.npz
     @just make_features sgraph data/*_LR_*.npz data/Structural_LR.npz
     @just make_features dmd data/*_LR_*.npz data/Structural_LR.npz
     @just make_features fourier data/task-*-fractal.npz data/structural-fractal.npz

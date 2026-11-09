@@ -221,6 +221,178 @@ def make_unsigned_graph_features(
 # }}}
 
 
+# {{{ make_global_unsigned_graph_features
+
+
+def _bct_assortativity(mat: Array2D[np.floating[Any]]) -> float:
+    """Weighted undirected assortativity (BCT ``assortativity_wei``)."""
+    n, _ = mat.shape
+    strength = np.sum(mat, axis=0)
+
+    rows, cols = np.triu_indices(n, k=1)
+    mask = mat[rows, cols] > 0.0
+    stri = strength[rows[mask]]
+    strj = strength[cols[mask]]
+
+    count = stri.size
+    if count == 0:
+        return np.nan
+
+    term1 = np.sum(stri * strj) / count
+    term2 = (np.sum(0.5 * (stri + strj)) / count) ** 2
+    term3 = np.sum(0.5 * (stri**2 + strj**2)) / count
+    if term3 - term2 == 0:
+        return np.nan
+
+    return float((term1 - term2) / (term3 - term2))
+
+
+def _local_efficiency(
+    mat: Array2D[np.floating[Any]],
+    graph: Any,
+    *,
+    eps: float = 1.0e-12,
+) -> Array1D[np.floating[Any]]:
+    """Compute the per-node local efficiency of a weighted graph."""
+    n, _ = mat.shape
+    adjacency = mat > eps
+    cbrt_weights = np.cbrt(mat)
+
+    efficiency = np.zeros(n)
+    for u in range(n):
+        neighbors = np.flatnonzero(adjacency[u, :])
+        if neighbors.size < 2:
+            continue
+
+        subgraph = graph.induced_subgraph(neighbors.tolist())
+        distances = np.asarray(subgraph.distances(weights="length"))
+        with np.errstate(divide="ignore"):
+            inverse = np.where(
+                np.isfinite(distances) & (distances > 0), 1.0 / distances, 0.0
+            )
+
+        np.fill_diagonal(inverse, 0.0)
+        se = inverse ** (1.0 / 3.0) + inverse.T ** (1.0 / 3.0)
+
+        sw = cbrt_weights[u, neighbors] + cbrt_weights[neighbors, u].T
+        numerator = np.sum(np.outer(sw, sw) * se) / 2.0
+        if numerator == 0.0:  # ruff: ignore[float-equality-comparison]
+            continue
+
+        sa = adjacency[u, neighbors].astype(np.float64)
+        sa += adjacency[neighbors, u].T.astype(np.float64)
+        denominator = np.sum(sa) ** 2 - np.sum(sa * sa)
+        if denominator != 0.0:  # ruff: ignore[float-equality-comparison]
+            efficiency[u] = numerator / denominator
+
+    return efficiency
+
+
+def _make_global_unsigned_graph_features(
+    mat: Array2D[np.floating[Any]],
+    *,
+    eps: float = 1.0e-12,
+) -> FeatureDataset:
+    """Average the paper's graph measures over all nodes.
+
+    This follows the Brain Connectivity Toolbox definitions: weights are
+    interpreted as connection strengths and converted to lengths with
+    ``1 / w``.
+    """
+    import igraph as ig
+
+    ig.set_random_number_generator(random.Random(42))  # ruff: ignore[suspicious-non-cryptographic-random-usage]
+
+    # construct graph
+    g = ig.Graph.Weighted_Adjacency(mat, mode="undirected", attr="weight", loops=False)
+    g.es["length"] = [1.0 / w if w > eps else np.inf for w in g.es["weight"]]
+    distances = np.asarray(g.distances(weights="length"))
+
+    features = []
+    starts = [0]
+    descrs = []
+
+    # Betweenness Centrality: average weighted betweenness
+    features.append(2.0 * np.mean(g.betweenness(weights="length")))
+    starts.append(starts[-1] + np.size(features[-1]))
+    descrs.append("Betweenness Centrality")
+
+    # Assortativity: weighted strength assortativity
+    features.append(_bct_assortativity(mat))
+    starts.append(starts[-1] + np.size(features[-1]))
+    descrs.append("Assortativity")
+
+    # Eigencentrality: average absolute eigenvector centrality
+    _, eigvecs = np.linalg.eigh(mat)
+    features.append(np.mean(np.abs(eigvecs[:, -1])))
+    starts.append(starts[-1] + np.size(features[-1]))
+    descrs.append("Eigencentrality")
+
+    # Clustering Coefficient: average weighted clustering
+    degree = np.count_nonzero(mat > eps, axis=1)
+    cbrt_weights = np.cbrt(mat)
+    cyc3 = np.einsum("ij,jk,ki->i", cbrt_weights, cbrt_weights, cbrt_weights)
+    wcc = np.zeros(mat.shape[0])
+    mask = (cyc3 != 0.0) & (degree >= 2)  # ruff: ignore[float-equality-comparison]
+    wcc[mask] = cyc3[mask] / (degree[mask] * (degree[mask] - 1))
+    features.append(np.mean(wcc))
+    starts.append(starts[-1] + np.size(features[-1]))
+    descrs.append("Clustering Coefficient")
+
+    # Strength: average weighted degree
+    features.append(np.mean(np.sum(mat, axis=0)))
+    starts.append(starts[-1] + np.size(features[-1]))
+    descrs.append("Strength")
+
+    # Global Efficiency
+    features.append(_global_efficiency(distances))
+    starts.append(starts[-1] + np.size(features[-1]))
+    descrs.append("Global Efficiency")
+
+    # Local Efficiency
+    features.append(np.mean(_local_efficiency(mat, g, eps=eps)))
+    starts.append(starts[-1] + np.size(features[-1]))
+    descrs.append("Local Efficiency")
+
+    # Transitivity: ratio of weighted triangles to triplets
+    denominator = np.sum(degree * (degree - 1))
+    transitivity = np.sum(cyc3) / denominator if denominator > 0 else 0.0
+    features.append(transitivity)
+    starts.append(starts[-1] + np.size(features[-1]))
+    descrs.append("Transitivity")
+
+    return FeatureDataset(
+        x=np.nan_to_num(np.hstack(features)),
+        starts=np.array(starts),
+        descrs=tuple(descrs),
+    )
+
+
+def make_global_unsigned_graph_features(
+    mat: Array2D[np.floating[Any]],
+) -> FeatureDataset:
+    fabs = _make_global_unsigned_graph_features(np.abs(mat))
+    fpos = _make_global_unsigned_graph_features(np.maximum(mat, 0.0))
+    fneg = _make_global_unsigned_graph_features(np.maximum(-mat, 0.0))
+
+    return FeatureDataset(
+        x=np.concatenate([fabs.x, fpos.x, fneg.x]),
+        starts=np.concatenate([
+            fabs.starts,
+            fabs.starts[-1] + fpos.starts[1:],
+            fabs.starts[-1] + fpos.starts[-1] + fneg.starts[1:],
+        ]),
+        descrs=(
+            *(f"Abs {name}" for name in fabs.descrs),
+            *(f"Pos {name}" for name in fpos.descrs),
+            *(f"Neg {name}" for name in fneg.descrs),
+        ),
+    )
+
+
+# }}}
+
+
 # {{{ make_signed_graph_features
 
 
@@ -550,7 +722,9 @@ def make_features(
     filenames: Sequence[pathlib.Path],
     *,
     outfile: pathlib.Path | None = None,
-    ftype: Literal["sgraph", "ugraph", "matrix", "dmd", "eig", "fourier"] = "matrix",
+    ftype: Literal[
+        "sgraph", "ugraph", "ggraph", "matrix", "dmd", "eig", "fourier"
+    ] = "matrix",
     key: str | None = None,
     eps: float | None = None,
     density: float | None = None,
@@ -690,6 +864,8 @@ def make_features(
                 elif ftype == "ugraph":
                     assert coms is not None
                     features = make_unsigned_graph_features(mat_i, communities=coms)
+                elif ftype == "ggraph":
+                    features = make_global_unsigned_graph_features(mat_i)
                 elif ftype == "dmd":
                     features = make_dmd_features(mat_i, bbox=(xmin, xmax, ymin, ymax))
                 elif ftype == "fourier":
@@ -751,7 +927,7 @@ if __name__ == "__main__":
     parser.add_argument("filenames", nargs="+", type=pathlib.Path)
     parser.add_argument(
         "--features",
-        choices=("sgraph", "matrix", "dmd", "eig", "ugraph", "fourier"),
+        choices=("sgraph", "ggraph", "matrix", "dmd", "eig", "ugraph", "fourier"),
         default="matrix",
         help="Type of the features to compute",
     )
