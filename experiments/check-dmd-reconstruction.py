@@ -32,6 +32,13 @@ Example:
 """
 
 
+def complexify(R: torch.Tensor) -> torch.Tensor:
+    """Best complex M with R ≈ real_embedding(M)."""
+    p = 0.5 * (R[0::2, 0::2] + R[1::2, 1::2])  # Re part
+    q = 0.5 * (R[0::2, 1::2] - R[1::2, 0::2])  # Im part
+    return (p + 1j * q).T
+
+
 def main(
     filename: pathlib.Path,
     *,
@@ -198,15 +205,17 @@ def main(
             raise ValueError(f"unknown method: {method!r}")
 
     mem.add_record("Constructed DMD model")
+    A_ref = mat.cpu()
+    A_dmd = complexify(dmd.A).cpu()  # ty: ignore[invalid-argument-type]
 
     with figure(basename.with_stem(f"{basename.stem}-sigma")) as fig:
         ax = fig.gca()
 
         # NOTE: none of these will match or anything, but plotting for visualization
-        S = torch.linalg.svdvals(mat)
+        S = torch.linalg.svdvals(A_ref)
         ax.semilogy(S.cpu().numpy(), label=r"$\sigma_A$")
 
-        S = torch.linalg.svdvals(dmd.A)
+        S = torch.linalg.svdvals(A_dmd)
         ax.semilogy(S.cpu().numpy(), label=r"$\sigma_{{DMD}}$")
 
         S = torch.linalg.svdvals(X1.mH @ X1).sqrt()
@@ -222,14 +231,14 @@ def main(
         ax.plot(np.sin(theta), np.cos(theta), "k-", lw=1)
 
         # NOTE: none of these will match or anything, but plotting for visualization
-        S = torch.linalg.eigvals(mat.cpu()).numpy()
+        S = torch.linalg.eigvals(A_ref).numpy()
         ax.plot(S.real, S.imag, "o", label=r"$\lambda_A$")
 
-        S = torch.linalg.eigvals(dmd.A.cpu()).numpy()  # ty: ignore[unresolved-attribute]
+        S = torch.linalg.eigvals(A_dmd).numpy()
         ax.plot(S.real, S.imag, "o", label=r"$\lambda_{{DMD}}$")
 
         ax.set_xlabel(r"$\lambda_r$")
-        ax.set_xlabel(r"$\lambda_i$")
+        ax.set_ylabel(r"$\lambda_i$")
         ax.set_xlim((-3, 3))
         ax.set_aspect("equal")
         ax.legend()
