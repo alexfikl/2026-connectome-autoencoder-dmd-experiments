@@ -327,7 +327,7 @@ def make_dmd_features(
     log.info("Computing DMD modes using '%s' (%s).", xp.__name__, device)
 
     from commonlib import generate_timeseries
-    from nneuroutil.dmdc import build_dense_symmetric_dmdc
+    from nneuroutil.dmdc import build_dense_dmdc
 
     n, m = mat.shape
     if n != m:
@@ -349,27 +349,29 @@ def make_dmd_features(
     from commonlib import compute_trajectory_mask
     from nneuroutil.array_api_extras import view_as_real
 
-    # NOTE: permute to (num_traj, maxit, n) and interleave to (num_traj, maxit, 2 * n)
+    # NOTE: permute to (num_traj, maxit, n) and keep the complex states
     Z_perm = xp.permute_dims(xp.reshape(Z, (maxit, -1, n)), (1, 0, 2))
-    X_real = view_as_real(Z_perm)
-    c_real = xp.stack([c.real, c.imag], axis=-1).reshape(-1, 2)  # ty: ignore[unresolved-attribute]
+    c_flat = xp.reshape(c, (-1,))
 
     # cull down the solutions, since a lot of them converge to the same value
     if stride > 1:
-        X_real = X_real[::stride]
-        c_real = c_real[::stride]
+        Z_perm = Z_perm[::stride]
+        c_flat = c_flat[::stride]
 
-    num_samples = X_real.shape[0]
+    num_samples = Z_perm.shape[0]
 
     # }}}
 
     # {{{ build dataset
 
-    tmask = compute_trajectory_mask(X_real, escape_radius=escape_radius, xp=xp)
+    # NOTE: `compute_trajectory_mask` expects interleaved real states
+    tmask = compute_trajectory_mask(
+        view_as_real(Z_perm), escape_radius=escape_radius, xp=xp
+    )
 
-    X1 = X_real[:, :-1, :][tmask.transition]
-    X2 = X_real[:, 1:, :][tmask.transition]
-    U = xp.broadcast_to(c_real[:, None, :], (num_samples, maxit - 1, 2))[
+    X1 = Z_perm[:, :-1, :][tmask.transition]
+    X2 = Z_perm[:, 1:, :][tmask.transition]
+    U = xp.broadcast_to(c_flat[:, None, None], (num_samples, maxit - 1, 1))[
         tmask.transition
     ]
 
@@ -377,11 +379,11 @@ def make_dmd_features(
 
     # {{{ features
 
-    dmd = build_dense_symmetric_dmdc(X1, U, X2, method="ridge")
-    G = X1.T @ X1
+    dmd = build_dense_dmdc(X1, U, X2, method="ridge")
+    G = xp.conj(X1).T @ X1
 
-    G = np.asarray(array_api_compat.to_device(G, "cpu"), dtype=mat.dtype)
-    A = np.asarray(array_api_compat.to_device(dmd.A, "cpu"), dtype=mat.dtype)
+    G = np.asarray(array_api_compat.to_device(G, "cpu"))
+    A = np.asarray(array_api_compat.to_device(dmd.A, "cpu"))
 
     if full_matrix:
         ds = make_matrix_features(A)
@@ -390,15 +392,17 @@ def make_dmd_features(
 
         # NOTE: openmp does not seem to help much here, so we turn it off
         with threadpool_limits(limits=1):
-            eigs, P = np.linalg.eigh(A.T)
+            eigs, Phi = np.linalg.eig(A.T)
 
-        coeff_energy = np.maximum(
-            np.real(np.sum((np.conj(P).T @ G) * P.T, axis=1)), 0.0
-        )
-        strengths = np.sqrt(coeff_energy)
+        P = np.linalg.pinv(Phi)
+        coeff_energy = np.maximum(np.real(np.sum((P @ G) * np.conj(P), axis=1)), 0.0)
+        strengths = np.linalg.norm(Phi, axis=0) * np.sqrt(coeff_energy)
 
         order = np.argsort(-strengths)
-        strengths = strengths[order] / np.sum(strengths)
+        strengths = strengths[order]
+
+        order = np.argsort(np.abs(eigs))
+        eigs = np.abs(eigs[order])
 
         features = np.concatenate([strengths, eigs])
         starts = np.cumsum([0, strengths.size, eigs.size])
