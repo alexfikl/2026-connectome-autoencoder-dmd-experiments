@@ -34,7 +34,7 @@ networkx==3.6.1 ; python_full_version < '3.12'
     # via fractal-dmd-autoencoder (pyproject.toml)
 networkx==3.7 ; python_full_version >= '3.12'
     # via fractal-dmd-autoencoder (pyproject.toml)
-nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@c80540f7f5a1323a9649a8864e54a36718abafb6#egg=nneuroutil
+nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@4eba92108c8d700520d6af44d86a8ee1882bb0a0#egg=nneuroutil
     # via fractal-dmd-autoencoder (pyproject.toml)
 numpy==2.4.6 ; python_full_version < '3.12'
     # via
@@ -54,7 +54,7 @@ numpy==2.5.4 ; python_full_version >= '3.12'
     #   orbitkit
     #   scikit-learn
     #   scipy
-orbitkit @ git+https://github.com/alexfikl/orbitkit.git@1e024bfef96e283b18a85bb602f9c92ab4be129b#egg=orbitkit
+orbitkit @ git+https://github.com/alexfikl/orbitkit.git@0395c18f661b8fd984a2db778d3c9bdfacc46f79#egg=orbitkit
     # via fractal-dmd-autoencoder (pyproject.toml)
 packaging==26.3
     # via matplotlib
