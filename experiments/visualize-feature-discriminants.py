@@ -26,7 +26,7 @@ groups stored in the file and looks at the redundancy of the top features.
 
 Example:
 
-    > {SCRIPT_PATH.name} dataset-features-sgraph.npz
+    > {SCRIPT_PATH.name} dataset-features-local.npz
 """
 
 

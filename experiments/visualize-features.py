@@ -26,7 +26,7 @@ also plotted to give an idea of the intrinsic dimensionality of the features.
 
 Example:
 
-    > {SCRIPT_PATH.name} --method pca tsne dataset-features-sgraph.npz
+    > {SCRIPT_PATH.name} --method pca tsne dataset-features-local.npz
 """
 
 EmbeddingMethod = Literal["pca", "tsne", "mds", "isomap", "spectral"]

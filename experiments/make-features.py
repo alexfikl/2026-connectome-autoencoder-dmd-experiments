@@ -94,7 +94,7 @@ def make_eig_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
 # }}}
 
 
-# {{{ make_unsigned_graph_features
+# {{{ make_local_graph_features
 
 
 def _global_efficiency(distances: Array2D[np.floating[Any]]) -> float:
@@ -111,7 +111,7 @@ def _global_efficiency(distances: Array2D[np.floating[Any]]) -> float:
     return float(2.0 * np.sum(reciprocal) / (n * (n - 1)))
 
 
-def _make_unsigned_graph_features(
+def _make_local_graph_features(
     mat: Array2D[np.floating[Any]],
     communities: Communities,
 ) -> FeatureDataset:
@@ -165,17 +165,29 @@ def _make_unsigned_graph_features(
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Clustering Coefficient")
 
+    # Local Assortativity
+    features.append(
+        communities.mean(
+            np.nan_to_num(
+                okm.compute_local_assortativity_sabek(mat, alpha=1.0, beta=1.0),
+                nan=0.0,
+            )
+        )
+    )
+    starts.append(starts[-1] + np.size(features[-1]))
+    descrs.append("Local Assortativity")
+
     return FeatureDataset(
         x=np.hstack(features), starts=np.array(starts), descrs=tuple(descrs)
     )
 
 
-def make_unsigned_graph_features(
+def make_local_graph_features(
     mat: Array2D[np.floating[Any]], communities: Communities
 ) -> FeatureDataset:
-    fabs = _make_unsigned_graph_features(np.abs(mat), communities)
-    fpos = _make_unsigned_graph_features(np.maximum(mat, 0.0), communities)
-    fneg = _make_unsigned_graph_features(np.maximum(-mat, 0.0), communities)
+    fabs = _make_local_graph_features(np.abs(mat), communities)
+    fpos = _make_local_graph_features(np.maximum(mat, 0.0), communities)
+    fneg = _make_local_graph_features(np.maximum(-mat, 0.0), communities)
 
     return FeatureDataset(
         x=np.concatenate([fabs.x, fpos.x, np.nan_to_num(fneg.x)]),
@@ -195,7 +207,7 @@ def make_unsigned_graph_features(
 # }}}
 
 
-# {{{ make_global_unsigned_graph_features
+# {{{ make_global_graph_features
 
 
 def _local_efficiency(
@@ -239,7 +251,7 @@ def _local_efficiency(
     return efficiency
 
 
-def _make_global_unsigned_graph_features(
+def _make_global_graph_features(
     mat: Array2D[np.floating[Any]],
     *,
     eps: float = 1.0e-12,
@@ -321,12 +333,12 @@ def _make_global_unsigned_graph_features(
     )
 
 
-def make_global_unsigned_graph_features(
+def make_global_graph_features(
     mat: Array2D[np.floating[Any]],
 ) -> FeatureDataset:
-    fabs = _make_global_unsigned_graph_features(np.abs(mat))
-    fpos = _make_global_unsigned_graph_features(np.maximum(mat, 0.0))
-    fneg = _make_global_unsigned_graph_features(np.maximum(-mat, 0.0))
+    fabs = _make_global_graph_features(np.abs(mat))
+    fpos = _make_global_graph_features(np.maximum(mat, 0.0))
+    fneg = _make_global_graph_features(np.maximum(-mat, 0.0))
 
     return FeatureDataset(
         x=np.concatenate([fabs.x, fpos.x, fneg.x]),
@@ -340,79 +352,6 @@ def make_global_unsigned_graph_features(
             *(f"Pos {name}" for name in fpos.descrs),
             *(f"Neg {name}" for name in fneg.descrs),
         ),
-    )
-
-
-# }}}
-
-
-# {{{ make_signed_graph_features
-
-
-def _community_block_means(
-    c: Communities, mat: Array2D[np.floating[Any]]
-) -> Array2D[np.floating[Any]]:
-    """Average a matrix over each pair of communities."""
-    n, _ = mat.shape
-    membership = np.zeros((c.size, n), dtype=mat.dtype)
-    membership[c.indices, np.arange(n)] = 1.0
-
-    counts = np.outer(c.counts, c.counts).astype(mat.dtype)
-    counts[np.diag_indices(c.size)] = c.counts * (c.counts - 1)
-
-    means = membership @ mat @ membership.T
-    return np.where(counts > 0, means / np.maximum(counts, 1), 0.0)
-
-
-def make_signed_graph_features(
-    mat: Array2D[np.floating[Any]], communities: Communities
-) -> FeatureDataset:
-    import orbitkit.metrics as okm
-
-    features = []
-    starts = [0]
-    descrs = []
-
-    # Block Connectivity: average the matrix over each pair of communities
-    block = _community_block_means(communities, mat)
-    features.append(block[np.triu_indices(communities.size)])
-    starts.append(starts[-1] + np.size(features[-1]))
-    descrs.append("Block Connectivity")
-
-    # Clustering Coefficient
-    # NOTE: this can become nan sometimes when the node has no neighbors
-    features.append(
-        np.nan_to_num(
-            okm.compute_weighted_clustering_coefficient_costantini(mat, variant=6),
-            nan=0.0,
-        )
-    )
-    starts.append(starts[-1] + np.size(features[-1]))
-    descrs.append("Clustering Coefficient")
-
-    # Local Assortativity
-    features.append(
-        okm.compute_local_assortativity_sabek(np.abs(mat), alpha=1.0, beta=1.0)
-    )
-    starts.append(starts[-1] + np.size(features[-1]))
-    descrs.append("Local Assortativity")
-
-    # Eigenvector Centrality
-    features.append(okm.compute_eigenvector_centrality(mat).score)
-    starts.append(starts[-1] + np.size(features[-1]))
-    descrs.append("Eigenvector Centrality")
-
-    # Modularity
-    cs = tuple(
-        set(np.where(communities.indices == k)[0].tolist())
-        for k in range(communities.size)
-    )
-    features.append(np.array(okm.compute_modularity(mat, cs)))
-    starts.append(starts[-1] + np.size(features[-1]))
-    descrs.append("Modularity")
-
-    return FeatureDataset(
-        x=np.hstack(features), starts=np.array(starts), descrs=tuple(descrs)
     )
 
 
@@ -675,9 +614,7 @@ def make_features(
     filenames: Sequence[pathlib.Path],
     *,
     outfile: pathlib.Path | None = None,
-    ftype: Literal[
-        "sgraph", "ugraph", "ggraph", "matrix", "dmd", "eig", "fourier"
-    ] = "matrix",
+    ftype: Literal["local", "global", "matrix", "dmd", "eig", "fourier"] = "matrix",
     key: str | None = None,
     eps: float | None = None,
     density: float | None = None,
@@ -776,7 +713,7 @@ def make_features(
     # {{{ compute communities
 
     coms = None
-    if ftype in {"ugraph", "sgraph"}:
+    if ftype == "local":
         log.info("Computing the shared community template.")
         coms = make_template_communities(
             inputs,
@@ -811,14 +748,11 @@ def make_features(
                     features = make_matrix_features(mat_i)
                 elif ftype == "eig":
                     features = make_eig_features(mat_i)
-                elif ftype == "sgraph":
+                elif ftype == "local":
                     assert coms is not None
-                    features = make_signed_graph_features(mat_i, coms)
-                elif ftype == "ugraph":
-                    assert coms is not None
-                    features = make_unsigned_graph_features(mat_i, communities=coms)
-                elif ftype == "ggraph":
-                    features = make_global_unsigned_graph_features(mat_i)
+                    features = make_local_graph_features(mat_i, communities=coms)
+                elif ftype == "global":
+                    features = make_global_graph_features(mat_i)
                 elif ftype == "dmd":
                     features = make_dmd_features(mat_i, bbox=(xmin, xmax, ymin, ymax))
                 elif ftype == "fourier":
@@ -880,7 +814,7 @@ if __name__ == "__main__":
     parser.add_argument("filenames", nargs="+", type=pathlib.Path)
     parser.add_argument(
         "--features",
-        choices=("sgraph", "ggraph", "matrix", "dmd", "eig", "ugraph", "fourier"),
+        choices=("local", "global", "matrix", "dmd", "eig", "fourier"),
         default="matrix",
         help="Type of the features to compute",
     )
