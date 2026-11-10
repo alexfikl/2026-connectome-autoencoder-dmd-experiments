@@ -114,20 +114,7 @@ def _global_efficiency(distances: Array2D[np.floating[Any]]) -> float:
 def _make_unsigned_graph_features(
     mat: Array2D[np.floating[Any]],
     communities: Communities,
-    *,
-    eps: float = 1.0e-12,
 ) -> FeatureDataset:
-    import igraph as ig
-
-    ig.set_random_number_generator(random.Random(42))  # ruff: ignore[suspicious-non-cryptographic-random-usage]
-
-    # construct graph
-    g = ig.Graph.Weighted_Adjacency(mat, mode="undirected", attr="weight", loops=False)
-
-    # unweighted shortest paths are reused by the efficiency measures
-    g.es["distance"] = [-np.log(w) if w > eps else np.inf for w in g.es["weight"]]
-    distances = np.asarray(g.distances(weights="distance"))
-
     features = []
     starts = [0]
     descrs = []
@@ -149,22 +136,14 @@ def _make_unsigned_graph_features(
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Disparity")
 
-    # Spectral Radius
-    eigs = np.linalg.eigvalsh(mat)
-    features.append(eigs[-1])
+    # Participation Coefficient
+    features.append(
+        communities.mean(
+            okm.compute_participation_coefficient(mat, communities.indices)
+        )
+    )
     starts.append(starts[-1] + np.size(features[-1]))
-    descrs.append("Spectral Radius")
-
-    # Spectral Participation Ratio
-    features.append(np.sum(eigs**2) ** 2 / np.sum(eigs**4))
-    starts.append(starts[-1] + np.size(features[-1]))
-    descrs.append("Spectral Participation Ratio")
-
-    # Spectral Entropy
-    p = eigs**2 / np.sum(eigs**2)
-    features.append(-np.sum(p * np.log(p + 1.0e-16)))
-    starts.append(starts[-1] + np.size(features[-1]))
-    descrs.append("Spectral Entropy")
+    descrs.append("Participation Coefficient")
 
     # Eigenvector Centrality
     features.append(communities.mean(okm.compute_eigenvector_centrality(mat).score))
@@ -185,11 +164,6 @@ def _make_unsigned_graph_features(
     features.append(communities.mean(wcc))
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Clustering Coefficient")
-
-    # Global Efficiency
-    features.append(_global_efficiency(distances))
-    starts.append(starts[-1] + np.size(features[-1]))
-    descrs.append("Global Efficiency")
 
     return FeatureDataset(
         x=np.hstack(features), starts=np.array(starts), descrs=tuple(descrs)
