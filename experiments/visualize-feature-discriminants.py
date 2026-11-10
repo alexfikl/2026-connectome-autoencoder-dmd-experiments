@@ -154,7 +154,7 @@ def plot_top_features(
 ) -> None:
     import matplotlib as mp
 
-    top_k = min(top_k, values.size)  # ty: ignore[unresolved-attribute]
+    top_k = min(top_k, values.size)  # ty: ignore[missing-attribute]
     order = np.argsort(-values)[:top_k]
     labels = feature_labels(order, groups, ds.starts, ds.descrs)
 
@@ -223,7 +223,7 @@ def plot_correlation(
 ) -> None:
     from scipy.stats import spearmanr
 
-    order = np.argsort(-values)[: min(top_k, values.size)]  # ty: ignore[unresolved-attribute]
+    order = np.argsort(-values)[: min(top_k, values.size)]  # ty: ignore[missing-attribute]
     if order.size < 2:
         return
 

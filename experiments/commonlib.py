@@ -547,7 +547,7 @@ def generate_timeseries(
         z = xp.zeros((maxit, resolution * resolution, d), dtype=dtype, device=A.device)
         for i in range(1, maxit):
             # evolve
-            z_new = (z[i - 1] @ A.T) ** 2 + c_flat  # ty: ignore[unresolved-attribute]
+            z_new = (z[i - 1] @ A.T) ** 2 + c_flat  # ty: ignore[missing-attribute]
 
             # clip escaped values over escape radius
             escaped = (
@@ -563,7 +563,7 @@ def generate_timeseries(
         for i in range(1, maxit):
             # evolve
             z_prev = result[i - 1]
-            z_new = (z_prev @ A.T) ** 2 + c_flat  # ty: ignore[unresolved-attribute]
+            z_new = (z_prev @ A.T) ** 2 + c_flat  # ty: ignore[missing-attribute]
 
             # clip escaped values over escape radius
             escaped = (

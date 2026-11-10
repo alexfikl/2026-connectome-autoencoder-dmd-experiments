@@ -78,10 +78,10 @@ def similarity(
     if metric == "correlation":
         a = _normalize_rows(a - np.mean(a, axis=-1, keepdims=True))
         b = _normalize_rows(b - np.mean(b, axis=-1, keepdims=True))
-        return a @ b.T  # ty: ignore[unresolved-attribute]
+        return a @ b.T  # ty: ignore[missing-attribute]
 
     if metric == "cosine":
-        return _normalize_rows(a) @ _normalize_rows(b).T  # ty: ignore[unresolved-attribute]
+        return _normalize_rows(a) @ _normalize_rows(b).T  # ty: ignore[missing-attribute]
 
     if metric == "euclidean":
         from scipy.spatial.distance import cdist

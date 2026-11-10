@@ -82,7 +82,7 @@ def compute_features(
 
     # {{{ spectrum
 
-    lam = torch.linalg.eigvals(dmdc.A.detach().cpu().to(torch.float64))  # ty: ignore[unresolved-attribute]
+    lam = torch.linalg.eigvals(dmdc.A.detach().cpu().to(torch.float64))  # ty: ignore[missing-attribute]
     lam = lam[torch.argsort(lam.abs(), descending=True)]
 
     # }}}
@@ -717,8 +717,8 @@ def infer(
             resolution=config.resolution,
             maxit=config.maxit,
         )
-        feats["dmdc_A"] = dmdc.A.detach().cpu().numpy()  # ty: ignore[unresolved-attribute]
-        feats["dmdc_B"] = dmdc.B.detach().cpu().numpy()  # ty: ignore[unresolved-attribute]
+        feats["dmdc_A"] = dmdc.A.detach().cpu().numpy()  # ty: ignore[missing-attribute]
+        feats["dmdc_B"] = dmdc.B.detach().cpu().numpy()  # ty: ignore[missing-attribute]
         feats["x"], feats["starts"], descrs = make_feature_vector(feats)
         feats["descrs"] = np.array(descrs)
         if "loss_test" in checkpoint:

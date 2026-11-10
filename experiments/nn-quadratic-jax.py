@@ -357,7 +357,7 @@ def _plot_weights(
     #      the general dynamics of the problem)
 
     # FIXME: this is pretty horrible. does it even work between versions?
-    learned_A = model.model.layers[0].kernel.get_value()  # ty: ignore[unresolved-attribute]
+    learned_A = model.model.layers[0].kernel.get_value()  # ty: ignore[missing-attribute]
     A = mat.astype(learned_A.dtype)
 
     with figure(
