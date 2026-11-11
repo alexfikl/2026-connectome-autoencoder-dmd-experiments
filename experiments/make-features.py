@@ -513,8 +513,9 @@ def make_fourier_features(
     approx = cv2.approxPolyDP(c, perimeter * eps, closed=True)
     pts = approx[:, 0, :]
 
+    # NOTE: image row 0 corresponds to ymax, as in the paper's MATLAB code
     x = xmin + pts[:, 0] * ((xmax - xmin) / width)
-    y = ymin + pts[:, 1] * ((ymax - ymin) / height)
+    y = ymax - pts[:, 1] * ((ymax - ymin) / height)
 
     # 3. resample to equidistant arc-length points
     z = x + 1j * y
@@ -536,38 +537,8 @@ def make_fourier_features(
 
     fourier = np.abs(np.fft.fft(z)[2:])
 
-    # 5. shape and moment descriptors of the region
-    area = cv2.contourArea(c)
-    (_bx, _by, bw, bh) = cv2.boundingRect(c)
-    hull_area = max(cv2.contourArea(cv2.convexHull(c)), 1.0e-12)
-
-    circularity = 4.0 * np.pi * area / max(perimeter**2, 1.0e-12)
-    aspect = bw / max(bh, 1)
-    solidity = area / hull_area
-    extent = area / max(bw * bh, 1)
-
-    if normalize:
-        # NOTE: drop the absolute size and keep only scale invariant ratios
-        morphology = np.array([circularity, aspect, solidity, extent])
-    else:
-        morphology = np.array([
-            np.log1p(area),
-            np.log1p(perimeter),
-            circularity,
-            aspect,
-            solidity,
-            extent,
-        ])
-
-    moments = cv2.moments((binary == 0).astype(np.uint8), binaryImage=True)
-    hu = np.asarray(cv2.HuMoments(moments)).ravel()
-    hu = -np.sign(hu) * np.log10(np.abs(hu) + 1.0e-30)
-
-    x = np.concatenate([fourier, morphology, hu])
-    starts = np.cumsum([0, fourier.size, morphology.size, hu.size])
-
     return FeatureDataset(
-        x=x, starts=starts, descrs=("Fourier", "Morphology", "HuMoments")
+        x=fourier, starts=np.array([0, fourier.size]), descrs=("Fourier",)
     )
 
 
@@ -675,7 +646,7 @@ def make_features(
 
         if ftype == "fourier":
             result = matrices
-            bbox = data["images_bbox"][0]
+            bbox = data["images_bbox"]
         else:
             # NOTE: ensure no self-connections in any matrix of the batch
             mat = np.array(matrices, copy=True)
@@ -741,7 +712,8 @@ def make_features(
 
         for i in range(nsamples):
             mat_i = matrices[i]
-            xmin, xmax, ymin, ymax = bboxes[name]
+            bbox_i = bboxes[name][i] if np.ndim(bboxes[name]) == 2 else bboxes[name]
+            xmin, xmax, ymin, ymax = bbox_i
 
             try:  # ruff: ignore[too-many-statements-in-try-clause]
                 if ftype == "matrix":

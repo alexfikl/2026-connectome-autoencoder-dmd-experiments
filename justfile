@@ -116,7 +116,7 @@ make_features name *FILES:
     {{ PYTHON }} experiments/make-features.py --force \
         --outfile data/dataset-features-{{ name }}.npz \
         --features {{ name }} \
-        {{ FILES }}
+        {{ FILES }} || true
 
 [doc("Construct DMD autoencoder features from trained models")]
 make_ae_features dirname:
@@ -126,12 +126,12 @@ make_ae_features dirname:
 
 [doc("Construct all features")]
 features:
-    # @just make_features matrix data/*_LR_*.npz data/Structural_LR.npz
-    # @just make_features eig data/*_LR_*.npz data/Structural_LR.npz
-    @just make_features local data/*_LR_*.npz data/Structural_LR.npz
-    # @just make_features global data/*_LR_*.npz data/Structural_LR.npz
-    # @just make_features dmd data/*_LR_*.npz data/Structural_LR.npz
-    # @just make_features fourier data/task-*-fractal.npz data/structural-fractal.npz
+    # @just make_features matrix data/*_LR_Task.npz data/Structural_LR.npz
+    # @just make_features eig data/*_LR_Task.npz data/Structural_LR.npz
+    # @just make_features local data/*_LR_Task.npz data/Structural_LR.npz
+    # @just make_features global data/*_LR_Task.npz data/Structural_LR.npz
+    # @just make_features dmd data/*_LR_Task.npz data/Structural_LR.npz
+    @just make_features fourier data/task-*-fractal.npz data/structural-fractal.npz
     # @just make_ae_features data/ae-dmd
 
 # }}}
