@@ -32,7 +32,7 @@ then measure how well a held-out task can identify the correct subject:
 
 Example:
 
-    > {SCRIPT_PATH.name} dataset-features-matrix.npz dataset-features-fourier.npz
+    > {SCRIPT_PATH.name} dataset-features-matrix.npz dataset-features-geometry.npz
 """
 
 SimilarityMetric = Literal["correlation", "cosine", "euclidean"]

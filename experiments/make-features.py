@@ -482,10 +482,10 @@ def make_dmd_features(
 # }}}
 
 
-# {{{ make_fourier_features
+# {{{ make_geometry_features
 
 
-def make_fourier_features(
+def make_geometry_features(
     binary: Array2D[np.integer[Any]],
     bbox: tuple[float, float, float, float],
     *,
@@ -494,12 +494,12 @@ def make_fourier_features(
     eps: float = 5.0e-4,
     normalize: bool = True,
 ) -> FeatureDataset:
-    """Compute symmetric low-order Fourier descriptors of the outer contour.
+    """Compute boundary descriptors and cusp-label-invariant geometry.
 
-    The contour is resampled at ``nsamples`` equidistant arc-length points and
-    rotated to start at its rightmost point. The real and imaginary parts of
-    modes ``m_{-ncoeffs}, ..., m_{-1}, m_1, ..., m_{ncoeffs}`` are returned.
-    The mean mode ``m_0`` is omitted, since the contour is centered.
+    The descriptor groups contain the real and imaginary parts of the
+    low-order boundary modes ``m_{-ncoeffs}, ..., m_{-1}, m_1, ..., m_{ncoeffs}``.
+    The geometry groups contain only measures that are invariant to swapping
+    the cusp and tail between Structural and Functional sets.
     """
     import cv2  # ty: ignore[import-not-found]
 
@@ -514,6 +514,8 @@ def make_fourier_features(
 
     xmin, xmax, ymin, ymax = bbox
     height, width = binary.shape
+    dx = (xmax - xmin) / width
+    dy = (ymax - ymin) / height
     mask = np.where(binary == 0, np.uint8(255), np.uint8(0))
 
     # 1. retrieve outer contour
@@ -522,19 +524,50 @@ def make_fourier_features(
         raise RuntimeError("could not find contours")
 
     c = max(contours, key=cv2.contourArea)
-    perimeter = cv2.arcLength(c, closed=True)
+    perimeter_px = cv2.arcLength(c, closed=True)
     if len(c) < 3:
         raise RuntimeError("invalid contour")
 
-    # 2. approximate polygon
-    approx = cv2.approxPolyDP(c, perimeter * eps, closed=True)
+    # 2. cusp-label-invariant geometry
+    area = cv2.contourArea(c) * dx * dy
+    perimeter = perimeter_px * np.sqrt(dx * dy)
+
+    px = xmin + c[:, 0, 0] * dx
+    py = ymax - c[:, 0, 1] * dy
+
+    # NOTE: d_TC is the distance between the two real-axis extremes, so it is
+    # invariant to swapping the cusp C and tail T between connectome types
+    near_axis = np.abs(py) <= 0.5 * dy
+    if np.any(near_axis):
+        diameter_x = px[near_axis].max() - px[near_axis].min()
+    else:
+        diameter_x = px.max() - px.min()
+
+    diameter_y = py.max() - py.min()
+    epsilon = diameter_y / max(diameter_x, 1.0e-12)
+
+    moments = cv2.moments(mask)
+    if moments["m00"] == 0.0:  # ruff: ignore[float-equality-comparison]
+        raise RuntimeError("empty set")
+    centroid = xmin + (moments["m10"] / moments["m00"]) * dx
+
+    geometry = np.array([
+        area,
+        perimeter,
+        centroid,
+        diameter_x,
+        diameter_y,
+        epsilon,
+    ])
+
+    # 3. approximate polygon and resample to equidistant arc-length points
+    approx = cv2.approxPolyDP(c, perimeter_px * eps, closed=True)
     pts = approx[:, 0, :]
 
     # NOTE: image row 0 corresponds to ymax, as in the paper's MATLAB code
     x = xmin + pts[:, 0] * ((xmax - xmin) / width)
     y = ymax - pts[:, 1] * ((ymax - ymin) / height)
 
-    # 3. resample to equidistant arc-length points
     z = x + 1j * y
     z = np.append(z, z[0])
     dists = np.insert(np.cumsum(np.abs(np.diff(z))), 0, 0.0)
@@ -544,7 +577,7 @@ def make_fourier_features(
         target_dists, dists, z.imag
     )
 
-    # 4. symmetric low-order Fourier descriptors
+    # 4. symmetric low-order boundary descriptors
     # NOTE: centering makes the m_0 coefficient zero, so it is omitted
     z = z - np.mean(z)
     if normalize:
@@ -563,11 +596,23 @@ def make_fourier_features(
     modes = [*range(-ncoeffs, 0), *range(1, ncoeffs + 1)]
     values = F[[index[k] for k in modes]]
 
-    fourier = np.concatenate([values.real, values.imag])
-    starts = np.cumsum([0, values.size, values.size])
+    descriptors = np.concatenate([values.real, values.imag])
+    x = np.concatenate([descriptors, geometry])
+    starts = np.cumsum([0, values.size, values.size, *([1] * geometry.size)])
 
     return FeatureDataset(
-        x=fourier, starts=starts, descrs=("Fourier Real", "Fourier Imag")
+        x=x,
+        starts=starts,
+        descrs=(
+            "Descriptor Real",
+            "Descriptor Imag",
+            "Area",
+            "Perimeter",
+            "Centroid",
+            "d_TC",
+            "d_RR",
+            "epsilon",
+        ),
     )
 
 
@@ -614,7 +659,7 @@ def make_features(
     filenames: Sequence[pathlib.Path],
     *,
     outfile: pathlib.Path | None = None,
-    ftype: Literal["local", "global", "matrix", "dmd", "eig", "fourier"] = "matrix",
+    ftype: Literal["local", "global", "matrix", "dmd", "eig", "geometry"] = "matrix",
     key: str | None = None,
     eps: float | None = None,
     density: float | None = None,
@@ -634,7 +679,7 @@ def make_features(
         return 1
 
     if key is None:
-        key = "images_binary" if ftype == "fourier" else "matrices"
+        key = "images_binary" if ftype == "geometry" else "matrices"
 
     # {{{ load matrices
 
@@ -673,7 +718,7 @@ def make_features(
             except ValueError:
                 feps = -1.0
 
-        if ftype == "fourier":
+        if ftype == "geometry":
             result = matrices
             bbox = data["images_bbox"]
         else:
@@ -756,8 +801,8 @@ def make_features(
                     features = make_global_graph_features(mat_i)
                 elif ftype == "dmd":
                     features = make_dmd_features(mat_i, bbox=(xmin, xmax, ymin, ymax))
-                elif ftype == "fourier":
-                    features = make_fourier_features(mat_i, (xmin, xmax, ymin, ymax))
+                elif ftype == "geometry":
+                    features = make_geometry_features(mat_i, (xmin, xmax, ymin, ymax))
                 else:
                     raise ValueError(f"unknown feature type: {ftype!r}")
             except Exception as exc:
@@ -815,7 +860,7 @@ if __name__ == "__main__":
     parser.add_argument("filenames", nargs="+", type=pathlib.Path)
     parser.add_argument(
         "--features",
-        choices=("local", "global", "matrix", "dmd", "eig", "fourier"),
+        choices=("local", "global", "matrix", "dmd", "eig", "geometry"),
         default="matrix",
         help="Type of the features to compute",
     )
