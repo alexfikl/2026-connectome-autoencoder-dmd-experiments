@@ -560,7 +560,6 @@ def make_geometry_features(
         cols = np.flatnonzero(inside.any(axis=0))
         j0 = int(cols[np.argmin(np.abs(cols - j0))])
         rows = np.flatnonzero(inside[:, j0])
-    y_min_x0 = ymax - np.max(rows) * dy
     y_max_x0 = ymax - np.min(rows) * dy
 
     bbox_width = x_max - x_min
@@ -582,11 +581,9 @@ def make_geometry_features(
     geometry = np.array([
         x_min_y0,
         x_max_y0,
-        y_min_x0,
         y_max_x0,
         x_min,
         x_max,
-        y_min,
         y_max,
         area,
         perimeter,
@@ -649,11 +646,9 @@ def make_geometry_features(
             "Descriptor Imag",
             "x_min_y0",
             "x_max_y0",
-            "y_min_x0",
             "y_max_x0",
             "x_min",
             "x_max",
-            "y_min",
             "y_max",
             "area",
             "perimeter",
