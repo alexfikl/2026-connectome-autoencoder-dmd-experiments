@@ -489,11 +489,28 @@ def make_fourier_features(
     binary: Array2D[np.integer[Any]],
     bbox: tuple[float, float, float, float],
     *,
-    nmodes: int = 32,
+    ncoeffs: int = 5,
+    nsamples: int = 128,
     eps: float = 5.0e-4,
     normalize: bool = True,
 ) -> FeatureDataset:
+    """Compute symmetric low-order Fourier descriptors of the outer contour.
+
+    The contour is resampled at ``nsamples`` equidistant arc-length points and
+    rotated to start at its rightmost point. The real and imaginary parts of
+    modes ``m_{-ncoeffs}, ..., m_{-1}, m_1, ..., m_{ncoeffs}`` are returned.
+    The mean mode ``m_0`` is omitted, since the contour is centered.
+    """
     import cv2  # ty: ignore[import-not-found]
+
+    if ncoeffs < 1:
+        raise ValueError(f"'ncoeffs' must be positive: {ncoeffs}")
+
+    if nsamples < 2 * ncoeffs + 1:
+        raise ValueError(
+            f"'nsamples' must be at least 2 * ncoeffs + 1: "
+            f"{nsamples} < {2 * ncoeffs + 1}"
+        )
 
     xmin, xmax, ymin, ymax = bbox
     height, width = binary.shape
@@ -521,13 +538,14 @@ def make_fourier_features(
     z = x + 1j * y
     z = np.append(z, z[0])
     dists = np.insert(np.cumsum(np.abs(np.diff(z))), 0, 0.0)
-    target_dists = np.linspace(0.0, dists[-1], nmodes, endpoint=False)
+    target_dists = np.linspace(0.0, dists[-1], nsamples, endpoint=False)
 
     z = np.interp(target_dists, dists, z.real) + 1j * np.interp(
         target_dists, dists, z.imag
     )
 
-    # 4. Fourier descriptors
+    # 4. symmetric low-order Fourier descriptors
+    # NOTE: centering makes the m_0 coefficient zero, so it is omitted
     z = z - np.mean(z)
     if normalize:
         scale = np.sqrt(np.mean(np.abs(z) ** 2))
@@ -535,10 +553,21 @@ def make_fourier_features(
             scale = 1.0
         z = z / scale
 
-    fourier = np.abs(np.fft.fft(z)[2:])
+    # NOTE: the phases depend on where the contour starts, so anchor it at
+    # the rightmost point, which is stable across all equi-M sets
+    z = np.roll(z, -int(np.argmax(z.real)))
+
+    F = np.fft.fft(z)
+    freqs = np.rint(np.fft.fftfreq(nsamples, d=1.0 / nsamples)).astype(int)
+    index = {int(k): i for i, k in enumerate(freqs)}
+    modes = [*range(-ncoeffs, 0), *range(1, ncoeffs + 1)]
+    values = F[[index[k] for k in modes]]
+
+    fourier = np.concatenate([values.real, values.imag])
+    starts = np.cumsum([0, values.size, values.size])
 
     return FeatureDataset(
-        x=fourier, starts=np.array([0, fourier.size]), descrs=("Fourier",)
+        x=fourier, starts=starts, descrs=("Fourier Real", "Fourier Imag")
     )
 
 
