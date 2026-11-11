@@ -494,12 +494,13 @@ def make_geometry_features(
     eps: float = 5.0e-4,
     normalize: bool = True,
 ) -> FeatureDataset:
-    """Compute boundary descriptors and cusp-label-invariant geometry.
+    """Compute boundary descriptors and geometric measures.
 
     The descriptor groups contain the real and imaginary parts of the
     low-order boundary modes ``m_{-ncoeffs}, ..., m_{-1}, m_1, ..., m_{ncoeffs}``.
-    The geometry groups contain only measures that are invariant to swapping
-    the cusp and tail between Structural and Functional sets.
+    The geometry groups contain the real-axis and imaginary-axis chords, the
+    bounding box, area and perimeter, and a few derived shape measures. No
+    landmark-side assumptions are made.
     """
     import cv2  # ty: ignore[import-not-found]
 
@@ -528,36 +529,76 @@ def make_geometry_features(
     if len(c) < 3:
         raise RuntimeError("invalid contour")
 
-    # 2. cusp-label-invariant geometry
+    # 2. geometry
     area = cv2.contourArea(c) * dx * dy
     perimeter = perimeter_px * np.sqrt(dx * dy)
 
     px = xmin + c[:, 0, 0] * dx
     py = ymax - c[:, 0, 1] * dy
 
-    # NOTE: d_TC is the distance between the two real-axis extremes, so it is
-    # invariant to swapping the cusp C and tail T between connectome types
-    near_axis = np.abs(py) <= 0.5 * dy
-    if np.any(near_axis):
-        diameter_x = px[near_axis].max() - px[near_axis].min()
-    else:
-        diameter_x = px.max() - px.min()
+    inside = binary == 0
+    ys, xs = np.nonzero(inside)
+    x_min = xmin + np.min(xs) * dx
+    x_max = xmin + np.max(xs) * dx
+    y_min = ymax - np.max(ys) * dy
+    y_max = ymax - np.min(ys) * dy
 
-    diameter_y = py.max() - py.min()
+    # real-axis chord: intersection of the set with y = 0
+    i0 = int(np.clip(np.rint((ymax - 0.0) / dy), 0, height - 1))
+    cols = np.flatnonzero(inside[i0, :])
+    if cols.size == 0:
+        rows = np.flatnonzero(inside.any(axis=1))
+        i0 = int(rows[np.argmin(np.abs(rows - i0))])
+        cols = np.flatnonzero(inside[i0, :])
+    x_min_y0 = xmin + np.min(cols) * dx
+    x_max_y0 = xmin + np.max(cols) * dx
+
+    # imaginary-axis chord: intersection of the set with x = 0
+    j0 = int(np.clip(np.rint((0.0 - xmin) / dx), 0, width - 1))
+    rows = np.flatnonzero(inside[:, j0])
+    if rows.size == 0:
+        cols = np.flatnonzero(inside.any(axis=0))
+        j0 = int(cols[np.argmin(np.abs(cols - j0))])
+        rows = np.flatnonzero(inside[:, j0])
+    y_min_x0 = ymax - np.max(rows) * dy
+    y_max_x0 = ymax - np.min(rows) * dy
+
+    bbox_width = x_max - x_min
+    bbox_height = y_max - y_min
+    diameter_x = x_max_y0 - x_min_y0
+    diameter_y = bbox_height
     epsilon = diameter_y / max(diameter_x, 1.0e-12)
 
-    moments = cv2.moments(mask)
-    if moments["m00"] == 0.0:  # ruff: ignore[float-equality-comparison]
-        raise RuntimeError("empty set")
-    centroid = xmin + (moments["m10"] / moments["m00"]) * dx
+    fill_ratio = area / max(bbox_width * bbox_height, 1.0e-12)
+    circularity = 4.0 * np.pi * area / max(perimeter**2, 1.0e-12)
+
+    radius = np.hypot(px, py)
+    max_radius = radius.max()
+    mean_radius = radius.mean()
+
+    x_at_y_max = px[int(np.argmax(py))]
+    y_at_x_max = abs(py[int(np.argmax(px))])
 
     geometry = np.array([
+        x_min_y0,
+        x_max_y0,
+        y_min_x0,
+        y_max_x0,
+        x_min,
+        x_max,
+        y_min,
+        y_max,
         area,
         perimeter,
-        centroid,
         diameter_x,
         diameter_y,
         epsilon,
+        fill_ratio,
+        circularity,
+        max_radius,
+        mean_radius,
+        x_at_y_max,
+        y_at_x_max,
     ])
 
     # 3. approximate polygon and resample to equidistant arc-length points
@@ -606,12 +647,25 @@ def make_geometry_features(
         descrs=(
             "Descriptor Real",
             "Descriptor Imag",
-            "Area",
-            "Perimeter",
-            "Centroid",
+            "x_min_y0",
+            "x_max_y0",
+            "y_min_x0",
+            "y_max_x0",
+            "x_min",
+            "x_max",
+            "y_min",
+            "y_max",
+            "area",
+            "perimeter",
             "d_TC",
             "d_RR",
             "epsilon",
+            "fill_ratio",
+            "circularity",
+            "max_radius",
+            "mean_radius",
+            "x_at_y_max",
+            "y_at_x_max",
         ),
     )
 
@@ -802,7 +856,10 @@ def make_features(
                 elif ftype == "dmd":
                     features = make_dmd_features(mat_i, bbox=(xmin, xmax, ymin, ymax))
                 elif ftype == "geometry":
-                    features = make_geometry_features(mat_i, (xmin, xmax, ymin, ymax))
+                    features = make_geometry_features(
+                        mat_i,
+                        (xmin, xmax, ymin, ymax),
+                    )
                 else:
                     raise ValueError(f"unknown feature type: {ftype!r}")
             except Exception as exc:
