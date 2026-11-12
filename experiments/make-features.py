@@ -459,10 +459,10 @@ def make_global_graph_features(
 def make_dmd_features(
     mat: Array2D[np.floating[Any]],
     *,
-    bbox: tuple[float, float, float, float] = (-0.04, 0.04, -0.04, 0.04),
+    bbox: tuple[float, float, float, float] = (-0.03, 0.03, -0.03, 0.03),
     escape_radius: float = 100.0,
     resolution: int = 64,
-    maxit: int = 128,
+    maxit: int = 32,
     full_matrix: bool = False,
 ) -> FeatureDataset:
     # NOTE: the DMD run is pretty slow, so we try to do it on the GPU
@@ -472,17 +472,17 @@ def make_dmd_features(
         from nneuroutil.interop.torch import available_device_names
 
         if any(dev.startswith("cuda") for dev in available_device_names()):
-            torch.set_default_device("cuda")
-            device = "CUDA"
+            device = "cuda"
+            torch.set_default_device(device)
             xp = array_api_compat.array_namespace(torch.empty(0))
         else:
-            device = "CPU"
+            device = "cpu"
             xp = array_api_compat.array_namespace(np.array(0))
     except ImportError:
-        device = "CPU"
+        device = "cpu"
         xp = array_api_compat.array_namespace(np.array(0))
 
-    log.info("Computing DMD modes using '%s' (%s).", xp.__name__, device)
+    # log.info("Computing DMD modes using '%s' (%s).", xp.__name__, device)
 
     from commonlib import generate_timeseries
     from nneuroutil.dmdc import build_dense_dmdc
@@ -494,7 +494,7 @@ def make_dmd_features(
     # {{{ generate data
 
     # NOTE: complex64 is both smaller and faster -- we need some speed here
-    cmat = xp.astype(xp.asarray(mat), xp.complex64)
+    cmat = xp.astype(xp.asarray(mat, device=device), xp.complex64)
 
     Z, c = generate_timeseries(
         cmat,
@@ -563,7 +563,7 @@ def make_dmd_features(
         order = np.argsort(np.abs(eigs))
         eigs = np.abs(eigs[order])
 
-        features = np.concatenate([strengths, eigs])
+        features = np.concatenate([strengths, eigs], dtype=mat.dtype)
         starts = np.cumsum([0, strengths.size, eigs.size])
         descrs = ("DMD Strengths", "DMD Eigs")
 
