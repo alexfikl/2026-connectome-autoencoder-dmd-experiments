@@ -92,24 +92,44 @@ pin: requirements_txt
 # {{{ datasets
 
 [private]
-mat2npz filename *ARGS:
+mat2npz scan_type filename *ARGS:
     {{ PYTHON }} scripts/mat2npz.py --force \
         --variable-name 'w:matrices' \
         --transpose \
+        --scan-type {{ scan_type }} \
         {{ ARGS }} \
         {{ filename }}
 
-[doc("Convert HPC datasets")]
-dataset:
-    @just mat2npz data/Emotion_LR_Task.mat
-    @just mat2npz data/Gambling_LR_Task.mat
-    @just mat2npz data/Language_LR_Task.mat
-    @just mat2npz data/Relational_LR_Task.mat
-    @just mat2npz data/Rest_LR_Task.mat
-    @just mat2npz data/Social_LR_Task.mat
-    @just mat2npz data/WM_LR_Task.mat
-    @just mat2npz data/Structural_LR.mat \
-        --normalize 'max' --bbox '-1.0' '0.3' '-0.65' '0.65'
+[doc("Convert HCP datasets")]
+dataset-hcp:
+    @just mat2npz fmri data/Emotion_LR_Task.mat
+    @just mat2npz fmri data/Gambling_LR_Task.mat
+    @just mat2npz fmri data/Language_LR_Task.mat
+    @just mat2npz fmri data/Relational_LR_Task.mat
+    @just mat2npz fmri data/Rest_LR_Task.mat
+    @just mat2npz fmri data/Social_LR_Task.mat
+    @just mat2npz fmri data/WM_LR_Task.mat
+    @just mat2npz mri data/Structural_LR.mat \
+        --normalize 'max' --bbox '-0.8' '0.3' '-0.55' '0.55'
+
+[private]
+img2npz scan_type root *ARGS:
+    {{ PYTHON }} scripts/img2npz.py --force \
+        --outfile data/$(basename {{ root }})-fractal.npz \
+        --scan-type {{ scan_type }} \
+        {{ ARGS }} \
+        {{ root }}/exhibit-*.png
+
+[doc("Convert rendered equi-M images to datasets")]
+dataset-equim root:
+    @just img2npz fmri {{ root }}/task-emotion
+    @just img2npz fmri {{ root }}/task-gambling
+    @just img2npz fmri {{ root }}/task-language
+    @just img2npz fmri {{ root }}/task-relational
+    @just img2npz fmri {{ root }}/task-rest
+    @just img2npz fmri {{ root }}/task-social
+    @just img2npz fmri {{ root }}/task-wm
+    @just img2npz fmri {{ root }}/structural
 
 [private]
 make_features name *FILES:
@@ -185,7 +205,7 @@ ablation filename dataidx="0" *ARGS:
 [private]
 figure2_run filename *ARGS:
     {{ PYTHON }} experiments/visualize-effective-rank.py \
-        --maxit 32 --resolution 128 --escape-radius 100 {{ ARGS }} \
+        --maxit 32 --resolution 64 --escape-radius 100 {{ ARGS }} \
         {{ filename }}
 
 [doc("Generate plots for Figure 2")]
