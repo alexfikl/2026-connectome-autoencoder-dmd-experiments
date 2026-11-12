@@ -7,7 +7,6 @@ import logging
 import pathlib
 import random
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple
 
 import array_api_compat
@@ -111,9 +110,35 @@ def _global_efficiency(distances: Array2D[np.floating[Any]]) -> float:
     return float(2.0 * np.sum(reciprocal) / (n * (n - 1)))
 
 
+def _make_community_labels(mat: Array2D[np.floating[Any]]) -> Array1D[np.integer[Any]]:
+    """Detect communities on the unsigned graph of a single connectome."""
+    import igraph as ig
+
+    ig.set_random_number_generator(random.Random(42))  # ruff: ignore[suspicious-non-cryptographic-random-usage]
+
+    weights = np.abs(np.array(mat, copy=True))
+    np.fill_diagonal(weights, 0.0)
+    weights = (weights + weights.T) / 2.0
+
+    if not np.any(weights > 0.0):
+        return np.zeros(weights.shape[0], dtype=np.int32)
+
+    graph = ig.Graph.Weighted_Adjacency(
+        weights, mode="undirected", attr="weight", loops=False
+    )
+    communities = graph.community_leiden(
+        objective_function="modularity",
+        weights="weight",
+        resolution=1.0,
+        n_iterations=-1,
+    )
+
+    return np.asarray(communities.membership, dtype=np.int32)
+
+
 def _make_local_graph_features(
     mat: Array2D[np.floating[Any]],
-    communities: Communities,
+    labels: Array1D[np.integer[Any]],
 ) -> FeatureDataset:
     features = []
     starts = [0]
@@ -121,27 +146,23 @@ def _make_local_graph_features(
 
     import orbitkit.metrics as okm
 
-    # Strength: average weighted degree
-    features.append(communities.mean(okm.compute_weighted_degree(mat)))
+    # Strength: weighted degree
+    features.append(okm.compute_weighted_degree(mat))
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Strength")
 
     # Disparity
-    features.append(communities.mean(okm.compute_disparity_serrano(mat)))
+    features.append(okm.compute_disparity_serrano(mat))
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Disparity")
 
     # Participation Coefficient
-    features.append(
-        communities.mean(
-            okm.compute_participation_coefficient(mat, communities.indices)
-        )
-    )
+    features.append(okm.compute_participation_coefficient(mat, labels))
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Participation Coefficient")
 
     # Eigenvector Centrality
-    features.append(communities.mean(okm.compute_eigenvector_centrality(mat).score))
+    features.append(okm.compute_eigenvector_centrality(mat).score)
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Eigenvector Centrality")
 
@@ -156,17 +177,15 @@ def _make_local_graph_features(
     else:
         wcc = np.zeros(mat.shape[0])
 
-    features.append(communities.mean(wcc))
+    features.append(wcc)
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Clustering Coefficient")
 
     # Local Assortativity
     features.append(
-        communities.mean(
-            np.nan_to_num(
-                okm.compute_local_assortativity_sabek(mat, alpha=1.0, beta=1.0),
-                nan=0.0,
-            )
+        np.nan_to_num(
+            okm.compute_local_assortativity_sabek(mat, alpha=1.0, beta=1.0),
+            nan=0.0,
         )
     )
     starts.append(starts[-1] + np.size(features[-1]))
@@ -177,12 +196,13 @@ def _make_local_graph_features(
     )
 
 
-def make_local_graph_features(
-    mat: Array2D[np.floating[Any]], communities: Communities
-) -> FeatureDataset:
-    fabs = _make_local_graph_features(np.abs(mat), communities)
-    fpos = _make_local_graph_features(np.maximum(mat, 0.0), communities)
-    fneg = _make_local_graph_features(np.maximum(-mat, 0.0), communities)
+def make_local_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
+    amat = np.abs(mat)
+    labels = _make_community_labels(amat)
+
+    fabs = _make_local_graph_features(amat, labels)
+    fpos = _make_local_graph_features(np.maximum(mat, 0.0), labels)
+    fneg = _make_local_graph_features(np.maximum(-mat, 0.0), labels)
 
     return FeatureDataset(
         x=np.concatenate([fabs.x, fpos.x, np.nan_to_num(fneg.x)]),
@@ -727,42 +747,6 @@ def make_geometry_features(
 # }}}
 
 
-@dataclass(frozen=True)
-class Communities:
-    size: int
-    indices: Array1D[np.integer[Any]]
-    counts: Array1D[np.integer[Any]]
-
-    def mean(self, x: Array1D[np.floating[Any]]) -> Array1D[np.floating[Any]]:
-        xm = np.bincount(self.indices, weights=x, minlength=self.size)
-        return xm / np.maximum(self.counts, 1)
-
-
-def make_template_communities(
-    inputs: dict[str, Array3D[np.floating[Any]]],
-    *,
-    resolution: float = 3.0,
-    seed: int = 42,
-) -> Communities | None:
-    from orbitkit.clusters import community_labels, signed_leiden_communities
-
-    if not inputs:
-        return None
-
-    means = []
-    for matrices in inputs.values():
-        means.append(np.mean(matrices, axis=0))
-
-    mat = np.mean(means, axis=0)
-    communities = signed_leiden_communities(mat, resolution=resolution, seed=seed)
-
-    indices = community_labels(communities, mat.shape[0])
-    ncommunities = int(np.max(indices)) + 1
-    counts = np.bincount(indices, minlength=ncommunities)
-
-    return Communities(size=ncommunities, indices=indices, counts=counts)
-
-
 def make_features(
     filenames: Sequence[pathlib.Path],
     *,
@@ -771,8 +755,6 @@ def make_features(
     key: str | None = None,
     eps: float | None = None,
     density: float | None = None,
-    community_resolution: float = 3.0,
-    community_seed: int = 42,
     overwrite: bool = False,
 ) -> int:
     if not filenames:
@@ -863,25 +845,6 @@ def make_features(
 
     # }}}
 
-    # {{{ compute communities
-
-    coms = None
-    if ftype == "local":
-        log.info("Computing the shared community template.")
-        coms = make_template_communities(
-            inputs,
-            resolution=community_resolution,
-            seed=community_seed,
-        )
-
-        if coms is None:
-            log.error("Could not compute a community template from the given files.")
-            return 1
-
-        log.info("Template has %d communities.", coms.size)
-
-    # }}}
-
     # {{{ compute features
 
     datasets = {}
@@ -903,8 +866,7 @@ def make_features(
                 elif ftype == "eig":
                     features = make_eig_features(mat_i)
                 elif ftype == "local":
-                    assert coms is not None
-                    features = make_local_graph_features(mat_i, communities=coms)
+                    features = make_local_graph_features(mat_i)
                 elif ftype == "global":
                     features = make_global_graph_features(mat_i)
                 elif ftype == "dmd":
