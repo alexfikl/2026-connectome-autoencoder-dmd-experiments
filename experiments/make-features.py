@@ -210,16 +210,106 @@ def make_local_graph_features(
 # {{{ make_global_graph_features
 
 
+def _greedy_vertex_cover(
+    rows: Array1D[np.integer[Any]],
+    cols: Array1D[np.integer[Any]],
+    size: int,
+) -> Array1D[np.integer[Any]]:
+    """Greedily cover all the given edges with as few vertices as possible."""
+    alive = np.ones(rows.size, dtype=bool)
+    cover = []
+    while np.any(alive):
+        degree = np.bincount(np.concatenate([rows[alive], cols[alive]]), minlength=size)
+        vertex = int(np.argmax(degree))
+        if degree[vertex] == 0:
+            break
+
+        cover.append(vertex)
+        alive &= (rows != vertex) & (cols != vertex)
+
+    return np.array(cover, dtype=np.int64)
+
+
+def _make_local_distances(
+    u: int,
+    neighbors: Array1D[np.integer[Any]],
+    adjacency: Array2D[np.bool_],
+    lengths: Any,
+    full: Array2D[np.floating[Any]],
+    *,
+    tol: float = 1.0e-10,
+) -> Array2D[np.floating[Any]]:
+    """Distances in the subgraph induced by the neighbours of ``u``.
+
+    The induced subgraph is obtained from the full graph by removing ``u`` and
+    all the nodes that are not adjacent to it. Only a small number of shortest
+    paths passes through the removed nodes, so the full distances are reused
+    and only the affected pairs are recomputed with Dijkstra.
+    """
+    from scipy.sparse.csgraph import dijkstra
+
+    k = neighbors.size
+    distances = full[np.ix_(neighbors, neighbors)]
+
+    # NOTE: a shortest path between two neighbours stays the same unless one of
+    # the removed nodes lies on it, which is the case if and only if going
+    # through that node is as short as the full distance.
+    flagged = np.zeros((k, k), dtype=bool)
+    for v in np.flatnonzero(~adjacency[u, :]):
+        dv = full[v, neighbors]
+        flagged |= (dv[:, None] + dv[None, :]) <= distances + tol
+    flagged &= np.isfinite(distances)
+
+    rows, cols = np.nonzero(np.triu(flagged, k=1))
+    if rows.size == 0:
+        return distances
+
+    # NOTE: Dijkstra from one endpoint of every affected pair is enough, so
+    # only a vertex cover of the affected pairs is used as a source set.
+    cover = _greedy_vertex_cover(rows, cols, k)
+    covered = np.zeros(k, dtype=bool)
+    covered[cover] = True
+    sources = np.where(covered[rows], rows, cols)
+    targets = np.where(covered[rows], cols, rows)
+
+    corrections = dijkstra(
+        lengths[neighbors][:, neighbors], directed=False, indices=cover
+    )
+
+    positions = np.full(k, -1, dtype=np.int64)
+    positions[cover] = np.arange(cover.size)
+    values = corrections[positions[sources], targets]
+
+    distances[rows, cols] = values
+    distances[cols, rows] = values
+
+    return distances
+
+
 def _local_efficiency(
     mat: Array2D[np.floating[Any]],
     graph: Any,
     *,
     eps: float = 1.0e-12,
+    dense_threshold: float = 0.8,
 ) -> Array1D[np.floating[Any]]:
     """Compute the per-node local efficiency of a weighted graph."""
+    import scipy.sparse as sp
+
     n, _ = mat.shape
     adjacency = mat > eps
     cbrt_weights = np.cbrt(mat)
+
+    # NOTE: for dense graphs the neighbourhood of every node is almost the full
+    # graph, so the distances in all the neighbourhoods can be derived from a
+    # single all-pairs shortest path computation.
+    dense = n > 1 and float(np.mean(adjacency)) > dense_threshold
+    lengths = None
+    full = None
+    if dense:
+        rows, cols = np.nonzero(adjacency)
+        lengths = sp.csr_matrix((1.0 / mat[rows, cols], (rows, cols)), shape=(n, n))
+        full = np.asarray(graph.distances(weights="length"))
 
     efficiency = np.zeros(n)
     for u in range(n):
@@ -227,8 +317,13 @@ def _local_efficiency(
         if neighbors.size < 2:
             continue
 
-        subgraph = graph.induced_subgraph(neighbors.tolist())
-        distances = np.asarray(subgraph.distances(weights="length"))
+        if dense:
+            assert full is not None
+            distances = _make_local_distances(u, neighbors, adjacency, lengths, full)
+        else:
+            subgraph = graph.induced_subgraph(neighbors.tolist())
+            distances = np.asarray(subgraph.distances(weights="length"))
+
         with np.errstate(divide="ignore"):
             inverse = np.where(
                 np.isfinite(distances) & (distances > 0), 1.0 / distances, 0.0
