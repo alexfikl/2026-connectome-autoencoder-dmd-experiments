@@ -9,6 +9,7 @@ import math
 import os
 import pathlib
 import secrets
+import warnings
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields
 from typing import TYPE_CHECKING, Any, NamedTuple, Self
@@ -25,6 +26,13 @@ if TYPE_CHECKING:
 
 set_up_logging("INFO")
 log = logging.getLogger("lib")
+
+# NOTE: ignore torch warnings about array_api_compat usage
+warnings.filterwarnings(
+    "ignore",
+    message=r"Dynamo detected a call to a .functools\.lru_cache.-wrapped function",
+    category=UserWarning,
+)
 
 # {{{ matplotlib
 
