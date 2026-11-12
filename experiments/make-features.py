@@ -498,9 +498,9 @@ def make_geometry_features(
 
     The descriptor groups contain the real and imaginary parts of the
     low-order boundary modes ``m_{-ncoeffs}, ..., m_{-1}, m_1, ..., m_{ncoeffs}``.
-    The geometry groups contain the real-axis and imaginary-axis chords, the
-    bounding box, area and perimeter, and a few derived shape measures. No
-    landmark-side assumptions are made.
+    The geometry groups contain the real-axis chord, the bounding box,
+    area and perimeter, and orientation-invariant landmark measures
+    from Radulescu et al. (2025). No landmark-side assumptions are made.
     """
     import cv2  # ty: ignore[import-not-found]
 
@@ -538,7 +538,6 @@ def make_geometry_features(
 
     inside = binary == 0
     ys, xs = np.nonzero(inside)
-    x_min = xmin + np.min(xs) * dx
     x_max = xmin + np.max(xs) * dx
     y_min = ymax - np.max(ys) * dy
     y_max = ymax - np.min(ys) * dy
@@ -553,27 +552,9 @@ def make_geometry_features(
     x_min_y0 = xmin + np.min(cols) * dx
     x_max_y0 = xmin + np.max(cols) * dx
 
-    # imaginary-axis chord: intersection of the set with x = 0
-    j0 = int(np.clip(np.rint((0.0 - xmin) / dx), 0, width - 1))
-    rows = np.flatnonzero(inside[:, j0])
-    if rows.size == 0:
-        cols = np.flatnonzero(inside.any(axis=0))
-        j0 = int(cols[np.argmin(np.abs(cols - j0))])
-        rows = np.flatnonzero(inside[:, j0])
-    y_max_x0 = ymax - np.min(rows) * dy
-
-    bbox_width = x_max - x_min
-    bbox_height = y_max - y_min
     diameter_x = x_max_y0 - x_min_y0
-    diameter_y = bbox_height
+    diameter_y = y_max - y_min
     epsilon = diameter_y / max(diameter_x, 1.0e-12)
-
-    fill_ratio = area / max(bbox_width * bbox_height, 1.0e-12)
-    circularity = 4.0 * np.pi * area / max(perimeter**2, 1.0e-12)
-
-    radius = np.hypot(px, py)
-    max_radius = radius.max()
-    mean_radius = radius.mean()
 
     x_at_y_max = px[int(np.argmax(py))]
     y_at_x_max = abs(py[int(np.argmax(px))])
@@ -581,8 +562,6 @@ def make_geometry_features(
     geometry = np.array([
         x_min_y0,
         x_max_y0,
-        y_max_x0,
-        x_min,
         x_max,
         y_max,
         area,
@@ -590,10 +569,6 @@ def make_geometry_features(
         diameter_x,
         diameter_y,
         epsilon,
-        fill_ratio,
-        circularity,
-        max_radius,
-        mean_radius,
         x_at_y_max,
         y_at_x_max,
     ])
@@ -646,8 +621,6 @@ def make_geometry_features(
             "Descriptor Imag",
             "x_min_y0",
             "x_max_y0",
-            "y_max_x0",
-            "x_min",
             "x_max",
             "y_max",
             "area",
@@ -655,10 +628,6 @@ def make_geometry_features(
             "d_TC",
             "d_RR",
             "epsilon",
-            "fill_ratio",
-            "circularity",
-            "max_radius",
-            "mean_radius",
             "x_at_y_max",
             "y_at_x_max",
         ),
