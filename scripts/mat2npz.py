@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Any
+from typing import Any, Literal, get_args
 
 import numpy as np
 import numpy.linalg as la
@@ -39,6 +39,8 @@ NORMALIZE_TO_ORD = {
     "max": "max",
 }
 
+ScanType = Literal["fmri", "mri"]
+
 
 def mat_normalize(
     mat: Array,
@@ -58,8 +60,9 @@ def mat_normalize(
 
 def convert_matlab(
     filename: pathlib.Path,
-    outfile: pathlib.Path | None = None,
     *,
+    scan_type: ScanType,
+    outfile: pathlib.Path | None = None,
     bbox: tuple[float, float, float, float] | None = None,
     mat_variable_names: list[str] | None = None,
     clip: tuple[float, float] | None = None,
@@ -90,6 +93,14 @@ def convert_matlab(
 
     if normalize is not None and normalize not in NORMALIZE_TO_ORD:
         log.error("Unknown normalize value '%s'.", normalize)
+        return 1
+
+    if scan_type not in get_args(ScanType):
+        log.error(
+            "Unknown scan type '%s' (expected one of %s).",
+            scan_type,
+            get_args(ScanType),
+        )
         return 1
 
     if bbox is None:
@@ -179,7 +190,13 @@ def convert_matlab(
 
         result[name] = new_mat
 
-    np.savez(outfile, allow_pickle=True, images_bbox=bbox, **result)
+    np.savez(
+        outfile,
+        allow_pickle=True,
+        images_bbox=bbox,
+        scan_type=np.array(scan_type),
+        **result,
+    )
     log.info("Saved matries to file: '%s'.", outfile)
 
     return int(bool(ret))
@@ -219,6 +236,12 @@ if __name__ == "__main__":
         "--variable-name",
         action="append",
         help="Name of the variable in the file: 'name[:new_name]'",
+    )
+    parser.add_argument(
+        "--scan-type",
+        choices=get_args(ScanType),
+        required=True,
+        help="Scan type of the data",
     )
     parser.add_argument(
         "--bbox",
@@ -267,6 +290,7 @@ if __name__ == "__main__":
     raise SystemExit(
         convert_matlab(
             args.filename,
+            scan_type=args.scan_type,
             mat_variable_names=args.variable_name,
             outfile=args.outfile,
             bbox=args.bbox,
