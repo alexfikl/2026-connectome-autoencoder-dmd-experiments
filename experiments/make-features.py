@@ -126,11 +126,6 @@ def _make_local_graph_features(
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Strength")
 
-    # Strength: average excess weighted degree
-    features.append(communities.mean(okm.compute_average_excess_strength(mat)))
-    starts.append(starts[-1] + np.size(features[-1]))
-    descrs.append("Excess Strength")
-
     # Disparity
     features.append(communities.mean(okm.compute_disparity_serrano(mat)))
     starts.append(starts[-1] + np.size(features[-1]))
