@@ -463,7 +463,6 @@ def make_dmd_features(
     escape_radius: float = 100.0,
     resolution: int = 64,
     maxit: int = 128,
-    stride: int = 2,
     full_matrix: bool = False,
 ) -> FeatureDataset:
     # NOTE: the DMD run is pretty slow, so we try to do it on the GPU
@@ -512,11 +511,6 @@ def make_dmd_features(
     Z_perm = xp.permute_dims(xp.reshape(Z, (maxit, -1, n)), (1, 0, 2))
     c_flat = xp.reshape(c, (-1,))
 
-    # cull down the solutions, since a lot of them converge to the same value
-    if stride > 1:
-        Z_perm = Z_perm[::stride]
-        c_flat = c_flat[::stride]
-
     num_samples = Z_perm.shape[0]
 
     # }}}
@@ -534,12 +528,18 @@ def make_dmd_features(
         tmask.transition
     ]
 
+    # NOTE: X1, X2 and U are copies, so the trajectories can be released early
+    del Z, Z_perm, tmask, c_flat, c, cmat
+
     # }}}
 
     # {{{ features
 
     dmd = build_dense_dmdc(X1, U, X2, method="ridge")
+    del U, X2
+
     G = xp.conj(X1).T @ X1
+    del X1
 
     G = np.asarray(array_api_compat.to_device(G, "cpu"))
     A = np.asarray(array_api_compat.to_device(dmd.A, "cpu"))
