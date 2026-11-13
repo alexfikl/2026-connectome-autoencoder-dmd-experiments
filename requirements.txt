@@ -20,7 +20,7 @@ joblib==1.6.0
     # via scikit-learn
 kiwisolver==1.5.1
     # via matplotlib
-markdown-it-py==4.2.0
+markdown-it-py==4.3.0
     # via rich
 matplotlib==3.11.2
     # via
@@ -34,7 +34,7 @@ networkx==3.6.1 ; python_full_version < '3.12'
     # via fractal-dmd-autoencoder (pyproject.toml)
 networkx==3.7 ; python_full_version >= '3.12'
     # via fractal-dmd-autoencoder (pyproject.toml)
-nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@4eba92108c8d700520d6af44d86a8ee1882bb0a0#egg=nneuroutil
+nneuroutil @ git+https://github.com/alexfikl/nneuroutil.git@34c5ce948b93024b553f5780cba50c234b88d938#egg=nneuroutil
     # via fractal-dmd-autoencoder (pyproject.toml)
 numpy==2.4.6 ; python_full_version < '3.12'
     # via
@@ -54,7 +54,7 @@ numpy==2.5.4 ; python_full_version >= '3.12'
     #   orbitkit
     #   scikit-learn
     #   scipy
-orbitkit @ git+https://github.com/alexfikl/orbitkit.git@0395c18f661b8fd984a2db778d3c9bdfacc46f79#egg=orbitkit
+orbitkit @ git+https://github.com/alexfikl/orbitkit.git@7d1b5faec06f38ffc16b0d20dbba4e1015396db3#egg=orbitkit
     # via fractal-dmd-autoencoder (pyproject.toml)
 packaging==26.3
     # via matplotlib
