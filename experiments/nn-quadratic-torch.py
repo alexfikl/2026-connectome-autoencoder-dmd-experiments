@@ -171,7 +171,7 @@ def _plot_weights(
     #   2. we do expect them to have similar singular values (i.e. the nn captured
     #      the general dynamics of the problem)
 
-    learned_A = model.model[0].weight.detach()  # ty: ignore[call-non-callable]
+    learned_A = model.model[0].weight.detach()  # ty: ignore[not-callable]
     A = mat
 
     with figure(
