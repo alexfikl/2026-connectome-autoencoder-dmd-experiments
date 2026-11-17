@@ -167,8 +167,8 @@ train_autoencoder_dmd filename *ARGS:
         {{ PYTHON }} experiments/nn-autoencoder-dmd.py \
             --device cuda --force -o $out.npz \
             --seed 0 \
-            --resolution 64 --epochs 60 --batch-size 1024 \
-            --maxit 32 \
+            --resolution 64 --maxit 32 \
+            --epochs 100 --batch-size 1024 \
             {{ ARGS }} \
             train --dataidx $idx {{ filename }} || exit 1; \
         {{ PYTHON }} experiments/nn-autoencoder-dmd.py \
