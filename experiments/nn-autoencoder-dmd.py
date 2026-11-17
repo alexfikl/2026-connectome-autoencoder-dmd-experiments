@@ -276,7 +276,7 @@ def _predict_metrics(
         maxit=config.maxit,
     )
 
-    in_set = norm < config.escape_radius
+    in_set = norm < 0.1 * config.escape_radius
     iou, dice = _mask_scores(in_set, zmask, eval_mask=eval_mask)
     metrics = dmdaelib.ErrorMetrics(
         iou=iou.detach().cpu(),
@@ -312,15 +312,56 @@ def _plot_predict(
         filename.with_stem(f"{filename.stem}-predict-{tag}"),
         overwrite=overwrite,
     ) as fig:
-        ax = fig.gca()
-        ax.imshow(in_set.numpy(), extent=config.bbox, cmap="binary")
+        from matplotlib.collections import LineCollection
+        from matplotlib.colors import ListedColormap
 
-        # NOTE: overlay the true converged set as a red outline
+        ax = fig.gca()
+
         xmin, xmax, ymin, ymax = config.bbox
-        zmask = zmask.cpu().numpy()
-        xs = np.linspace(xmin, xmax, zmask.shape[1])
-        ys = np.linspace(ymin, ymax, zmask.shape[0])
-        ax.contour(xs, ys, np.flipud(zmask), levels=[0.5], colors="red", linewidths=1.0)
+        zmask_np = zmask.cpu().numpy().astype(bool)
+        in_set_np = in_set.numpy().astype(bool)
+        ny, nx = zmask_np.shape
+        dx = (xmax - xmin) / (nx - 1) if nx > 1 else 0.0
+        dy = (ymax - ymin) / (ny - 1) if ny > 1 else 0.0
+        x_edges = np.linspace(xmin - 0.5 * dx, xmax + 0.5 * dx, nx + 1)
+        y_edges = np.linspace(ymin - 0.5 * dy, ymax + 0.5 * dy, ny + 1)
+
+        # NOTE: distinguish the true positives from the false positives, i.e. the
+        # predicted set outside of the true converged set, so that the latter
+        # stand out from the correctly captured interior
+        state = np.where(in_set_np, np.where(zmask_np, 2, 1), 0)
+        ax.imshow(
+            state,
+            origin="lower",
+            extent=(x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]),
+            cmap=ListedColormap(["white", "0.35", "black"]),
+            vmin=-0.5,
+            vmax=2.5,
+            interpolation="nearest",
+        )
+        ax.grid(visible=False, which="both")
+
+        # NOTE: overlay the exact discrete cell boundary of the true converged set
+        padded = np.pad(zmask_np, 1, constant_values=False)
+        hi, hj = np.nonzero(padded[1:, 1:-1] ^ padded[:-1, 1:-1])
+        vi, vj = np.nonzero(padded[1:-1, 1:] ^ padded[1:-1, :-1])
+
+        h_segs = np.stack(
+            [
+                np.column_stack([x_edges[hj], y_edges[hi]]),
+                np.column_stack([x_edges[hj + 1], y_edges[hi]]),
+            ],
+            axis=1,
+        )
+        v_segs = np.stack(
+            [
+                np.column_stack([x_edges[vj], y_edges[vi]]),
+                np.column_stack([x_edges[vj], y_edges[vi + 1]]),
+            ],
+            axis=1,
+        )
+        segments = np.concatenate([h_segs, v_segs], axis=0)
+        ax.add_collection(LineCollection(segments, colors="red", linewidths=2.0))  # ty: ignore[invalid-argument-type]
 
     return metrics
 
