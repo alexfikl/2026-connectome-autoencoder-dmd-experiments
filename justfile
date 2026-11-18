@@ -140,7 +140,7 @@ make_features name *FILES:
 
 [doc("Construct DMD autoencoder features from trained models")]
 make_ae_features dirname:
-    {{ PYTHON }} experiments/nn-autoencoder-dmd.py --force \
+    {{ PYTHON }} experiments/nn-autoencoder-dmd-features.py --force \
         --outfile data/dataset-features-ae-dmd.npz \
         merge {{ dirname }}/*
 
@@ -171,10 +171,10 @@ train_autoencoder_dmd filename *ARGS:
             --epochs 100 --batch-size 1024 \
             {{ ARGS }} \
             train --dataidx $idx {{ filename }} || exit 1; \
-        {{ PYTHON }} experiments/nn-autoencoder-dmd.py \
-            --device cuda --force --features \
-            infer $out.pkl || exit 1; \
-    done
+    done; \
+    {{ PYTHON }} experiments/nn-autoencoder-dmd-features.py \
+        --device cuda --force \
+        compute data/ae-dmd/$stem/*.pkl
 
 [doc("Train a DMD autoencoder and compute its features for each of the 48 matrices")]
 train:
@@ -191,12 +191,12 @@ train:
 
 [doc("Run or resume ablation studies for a connectome matrix (default: dataidx 0)")]
 ablation filename dataidx="0" *ARGS:
-    {{ PYTHON }} experiments/nn-autoencoder-dmd.py \
+    {{ PYTHON }} experiments/nn-autoencoder-dmd-sweep.py \
         --device cuda \
         --resolution 64 --maxit 32 --epochs 60 --batch-size 1024 --seed 0 \
         --study all \
         {{ ARGS }} \
-        sweep {{ filename }} --dataidx {{ dataidx }}
+        --dataidx {{ dataidx }} {{ filename }}
 
 # }}}
 
