@@ -366,6 +366,125 @@ def _plot_train_metrics(
         ax_validate.legend()
 
 
+def _plot_band(
+    ax: Any,
+    steps: np.ndarray,
+    values: np.ndarray,
+    active: np.ndarray,
+    *,
+    label: str,
+) -> None:
+    q25 = np.full(steps.size, np.nan)
+    q50 = np.full(steps.size, np.nan)
+    q75 = np.full(steps.size, np.nan)
+
+    for j in range(steps.size):
+        vals = values[:, j][active[:, j]]
+        vals = vals[np.isfinite(vals)]
+        if vals.size > 0:
+            q25[j], q50[j], q75[j] = np.percentile(vals, [25.0, 50.0, 75.0])
+
+    (line,) = ax.semilogy(steps, q50, label=label)
+    ax.fill_between(steps, q25, q75, color=line.get_color(), alpha=0.2)
+
+
+def _plot_rollout(
+    filename: pathlib.Path,
+    model: dmdaelib.DMDAutoencoder,
+    dmdc: DenseDMDc[Any],
+    config: dmdaelib.DMDConfig,
+    *,
+    mat: torch.Tensor,
+    overwrite: bool,
+) -> None:
+    device = next(model.parameters()).device
+    mat = mat.to(device=device, dtype=torch.complex64)
+    dataset = dmdaelib.prepare_dataset(config, mat)
+
+    with torch.no_grad():
+        obs = model.observe(dataset.x_test)
+        enc = model.encode(obs.direction, obs.logn, dataset.c_test)
+        rec_dir, rec_logn = model.decode(enc)
+
+        nsteps = obs.direction.shape[1] - 1
+        g0 = dmdaelib.encode_origin(model, dataset.c_test)
+        g_roll = model.rollout(g0, dmdc, nsteps)
+        roll_dir, roll_logn = model.decode(g_roll)
+
+        true_dir = obs.direction[:, 1:]
+        true_logn = obs.logn[:, 1:]
+        true_enc = enc[:, 1:]
+        active = obs.active[:, 1:].cpu().numpy().astype(bool)
+
+        dir_err = (
+            (1.0 - torch.sum(roll_dir * true_dir, dim=-1).clamp(-1.0, 1.0))
+            .cpu()
+            .numpy()
+        )
+        logn_err = torch.abs(roll_logn - true_logn).cpu().numpy()
+
+        rec_err = (
+            torch
+            .sqrt(
+                torch.sum((rec_dir[:, 1:] - true_dir) ** 2, dim=-1)
+                + (rec_logn[:, 1:] - true_logn) ** 2
+            )
+            .cpu()
+            .numpy()
+        )
+        roll_err = (
+            torch
+            .sqrt(
+                torch.sum((roll_dir - true_dir) ** 2, dim=-1)
+                + (roll_logn - true_logn) ** 2
+            )
+            .cpu()
+            .numpy()
+        )
+        lat_err = (
+            (
+                torch.linalg.vector_norm(g_roll - true_enc, dim=-1)
+                / torch.linalg.vector_norm(true_enc, dim=-1).clamp(min=1.0e-8)
+            )
+            .cpu()
+            .numpy()
+        )
+
+    steps = np.arange(1, nsteps + 1)
+    with figure(
+        filename.with_stem(f"{filename.stem}-rollout-obs"),
+        overwrite=overwrite,
+    ) as fig:
+        ax_obs = fig.gca()
+
+        _plot_band(
+            ax_obs,
+            steps,
+            dir_err,
+            active,
+            label=r"$1 - \langle \hat{u}_n, u_n \rangle$",
+        )
+        _plot_band(ax_obs, steps, logn_err, active, label=r"$|\hat{\ell}_n - \ell_n|$")
+        ax_obs.set_xlabel("Step $n$")
+        ax_obs.set_ylabel("Observable error")
+        ax_obs.set_ylim((1.0e-4, 1))
+        ax_obs.legend()
+
+    with figure(
+        filename.with_stem(f"{filename.stem}-rollout-lin"),
+        overwrite=overwrite,
+    ) as fig:
+        ax_lat = fig.gca()
+
+        _plot_band(ax_lat, steps, rec_err, active, label="Autoencoding")
+        _plot_band(ax_lat, steps, roll_err, active, label="Rollout")
+        _plot_band(ax_lat, steps, lat_err, active, label="Latent linearity")
+        ax_lat.set_xlabel("Step $n$")
+        ax_lat.set_ylabel("Error")
+        ax_lat.set_ylim((1.0e-4, 1))
+        ax_lat.legend()
+
+
 # }}}
 
 
@@ -695,13 +814,22 @@ def infer(
         overwrite=overwrite,
     )
 
-    _plot_multiresolution(
+    # _plot_multiresolution(
+    #     outfile,
+    #     model,
+    #     dmdc,
+    #     config,
+    #     mat=checkpoint["mat"],
+    #     resolutions=(64, 128, 256, 512),
+    #     overwrite=overwrite,
+    # )
+
+    _plot_rollout(
         outfile,
         model,
         dmdc,
         config,
         mat=checkpoint["mat"],
-        resolutions=(64, 128, 256, 512),
         overwrite=overwrite,
     )
 
