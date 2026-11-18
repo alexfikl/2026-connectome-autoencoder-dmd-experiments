@@ -257,7 +257,7 @@ def _plot_multiresolution(
         ) as fig:
             ax = fig.gca()
             _draw_prediction_overlay(ax, in_set, zmask, config.bbox)
-            ax.set_title(f"${resolution}\\times{resolution}$ (IoU={float(iou):.3f})")
+            ax.set_title(f"IoU={float(iou):.3f})")
 
 
 def _plot_predict(
@@ -304,36 +304,42 @@ def _plot_error_metrics(
     config: dmdaelib.DMDConfig | None = None,
     overwrite: bool,
 ) -> None:
+    epochs = np.arange(metrics.iou.numel())
+
     with figure(
-        filename.with_stem(f"{filename.stem}-error"),
-        ncols=2,
+        filename.with_stem(f"{filename.stem}-iou-dice"),
         overwrite=overwrite,
     ) as fig:
-        ax_set, ax_spec = fig.axes
-        epochs = np.arange(metrics.iou.numel())
+        ax = fig.gca()
 
-        ax_set.plot(epochs, metrics.iou.cpu().numpy(), label="IoU")
-        ax_set.plot(epochs, metrics.dice.cpu().numpy(), label="Dice")
+        ax.plot(epochs, metrics.iou.cpu().numpy(), label="IoU")
+        ax.plot(epochs, metrics.dice.cpu().numpy(), label="Dice")
         if config is not None:
-            _add_stage_lines(ax_set, config)
-        ax_set.set_xlabel("Epoch")
-        ax_set.set_ylabel("Score")
-        ax_set.set_ylim(0.0, 1.0)
-        ax_set.legend()
+            _add_stage_lines(ax, config)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Score")
+        ax.set_ylim(0.0, 1.0)
+        ax.legend()
 
-        ax_spec.plot(
+    with figure(
+        filename.with_stem(f"{filename.stem}-lambda"),
+        overwrite=overwrite,
+    ) as fig:
+        ax = fig.gca()
+
+        ax.plot(
             epochs,
             metrics.a_radius.cpu().numpy(),
             label=r"$|\lambda|_{\max}(A)$",
         )
         if config is not None:
-            _add_stage_lines(ax_spec, config)
-        ax_spec.set_xlabel("Epoch")
-        ax_spec.set_ylabel("Magnitude")
-        ax_spec.legend()
+            _add_stage_lines(ax, config)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Magnitude")
+        ax.legend()
 
         if final is not None:
-            ax_spec.axhline(float(final.a_radius), color="C0", ls=":", lw=1.0)
+            ax.axhline(float(final.a_radius), color="C0", ls=":", lw=1.0)
 
 
 def _plot_train_metrics(
@@ -814,15 +820,15 @@ def infer(
         overwrite=overwrite,
     )
 
-    # _plot_multiresolution(
-    #     outfile,
-    #     model,
-    #     dmdc,
-    #     config,
-    #     mat=checkpoint["mat"],
-    #     resolutions=(64, 128, 256, 512),
-    #     overwrite=overwrite,
-    # )
+    _plot_multiresolution(
+        outfile,
+        model,
+        dmdc,
+        config,
+        mat=checkpoint["mat"],
+        resolutions=(64, 128, 256, 512),
+        overwrite=overwrite,
+    )
 
     _plot_rollout(
         outfile,
