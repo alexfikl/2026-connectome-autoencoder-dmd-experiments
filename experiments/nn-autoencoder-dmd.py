@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 import numpy as np
@@ -58,10 +58,20 @@ def _plot_dataset(
         ax.imshow(zmask.cpu().numpy(), extent=bbox, cmap="binary")
 
 
+def _add_stage_lines(ax: Any, config: dmdaelib.DMDConfig) -> None:
+    stages = dmdaelib.make_stages(config)
+    epochs_per_stage = config.epochs
+
+    for idx in range(0, len(stages)):
+        ax.axvline(idx * epochs_per_stage, color="k")
+
+
 def _plot_loss(
     filename: pathlib.Path,
     losses: torch.Tensor,
     *,
+    loss_test: torch.Tensor | None = None,
+    config: dmdaelib.DMDConfig | None = None,
     overwrite: bool,
 ) -> None:
     with figure(
@@ -70,21 +80,26 @@ def _plot_loss(
         ax = fig.gca()
 
         losses_np = losses.cpu().numpy()
-        labels = ("Rec", "Lin", "Pre")
+        labels = ("Reconstruction", "Linearity", "Prediction")
         labels = labels[: losses_np.shape[2] - 1]
 
         for k, label in enumerate(labels):
-            (line,) = ax.semilogy(losses_np[:, 0, 1 + k], label=f"Train. {label}")
+            (line,) = ax.semilogy(losses_np[:, 0, 1 + k], label=label)
             ax.semilogy(
                 losses_np[:, 1, 1 + k],
-                label=f"Valid. {label}",
                 color=line.get_color(),
                 ls="--",
             )
 
+        if loss_test is not None:
+            ax.axhline(float(loss_test[0]), color="black", ls="--", label="Test")
+
+        if config is not None:
+            _add_stage_lines(ax, config)
+
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
-        ax.legend(ncols=2)
+        ax.legend()
 
 
 def _mask_scores(
@@ -132,6 +147,119 @@ def _predict_metrics(
     return metrics, in_set.detach().cpu()
 
 
+def _draw_prediction_overlay(
+    ax: Any,
+    in_set: torch.Tensor,
+    zmask: torch.Tensor,
+    bbox: tuple[float, float, float, float],
+) -> None:
+    from matplotlib.collections import LineCollection
+    from matplotlib.colors import ListedColormap
+
+    xmin, xmax, ymin, ymax = bbox
+    zmask_np = zmask.cpu().numpy().astype(bool)
+    in_set_np = in_set.cpu().numpy().astype(bool)
+    ny, nx = zmask_np.shape
+    dx = (xmax - xmin) / (nx - 1) if nx > 1 else 0.0
+    dy = (ymax - ymin) / (ny - 1) if ny > 1 else 0.0
+    x_edges = np.linspace(xmin - 0.5 * dx, xmax + 0.5 * dx, nx + 1)
+    y_edges = np.linspace(ymin - 0.5 * dy, ymax + 0.5 * dy, ny + 1)
+
+    # NOTE: distinguish the true positives from the false positives, i.e. the
+    # predicted set outside of the true converged set, so that the latter
+    # stand out from the correctly captured interior
+    state = np.where(in_set_np, np.where(zmask_np, 2, 1), 0)
+    ax.imshow(
+        state,
+        origin="lower",
+        extent=(x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]),
+        cmap=ListedColormap(["white", "0.35", "black"]),
+        vmin=-0.5,
+        vmax=2.5,
+        interpolation="nearest",
+    )
+    ax.grid(visible=False, which="both")
+
+    # NOTE: overlay the exact discrete cell boundary of the true converged set
+    padded = np.pad(zmask_np, 1, constant_values=False)
+    hi, hj = np.nonzero(padded[1:, 1:-1] ^ padded[:-1, 1:-1])
+    vi, vj = np.nonzero(padded[1:-1, 1:] ^ padded[1:-1, :-1])
+
+    h_segs = np.stack(
+        [
+            np.column_stack([x_edges[hj], y_edges[hi]]),
+            np.column_stack([x_edges[hj + 1], y_edges[hi]]),
+        ],
+        axis=1,
+    )
+    v_segs = np.stack(
+        [
+            np.column_stack([x_edges[vj], y_edges[vi]]),
+            np.column_stack([x_edges[vj], y_edges[vi + 1]]),
+        ],
+        axis=1,
+    )
+    segments = np.concatenate([h_segs, v_segs], axis=0)
+    ax.add_collection(LineCollection(segments, colors="red", linewidths=2.0))  # ty: ignore[invalid-argument-type]
+
+
+def _plot_multiresolution(
+    filename: pathlib.Path,
+    model: dmdaelib.DMDAutoencoder,
+    dmdc: DenseDMDc[Any],
+    config: dmdaelib.DMDConfig,
+    *,
+    mat: torch.Tensor,
+    resolutions: Sequence[int],
+    overwrite: bool,
+) -> None:
+    from commonlib import generate_timeseries
+
+    mat = mat.to(device=next(model.parameters()).device, dtype=torch.complex64)
+    escape_radius_sqr = config.escape_radius**2
+
+    for resolution in resolutions:
+        z, _ = cast(
+            tuple[torch.Tensor, torch.Tensor],
+            generate_timeseries(
+                mat,
+                bbox=config.bbox,
+                escape_radius=config.escape_radius,
+                resolution=resolution,
+                maxit=config.maxit + 1,
+                keepdims=False,
+            ),
+        )
+
+        zmask = (z.real**2 + z.imag**2).sum(dim=-1) < escape_radius_sqr
+        norm = dmdaelib.torch_predict(
+            model,
+            dmdc,
+            bbox=config.bbox,
+            resolution=resolution,
+            maxit=config.maxit,
+        )
+        in_set = norm < 0.1 * config.escape_radius
+        iou, dice = _mask_scores(in_set, zmask)
+        log.info(
+            "    Resolution %4dx%-4d: IoU=%.6f, Dice=%.6f",
+            resolution,
+            resolution,
+            float(iou),
+            float(dice),
+        )
+
+        with figure(
+            filename.with_stem(
+                f"{filename.stem}-predict-r{config.resolution:03}-r{resolution:03d}"
+            ),
+            overwrite=overwrite,
+        ) as fig:
+            ax = fig.gca()
+            _draw_prediction_overlay(ax, in_set, zmask, config.bbox)
+            ax.set_title(f"${resolution}\\times{resolution}$ (IoU={float(iou):.3f})")
+
+
 def _plot_predict(
     filename: pathlib.Path,
     model: dmdaelib.DMDAutoencoder,
@@ -157,56 +285,7 @@ def _plot_predict(
         filename.with_stem(f"{filename.stem}-predict-{tag}"),
         overwrite=overwrite,
     ) as fig:
-        from matplotlib.collections import LineCollection
-        from matplotlib.colors import ListedColormap
-
-        ax = fig.gca()
-
-        xmin, xmax, ymin, ymax = config.bbox
-        zmask_np = zmask.cpu().numpy().astype(bool)
-        in_set_np = in_set.numpy().astype(bool)
-        ny, nx = zmask_np.shape
-        dx = (xmax - xmin) / (nx - 1) if nx > 1 else 0.0
-        dy = (ymax - ymin) / (ny - 1) if ny > 1 else 0.0
-        x_edges = np.linspace(xmin - 0.5 * dx, xmax + 0.5 * dx, nx + 1)
-        y_edges = np.linspace(ymin - 0.5 * dy, ymax + 0.5 * dy, ny + 1)
-
-        # NOTE: distinguish the true positives from the false positives, i.e. the
-        # predicted set outside of the true converged set, so that the latter
-        # stand out from the correctly captured interior
-        state = np.where(in_set_np, np.where(zmask_np, 2, 1), 0)
-        ax.imshow(
-            state,
-            origin="lower",
-            extent=(x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]),
-            cmap=ListedColormap(["white", "0.35", "black"]),
-            vmin=-0.5,
-            vmax=2.5,
-            interpolation="nearest",
-        )
-        ax.grid(visible=False, which="both")
-
-        # NOTE: overlay the exact discrete cell boundary of the true converged set
-        padded = np.pad(zmask_np, 1, constant_values=False)
-        hi, hj = np.nonzero(padded[1:, 1:-1] ^ padded[:-1, 1:-1])
-        vi, vj = np.nonzero(padded[1:-1, 1:] ^ padded[1:-1, :-1])
-
-        h_segs = np.stack(
-            [
-                np.column_stack([x_edges[hj], y_edges[hi]]),
-                np.column_stack([x_edges[hj + 1], y_edges[hi]]),
-            ],
-            axis=1,
-        )
-        v_segs = np.stack(
-            [
-                np.column_stack([x_edges[vj], y_edges[vi]]),
-                np.column_stack([x_edges[vj], y_edges[vi + 1]]),
-            ],
-            axis=1,
-        )
-        segments = np.concatenate([h_segs, v_segs], axis=0)
-        ax.add_collection(LineCollection(segments, colors="red", linewidths=2.0))  # ty: ignore[invalid-argument-type]
+        _draw_prediction_overlay(fig.gca(), in_set, zmask, config.bbox)
 
     return metrics
 
@@ -222,6 +301,7 @@ def _plot_error_metrics(
     metrics: dmdaelib.ErrorMetrics,
     *,
     final: dmdaelib.ErrorMetrics | None = None,
+    config: dmdaelib.DMDConfig | None = None,
     overwrite: bool,
 ) -> None:
     with figure(
@@ -234,20 +314,20 @@ def _plot_error_metrics(
 
         ax_set.plot(epochs, metrics.iou.cpu().numpy(), label="IoU")
         ax_set.plot(epochs, metrics.dice.cpu().numpy(), label="Dice")
+        if config is not None:
+            _add_stage_lines(ax_set, config)
         ax_set.set_xlabel("Epoch")
         ax_set.set_ylabel("Score")
         ax_set.set_ylim(0.0, 1.0)
         ax_set.legend()
-
-        if final is not None:
-            ax_set.axhline(float(final.iou), color="C0", ls=":", lw=1.0)
-            ax_set.axhline(float(final.dice), color="C1", ls=":", lw=1.0)
 
         ax_spec.plot(
             epochs,
             metrics.a_radius.cpu().numpy(),
             label=r"$|\lambda|_{\max}(A)$",
         )
+        if config is not None:
+            _add_stage_lines(ax_spec, config)
         ax_spec.set_xlabel("Epoch")
         ax_spec.set_ylabel("Magnitude")
         ax_spec.legend()
@@ -503,12 +583,19 @@ def train(
     # {{{ plot
 
     _plot_dataset(outfile, dataset.zmask, bbox=config.bbox, overwrite=overwrite)
-    _plot_loss(outfile, losses, overwrite=overwrite)
+    _plot_loss(
+        outfile,
+        losses,
+        loss_test=loss_test,
+        config=config,
+        overwrite=overwrite,
+    )
     _plot_train_metrics(outfile, train_metrics, overwrite=overwrite)
     _plot_error_metrics(
         outfile,
         error_metrics,
         final=final_error_metrics,
+        config=config,
         overwrite=overwrite,
     )
 
@@ -590,7 +677,13 @@ def infer(
     # {{{ plot
 
     _plot_dataset(outfile, zmask, bbox=config.bbox, overwrite=overwrite)
-    _plot_loss(outfile, losses, overwrite=overwrite)
+    _plot_loss(
+        outfile,
+        losses,
+        loss_test=checkpoint.get("loss_test"),
+        config=config,
+        overwrite=overwrite,
+    )
 
     final_metrics = _plot_predict(
         outfile,
@@ -599,6 +692,16 @@ def infer(
         config,
         zmask=zmask,
         tag="final",
+        overwrite=overwrite,
+    )
+
+    _plot_multiresolution(
+        outfile,
+        model,
+        dmdc,
+        config,
+        mat=checkpoint["mat"],
+        resolutions=(64, 128, 256, 512),
         overwrite=overwrite,
     )
 
@@ -612,6 +715,7 @@ def infer(
             outfile,
             dmdaelib.ErrorMetrics(**error_metrics),
             final=final_metrics,
+            config=config,
             overwrite=overwrite,
         )
 
@@ -714,7 +818,6 @@ if __name__ == "__main__":
         default=None,
         help="Weight of the prediction loss (default: 1)",
     )
-
     args = parser.parse_args()
 
     if not args.quiet:
