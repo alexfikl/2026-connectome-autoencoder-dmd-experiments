@@ -109,6 +109,7 @@ lint.flake8-quotes.multiline-quotes = "double"
 lint.isort.force-wrap-aliases = true
 lint.isort.known-first-party = [
     "commonlib",
+    "dmdaelib",
     "nneuroutil",
     "orbitkit",
     "torchlib",

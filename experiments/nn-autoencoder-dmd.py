@@ -11,10 +11,10 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-import dmdaelib
 import numpy as np
 import torch
 
+import dmdaelib
 from commonlib import make_argument_parser
 from nneuroutil.dmdc import DenseDMDc
 from nneuroutil.helpers import machine_info

@@ -10,6 +10,8 @@ from typing import Literal, cast
 import numpy as np
 import torch
 
+from dmdaelib import LOG_EPS, LOG_SCALE
+from nneuroutil.dmdc import build_dense_dmdc, build_dense_extended_dmdc
 from nneuroutil.helpers import FuzzyChoiceAction, tictoc
 from nneuroutil.interop.torch import (
     TorchMemoryTracker,
@@ -39,13 +41,39 @@ def complexify(R: torch.Tensor) -> torch.Tensor:
     return (p + 1j * q).T
 
 
+def to_polar(
+    x: torch.Tensor, *, log_eps: float = LOG_EPS, log_scale: float = LOG_SCALE
+) -> torch.Tensor:
+    xnorm = torch.linalg.vector_norm(x, dim=-1, keepdim=True)
+    direction = torch.where(
+        xnorm > 1.0e-8, x / xnorm.clamp(min=1.0e-8), torch.zeros_like(x)
+    )
+    logn = torch.log(xnorm + log_eps) / log_scale
+    return torch.cat([direction, logn], dim=-1)
+
+
+def from_polar(
+    p: torch.Tensor, *, log_eps: float = LOG_EPS, log_scale: float = LOG_SCALE
+) -> torch.Tensor:
+    direction = p[..., :-1]
+    dir_norm = torch.linalg.vector_norm(direction, dim=-1, keepdim=True)
+    direction = torch.where(
+        dir_norm > 1.0e-8,
+        direction / dir_norm.clamp(min=1.0e-8),
+        torch.zeros_like(direction),
+    )
+    logn = p[..., -1:]
+    radius = (torch.exp(log_scale * logn) - log_eps).clamp(min=0.0)
+    return radius * direction
+
+
 def main(
     filename: pathlib.Path,
     *,
     outfile: pathlib.Path | None = None,
     datakey: str = "matrices",
     dataidx: int = 5,
-    method: Literal["dmd", "edmd"] = "dmd",
+    method: Literal["dmd", "edmd", "polar"] = "dmd",
     bbox: tuple[float, float, float, float] = (-0.04, 0.04, -0.04, 0.04),
     escape_radius: float | None = 100.0,
     resolution: int = 64,
@@ -162,6 +190,8 @@ def main(
         X1 = X_real[:, :-1, :].reshape(-1, 2 * d)
         X2 = X_real[:, 1:, :].reshape(-1, 2 * d)
         U = c_real.unsqueeze(1).expand(-1, maxit - 1, 2).reshape(-1, 2)
+        if method == "polar":
+            U = torch.cat([U, torch.ones_like(U[:, :1])], dim=-1)
         del Z, X_real
 
         log.info(
@@ -178,8 +208,6 @@ def main(
     # }}}
 
     # {{{ train
-
-    from nneuroutil.dmdc import build_dense_dmdc, build_dense_extended_dmdc
 
     with tictoc("Constructed DMD model"):
         if method == "dmd":
@@ -201,12 +229,17 @@ def main(
                 X2,
                 method="ridge",
             )
+        elif method == "polar":
+            dmd = build_dense_dmdc(to_polar(X1), U, to_polar(X2), method="ridge")
         else:
             raise ValueError(f"unknown method: {method!r}")
 
     mem.add_record("Constructed DMD model")
     A_ref = mat.cpu()
-    A_dmd = complexify(dmd.A).cpu()  # ty: ignore[invalid-argument-type]
+    if method == "polar":
+        A_dmd = cast("torch.Tensor", dmd.A).cpu()
+    else:
+        A_dmd = complexify(cast("torch.Tensor", dmd.A)).cpu()
 
     with figure(basename.with_stem(f"{basename.stem}-sigma")) as fig:
         ax = fig.gca()
@@ -262,13 +295,20 @@ def main(
         )
         Zpredict[0] = Z_init
         c_grid_real = torch.stack([c.real, c.imag], dim=-1)
+        if method == "polar":
+            c_grid_real = torch.cat(
+                [c_grid_real, torch.ones_like(c_grid_real[..., :1])], dim=-1
+            )
         Xinit = view_as_real(Z_init)
-        Xpredict = dmd.encode(Xinit)
+        Xpredict = to_polar(Xinit) if method == "polar" else dmd.encode(Xinit)  # ty: ignore[invalid-argument-type]
         del Z_init
 
         for i in range(1, maxit):
             Xpredict = dmd.evolve(Xpredict, c_grid_real)
-            Xdecoded = cast("torch.Tensor", dmd.decode(Xpredict))
+            Xdecoded = cast(
+                "torch.Tensor",
+                from_polar(Xpredict) if method == "polar" else dmd.decode(Xpredict),  # ty: ignore[invalid-argument-type]
+            )
             Zpredict[i] = torch.view_as_complex(
                 Xdecoded.reshape(*Xdecoded.shape[:-1], -1, 2)
             )
@@ -321,18 +361,28 @@ def main(
             slice(2 * d, 4 * d),
             slice(4 * d, 6 * d),
         )
+    elif method == "polar":
+        obs_labels = (r"$\hat{z}$", r"$\log |z|$")
+        obs_slices = (
+            slice(0, 2 * d),
+            slice(2 * d, 2 * d + 1),
+        )
     else:
         raise AssertionError
 
-    X1_lift = dmd.encode(X1)
-    X1_rec = dmd.decode(X1_lift)
+    if method == "polar":
+        X1_lift = to_polar(X1)
+        X1_rec = from_polar(X1_lift)
+    else:
+        X1_lift = dmd.encode(X1)
+        X1_rec = dmd.decode(X1_lift)
     res_rec = (torch.linalg.norm(X1 - X1_rec) / torch.linalg.norm(X1)).item()
     del X1, X1_rec
 
     X2_lift_hat = dmd.evolve(X1_lift, U)
     del X1_lift, U
 
-    X2_lift = dmd.encode(X2)
+    X2_lift = to_polar(X2) if method == "polar" else dmd.encode(X2)
 
     obs_residuals: list[float] = []
     for label, s in zip(obs_labels, obs_slices, strict=True):
@@ -347,7 +397,9 @@ def main(
     ).item()
     del X2_lift
 
-    X2_phys_hat = dmd.decode(X2_lift_hat)
+    X2_phys_hat = (
+        from_polar(X2_lift_hat) if method == "polar" else dmd.decode(X2_lift_hat)  # ty: ignore[invalid-argument-type]
+    )
     del X2_lift_hat
 
     res_phys = (torch.linalg.norm(X2 - X2_phys_hat) / torch.linalg.norm(X2)).item()
@@ -441,7 +493,7 @@ if __name__ == "__main__":
     parser.add_argument("filename", type=pathlib.Path)
     parser.add_argument(
         "--method",
-        choices=("dmd", "edmd"),
+        choices=("dmd", "edmd", "polar"),
         default="dmd",
         help="DMD variant to use for learning the dynamical system",
     )
