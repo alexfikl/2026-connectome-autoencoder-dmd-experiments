@@ -499,8 +499,12 @@ def generate_timeseries(
     escape_radius: float = 100.0,
     resolution: int = 128,
     maxit: int = 128,
+    keepdims: bool = True,
     xp: Any = None,
-) -> tuple[Array4D[np.complexfloating[Any]], Array2D[np.complexfloating[Any]]]:
+) -> tuple[
+    Array4D[np.complexfloating[Any]] | Array3D[np.complexfloating[Any]],
+    Array2D[np.complexfloating[Any]],
+]:
     r"""Generate a full dataset based on the dynamical system:
 
     .. math::
@@ -513,10 +517,13 @@ def generate_timeseries(
     values that are larger than *escape_radius* are automatically clipped
     such that :math:`\|z_n\|_2 < R`.
 
+    :param keepdims: if *True*, stack all iterations into an array of shape
+        ``(maxit, resolution, resolution, d)``. Otherwise, keep only the
+        final state of shape ``(resolution, resolution, d)``.
     :returns: a tuple ``(z, c)`` where ``z`` is a complex tensor with shape
-        ``(maxit, resolution, resolution, d)`` hat contains all the trajectories
-        and ``c`` is a complex tensor of shape ``(resolution, resolution)``
-        that contains the grid from which these trajectories were generated.
+        ``(maxit, resolution, resolution, d)`` and ``c`` is a complex tensor of
+        shape ``(resolution, resolution)`` that contains the grid from which these
+        trajectories were generated.
     """
     if escape_radius <= 0.0:
         raise ValueError(f"'escape_radius' must be positive: {escape_radius}")
@@ -551,7 +558,20 @@ def generate_timeseries(
 
     # iterate
     c_flat = xp.reshape(c, (-1, 1))
-    if array_api_compat.is_writeable_array(c):  # spell: disable
+    if not keepdims:
+        z_cur = xp.zeros((resolution * resolution, d), dtype=dtype, device=A.device)
+        for _ in range(1, maxit):
+            z_new = (z_cur @ A.T) ** 2 + c_flat  # ty: ignore[missing-attribute]
+            escaped = (
+                xp.sum(
+                    xp.real(z_new) ** 2 + xp.imag(z_new) ** 2, axis=-1, keepdims=True
+                )
+                > escape_radius_sqr
+            )
+            z_cur = xp.where(escaped, max_z, z_new)
+
+        z = xp.reshape(z_cur, (resolution, resolution, d))
+    elif array_api_compat.is_writeable_array(c):  # spell: disable
         z = xp.zeros((maxit, resolution * resolution, d), dtype=dtype, device=A.device)
         for i in range(1, maxit):
             # evolve
@@ -559,7 +579,9 @@ def generate_timeseries(
 
             # clip escaped values over escape radius
             escaped = (
-                xp.sum(z_new.real**2 + z_new.imag**2, axis=-1, keepdims=True)
+                xp.sum(
+                    xp.real(z_new) ** 2 + xp.imag(z_new) ** 2, axis=-1, keepdims=True
+                )
                 > escape_radius_sqr
             )
             z[i] = xp.where(escaped, max_z, z_new)
@@ -575,7 +597,9 @@ def generate_timeseries(
 
             # clip escaped values over escape radius
             escaped = (
-                xp.sum(z_new.real**2 + z_new.imag**2, axis=-1, keepdims=True)
+                xp.sum(
+                    xp.real(z_new) ** 2 + xp.imag(z_new) ** 2, axis=-1, keepdims=True
+                )
                 > escape_radius_sqr
             )
             z_new = xp.where(escaped, max_z, z_new)
