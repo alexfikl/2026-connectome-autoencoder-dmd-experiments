@@ -146,13 +146,13 @@ make_ae_features dirname:
 
 [doc("Construct all features")]
 features:
-    # @just make_features matrix data/*_LR_Task.npz data/Structural_LR.npz
-    # @just make_features eig data/*_LR_Task.npz data/Structural_LR.npz
+    @just make_features matrix data/*_LR_Task.npz data/Structural_LR.npz
+    @just make_features eig data/*_LR_Task.npz data/Structural_LR.npz
     @just make_features local data/*_LR_Task.npz data/Structural_LR.npz
-    # @just make_features global data/*_LR_Task.npz data/Structural_LR.npz
-    # @just make_features dmd data/*_LR_Task.npz data/Structural_LR.npz
-    # @just make_features geometry data/task-*-fractal.npz data/structural-fractal.npz
-    # @just make_ae_features data/ae-dmd
+    @just make_features global data/*_LR_Task.npz data/Structural_LR.npz
+    @just make_features dmd data/*_LR_Task.npz data/Structural_LR.npz
+    @just make_features geometry data/task-*-fractal.npz data/structural-fractal.npz
+    @just make_ae_features data/ae-dmd
 
 # }}}
 

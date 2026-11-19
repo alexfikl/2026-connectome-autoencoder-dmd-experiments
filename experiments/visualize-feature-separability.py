@@ -11,7 +11,11 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from commonlib import FeatureDataset, load_feature_datasets
-from nneuroutil.classifier import AnovaScores, compute_anova_scores
+from nneuroutil.classifier import (
+    AnovaScores,
+    classify_linear_discriminant_analysis,
+    compute_anova_scores,
+)
 from nneuroutil.typing import Array1D, Array2D, Array3D
 from nneuroutil.visualization import figure, make_colorbar_axes
 
@@ -98,6 +102,77 @@ def compute_supervised_lda(
     evr = lda[-1].explained_variance_ratio_
 
     return LdaResults(coords=coords, explained_variance_ratio=evr)
+
+
+class GsvdLdaResults(NamedTuple):
+    test_coords: Array3D[np.floating[Any]]
+    """Held-out test subject coordinates of shape ``(n_test, nclasses, k - 1)``."""
+    proj_centroids: Array2D[np.floating[Any]]
+    """Projected training class centroids of shape ``(nclasses, k - 1)``."""
+    explained_variance_ratio: Array1D[np.floating[Any]]
+    """Fraction of projected between-class variance explained by each axis."""
+    test_accuracy: float
+    """Balanced accuracy on held-out test subjects."""
+
+
+def compute_gsvd_lda(
+    x: Array3D[np.floating[Any]],
+    labels: Array3D[np.integer[Any]],
+    *,
+    standardize: bool = False,
+    random_state: int = 42,
+) -> GsvdLdaResults:
+    """Fit G-SVD LDA on training subjects and project held-out test subjects."""
+    from sklearn.metrics import balanced_accuracy_score
+    from sklearn.preprocessing import StandardScaler
+
+    nsubjects, nclasses, nfeatures = x.shape
+    rng = np.random.default_rng(random_state)
+    perm = rng.permutation(nsubjects)
+    n_test = max(1, round(0.3 * nsubjects))
+    test_idx = perm[:n_test]
+    train_idx = perm[n_test:]
+
+    x_train = x[train_idx]
+    x_test = x[test_idx]
+
+    if standardize:
+        scaler = StandardScaler()
+        scaler.fit(np.reshape(x_train, (train_idx.size * nclasses, nfeatures)))
+        x_train = np.reshape(
+            scaler.transform(np.reshape(x_train, (-1, nfeatures))),
+            x_train.shape,
+        )
+        x_test = np.reshape(
+            scaler.transform(np.reshape(x_test, (-1, nfeatures))),
+            x_test.shape,
+        )
+
+    class_labels = [int(labels[0, i]) for i in range(nclasses)]
+    lda = classify_linear_discriminant_analysis(
+        [x_train[:, i, :] for i in range(nclasses)],
+        class_labels,
+        shrinkage=1.0,
+    )
+
+    x_test_flat = np.reshape(x_test, (n_test * nclasses, nfeatures))
+    y_test_flat = np.reshape(labels[test_idx], -1)
+    y_pred = lda.predict(x_test_flat, metric="l2")
+    test_accuracy = float(balanced_accuracy_score(y_test_flat, y_pred))
+
+    test_coords_flat = (x_test_flat - lda.centroids) @ lda.G
+    test_coords = np.reshape(test_coords_flat, (n_test, nclasses, -1))
+
+    between_var = np.sum(lda.proj_centroids**2, axis=0)
+    total_var = float(np.sum(between_var))
+    evr = between_var / total_var if total_var > 0.0 else between_var
+
+    return GsvdLdaResults(
+        test_coords=test_coords,
+        proj_centroids=lda.proj_centroids,
+        explained_variance_ratio=evr,
+        test_accuracy=test_accuracy,
+    )
 
 
 class DecodingResults(NamedTuple):
@@ -309,6 +384,59 @@ def plot_supervised_lda(
             ax2.set_xlabel(r"\text{Canonical Component 1}")
             ax2.set_ylabel(r"\text{Canonical Component 2}")
             ax2.set_title(r"\text{Fisher Linear Discriminant Map}")
+            ax2.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize="small")
+        else:
+            ax2.text(0.5, 0.5, "Only 1 discriminant dimension", ha="center")
+
+
+def plot_gsvd_lda(
+    basename: pathlib.Path,
+    lda: GsvdLdaResults,
+    ds: FeatureDataset,
+    *,
+    overwrite: bool = False,
+) -> None:
+    """Plot held-out G-SVD LDA canonical spectrum and 2D test-subject projection."""
+    with figure(
+        basename.with_stem(f"{basename.stem}-gsvd-lda"),
+        ncols=2,
+        figsize=(15, 6),
+        overwrite=overwrite,
+    ) as fig:
+        ax1, ax2 = fig.axes
+
+        # Panel 1: variance spectrum
+        ncomp = np.size(lda.explained_variance_ratio)
+        idx = np.arange(1, ncomp + 1)
+        ax1.bar(idx, lda.explained_variance_ratio, color="steelblue", width=0.6)
+        ax1.set_xlabel(r"\text{Canonical Component}")
+        ax1.set_ylabel(r"\text{Between-Class Variance Ratio}")
+        ax1.set_title(r"\text{G-SVD Discriminant Spectrum}")
+        ax1.set_xticks(idx)
+
+        # Panel 2: 2D held-out test projection
+        if lda.test_coords.shape[2] >= 2:
+            for i, name in enumerate(ds.class_names):
+                label = clean_label(name)
+                sc = ax2.scatter(
+                    lda.test_coords[:, i, 0],
+                    lda.test_coords[:, i, 1],
+                    s=28,
+                    alpha=0.75,
+                    label=label,
+                )
+                ax2.scatter(
+                    lda.proj_centroids[i, 0],
+                    lda.proj_centroids[i, 1],
+                    marker="x",
+                    s=90,
+                    linewidths=2.0,
+                    color=sc.get_facecolor()[0],
+                )
+            ax2.set_xlabel(r"\text{Canonical Component 1}")
+            ax2.set_ylabel(r"\text{Canonical Component 2}")
+            acc_str = f"{lda.test_accuracy * 100:.1f}\\%"
+            ax2.set_title(rf"\text{{Held-Out G-SVD Fisher Map (Test Acc: {acc_str})}}")
             ax2.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize="small")
         else:
             ax2.text(0.5, 0.5, "Only 1 discriminant dimension", ha="center")
@@ -588,6 +716,15 @@ def main(
         log.info("Computing supervised Fisher / LDA projection...")
         lda = compute_supervised_lda(ds.x, ds.labels, standardize=standardize)
         plot_supervised_lda(basename, lda, ds, overwrite=overwrite)
+
+        # 2b. Held-out G-SVD LDA
+        log.info("Computing held-out G-SVD LDA projection...")
+        gsvd_lda = compute_gsvd_lda(ds.x, ds.labels, standardize=standardize)
+        log.info(
+            "Held-out G-SVD LDA balanced accuracy: %.2f%%",
+            gsvd_lda.test_accuracy * 100,
+        )
+        plot_gsvd_lda(basename, gsvd_lda, ds, overwrite=overwrite)
 
         # 3. Effect sizes
         log.info("Computing vectorized ANOVA effect sizes...")
