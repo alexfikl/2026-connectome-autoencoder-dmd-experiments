@@ -60,10 +60,14 @@ def compute_centroid_rdm(
 
 
 class PcaLdaResults(NamedTuple):
-    coords: Array2D[np.floating[Any]]
-    """Projected coordinates on canonical discriminant dimensions."""
+    test_coords: Array3D[np.floating[Any]]
+    """Held-out test subject coordinates of shape ``(n_test, nclasses, k - 1)``."""
+    proj_centroids: Array2D[np.floating[Any]]
+    """Projected training class centroids of shape ``(nclasses, k - 1)``."""
     explained_variance_ratio: Array1D[np.floating[Any]]
     """Ratio of between-class variance explained by each canonical component."""
+    test_accuracy: float
+    """Balanced accuracy on held-out test subjects."""
 
 
 def compute_pca_lda(
@@ -74,15 +78,24 @@ def compute_pca_lda(
     standardize: bool = False,
     random_state: int = 42,
 ) -> PcaLdaResults:
-    """Compute in-sample PCA+LDA (supervised Linear Discriminant Analysis)."""
+    """Fit PCA+LDA on training subjects and project held-out test subjects."""
     from sklearn.decomposition import PCA
     from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+    from sklearn.metrics import balanced_accuracy_score
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
 
-    nsamples, nclasses, nfeatures = x.shape
-    x = np.reshape(x, (nsamples * nclasses, nfeatures))
-    labels = np.reshape(labels, -1)
+    nsubjects, nclasses, nfeatures = x.shape
+    rng = np.random.default_rng(random_state)
+    perm = rng.permutation(nsubjects)
+    n_test = max(1, round(0.3 * nsubjects))
+    test_idx = perm[:n_test]
+    train_idx = perm[n_test:]
+
+    x_train = np.reshape(x[train_idx], (train_idx.size * nclasses, nfeatures))
+    y_train = np.reshape(labels[train_idx], -1)
+    x_test = np.reshape(x[test_idx], (n_test * nclasses, nfeatures))
+    y_test = np.reshape(labels[test_idx], -1)
 
     max_components = min(nclasses - 1, nfeatures)
 
@@ -91,17 +104,27 @@ def compute_pca_lda(
         estimators.append(StandardScaler())
 
     # When features exceed samples, project with PCA first to avoid singular Sw
-    if nfeatures > x.shape[0] - nclasses:
-        pca_dim = min(pca_max_components, x.shape[0] - nclasses, nfeatures)
+    if nfeatures > x_train.shape[0] - nclasses:
+        pca_dim = min(pca_max_components, x_train.shape[0] - nclasses, nfeatures)
         estimators.append(PCA(n_components=pca_dim, random_state=random_state))
 
     estimators.append(LinearDiscriminantAnalysis(n_components=max_components))
     lda = make_pipeline(*estimators)
 
-    coords = lda.fit_transform(x, labels)
+    train_coords = np.reshape(
+        lda.fit_transform(x_train, y_train), (train_idx.size, nclasses, -1)
+    )
+    proj_centroids = np.mean(train_coords, axis=0)
+    test_coords = np.reshape(lda.transform(x_test), (n_test, nclasses, -1))
     evr = lda[-1].explained_variance_ratio_
+    test_accuracy = balanced_accuracy_score(y_test, lda.predict(x_test))
 
-    return PcaLdaResults(coords=coords, explained_variance_ratio=evr)
+    return PcaLdaResults(
+        test_coords=test_coords,
+        proj_centroids=proj_centroids,
+        explained_variance_ratio=evr,
+        test_accuracy=test_accuracy,
+    )
 
 
 class GsvdLdaResults(NamedTuple):
@@ -127,6 +150,7 @@ def compute_gsvd_lda(
     from sklearn.preprocessing import StandardScaler
 
     nsubjects, nclasses, nfeatures = x.shape
+    labels_2d = np.reshape(labels, (nsubjects, nclasses))
     rng = np.random.default_rng(random_state)
     perm = rng.permutation(nsubjects)
     n_test = max(1, round(0.3 * nsubjects))
@@ -148,7 +172,7 @@ def compute_gsvd_lda(
             x_test.shape,
         )
 
-    class_labels = [int(labels[0, i]) for i in range(nclasses)]
+    class_labels = list(labels_2d[0])
     lda = classify_linear_discriminant_analysis(
         [x_train[:, i, :] for i in range(nclasses)],
         class_labels,
@@ -156,15 +180,15 @@ def compute_gsvd_lda(
     )
 
     x_test_flat = np.reshape(x_test, (n_test * nclasses, nfeatures))
-    y_test_flat = np.reshape(labels[test_idx], -1)
+    y_test_flat = np.reshape(labels_2d[test_idx], -1)
     y_pred = lda.predict(x_test_flat, metric="l2")
-    test_accuracy = float(balanced_accuracy_score(y_test_flat, y_pred))
+    test_accuracy = balanced_accuracy_score(y_test_flat, y_pred)
 
     test_coords_flat = (x_test_flat - lda.centroids) @ lda.G
     test_coords = np.reshape(test_coords_flat, (n_test, nclasses, -1))
 
     between_var = np.sum(lda.proj_centroids**2, axis=0)
-    total_var = float(np.sum(between_var))
+    total_var = np.sum(between_var)
     evr = between_var / total_var if total_var > 0.0 else between_var
 
     return GsvdLdaResults(
@@ -213,7 +237,7 @@ def compute_cross_validated_decoding(
 
     cm = confusion_matrix(labels, preds, normalize="true")
     per_class = np.diag(cm)
-    overall = float(np.mean(per_class))
+    overall = np.mean(per_class)
 
     return DecodingResults(
         confusion_matrix=cm,
@@ -336,10 +360,8 @@ def plot_rdm(
                     fontsize="small",
                 )
 
-        fig.colorbar(
-            im, cax=make_colorbar_axes(ax), label=r"\text{Correlation Distance}"
-        )
-        ax.set_title(r"\text{Centroid Dissimilarity (RDM)}")
+        fig.colorbar(im, cax=make_colorbar_axes(ax), label="Correlation Distance")
+        ax.set_title("Centroid Dissimilarity (RDM)")
 
 
 def plot_pca_lda(
@@ -349,7 +371,7 @@ def plot_pca_lda(
     *,
     overwrite: bool = False,
 ) -> None:
-    """Plot in-sample PCA+LDA canonical spectrum and 2D Fisher projection."""
+    """Plot held-out PCA+LDA canonical spectrum and 2D test-subject projection."""
     with figure(
         basename.with_stem(f"{basename.stem}-lda-pca-spectrum"),
         figsize=(7, 5.5),
@@ -360,33 +382,39 @@ def plot_pca_lda(
         ncomp = np.size(lda.explained_variance_ratio)
         idx = np.arange(1, ncomp + 1)
         ax.bar(idx, lda.explained_variance_ratio, color="steelblue", width=0.6)
-        ax.set_xlabel(r"\text{Canonical Component}")
-        ax.set_ylabel(r"\text{Between-Class Variance Ratio}")
-        ax.set_title(r"\text{Fisher Discriminant Spectrum}")
+        ax.set_xlabel("Canonical Component")
+        ax.set_ylabel("Between-Class Variance Ratio")
+        ax.set_title("PCA+LDA Discriminant Spectrum")
         ax.set_xticks(idx)
 
-    if lda.coords.shape[1] >= 2:
+    if lda.test_coords.shape[2] >= 2:
         with figure(
             basename.with_stem(f"{basename.stem}-lda-pca-map"),
             figsize=(8, 6),
             overwrite=overwrite,
         ) as fig:
             ax = fig.gca()
-            nsubjects, nclasses, _ = ds.x.shape
-            coords = np.reshape(lda.coords, (nsubjects, nclasses, lda.coords.shape[-1]))
-
             for i, name in enumerate(ds.class_names):
                 label = clean_label(name)
-                ax.scatter(
-                    coords[:, i, 0],
-                    coords[:, i, 1],
-                    s=24,
+                sc = ax.scatter(
+                    lda.test_coords[:, i, 0],
+                    lda.test_coords[:, i, 1],
+                    s=28,
                     alpha=0.75,
                     label=label,
                 )
-            ax.set_xlabel(r"\text{Canonical Component 1}")
-            ax.set_ylabel(r"\text{Canonical Component 2}")
-            ax.set_title(r"\text{Fisher Linear Discriminant Map}")
+                ax.scatter(
+                    lda.proj_centroids[i, 0],
+                    lda.proj_centroids[i, 1],
+                    marker="x",
+                    s=90,
+                    linewidths=2.0,
+                    color=sc.get_facecolor()[0],
+                )
+            ax.set_xlabel("Canonical Component 1")
+            ax.set_ylabel("Canonical Component 2")
+            acc = 100.0 * lda.test_accuracy
+            ax.set_title(f"Held-Out PCA+LDA Fisher Map (Test Acc: {acc:.1f}\\%)")
             ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize="small")
 
 
@@ -408,9 +436,9 @@ def plot_gsvd_lda(
         ncomp = np.size(lda.explained_variance_ratio)
         idx = np.arange(1, ncomp + 1)
         ax.bar(idx, lda.explained_variance_ratio, color="steelblue", width=0.6)
-        ax.set_xlabel(r"\text{Canonical Component}")
-        ax.set_ylabel(r"\text{Between-Class Variance Ratio}")
-        ax.set_title(r"\text{G-SVD Discriminant Spectrum}")
+        ax.set_xlabel("Canonical Component")
+        ax.set_ylabel("Between-Class Variance Ratio")
+        ax.set_title("G-SVD Discriminant Spectrum")
         ax.set_xticks(idx)
 
     if lda.test_coords.shape[2] >= 2:
@@ -437,10 +465,10 @@ def plot_gsvd_lda(
                     linewidths=2.0,
                     color=sc.get_facecolor()[0],
                 )
-            ax.set_xlabel(r"\text{Canonical Component 1}")
-            ax.set_ylabel(r"\text{Canonical Component 2}")
-            acc_str = f"{lda.test_accuracy * 100:.1f}\\%"
-            ax.set_title(rf"\text{{Held-Out G-SVD Fisher Map (Test Acc: {acc_str})}}")
+            ax.set_xlabel("Canonical Component 1")
+            ax.set_ylabel("Canonical Component 2")
+            acc = 100.0 * lda.test_accuracy
+            ax.set_title(f"Held-Out G-SVD Fisher Map (Test Acc: {acc:.1f}\\%)")
             ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize="small")
 
 
@@ -452,10 +480,8 @@ def plot_effect_size_dist(
 ) -> None:
     """Plot feature effect size distribution and empirical CDF."""
     eta2 = scores.eta2
-    large_mask = np.greater_equal(eta2, 0.14)
-    med_mask = np.logical_and(np.greater_equal(eta2, 0.06), np.less(eta2, 0.14))
-    pct_large = 100.0 * float(np.mean(large_mask))
-    pct_medium = 100.0 * float(np.mean(med_mask))
+    pct_large = 100.0 * np.mean(eta2 >= 0.14)  # ty: ignore[unsupported-operator]
+    pct_medium = 100.0 * np.mean((eta2 >= 0.06) & (eta2 < 0.14))  # ty: ignore[unsupported-operator]
 
     with figure(
         basename.with_stem(f"{basename.stem}-effect-sizes-hist"),
@@ -477,29 +503,28 @@ def plot_effect_size_dist(
             color="gray",
             linestyle=":",
             lw=1.5,
-            label=r"\text{Small (0.01)}",
+            label="Small (0.01)",
         )
         ax.axvline(
             0.06,
             color="goldenrod",
             linestyle="--",
             lw=1.5,
-            label=r"\text{Medium (0.06)}",
+            label="Medium (0.06)",
         )
         ax.axvline(
             0.14,
             color="crimson",
             linestyle="-.",
             lw=1.5,
-            label=r"\text{Large (0.14)}",
+            label="Large (0.14)",
         )
         ax.set_xlabel(r"ANOVA $\eta^2$")
-        ax.set_ylabel(r"Density")
-        title = (
-            rf"Effect Size Distribution (Large: {pct_large:.1f}\%, "
-            rf"Medium: {pct_medium:.1f}\%)"
+        ax.set_ylabel("Density")
+        ax.set_title(
+            f"Effect Size Distribution (Large: {pct_large:.1f}\\%, "
+            f"Medium: {pct_medium:.1f}\\%)"
         )
-        ax.set_title(title)
         ax.legend(fontsize="small")
 
     with figure(
@@ -548,10 +573,11 @@ def plot_decoding_cv(
         ax.set_yticks(range(nclasses))
         ax.set_xticklabels(labels, rotation=45, ha="right", fontsize="medium")
         ax.set_yticklabels(labels, fontsize="medium")
-        ax.set_xlabel(r"\text{Predicted Task}")
-        ax.set_ylabel(r"\text{True Task}")
-        acc_str = f"{decoding.overall_accuracy * 100:.1f}\\%"
-        ax.set_title(rf"\text{{Confusion Matrix (Mean Acc: {acc_str})}}")
+        ax.set_xlabel("Predicted Task")
+        ax.set_ylabel("True Task")
+        ax.set_title(
+            f"Confusion Matrix (Mean Acc: {decoding.overall_accuracy * 100:.1f}\\%)"
+        )
 
         for i in range(nclasses):
             for j in range(nclasses):
@@ -567,7 +593,7 @@ def plot_decoding_cv(
                     fontsize="small",
                 )
 
-        fig.colorbar(im, cax=make_colorbar_axes(ax), label=r"\text{Proportion}")
+        fig.colorbar(im, cax=make_colorbar_axes(ax), label="Proportion")
 
     with figure(
         basename.with_stem(f"{basename.stem}-decoding-cv-accuracy"),
@@ -583,20 +609,20 @@ def plot_decoding_cv(
             color="crimson",
             linestyle="--",
             lw=1.5,
-            label=rf"\text{{Chance ({chance * 100:.1f}\%)}}",
+            label=rf"Chance ({chance * 100:.1f}\%)",
         )
         ax.axhline(
             decoding.overall_accuracy,
             color="black",
             linestyle=":",
             lw=1.5,
-            label=rf"\text{{Mean ({decoding.overall_accuracy * 100:.1f}\%)}}",
+            label=rf"Mean ({decoding.overall_accuracy * 100:.1f}\%)",
         )
         ax.set_xticks(x_pos)
         ax.set_xticklabels(labels, rotation=45, ha="right", fontsize="medium")
-        ax.set_ylabel(r"\text{Decoding Accuracy}")
+        ax.set_ylabel("Decoding Accuracy")
         ax.set_ylim(0.0, 1.05)
-        ax.set_title(r"\text{Per-Class Decoding Performance}")
+        ax.set_title("Per-Class Decoding Performance")
         ax.legend(fontsize="small")
 
 
@@ -608,7 +634,7 @@ def plot_task_vs_subject_ratio(
 ) -> None:
     """Plot ratio and comparison of task variance vs subject variance."""
     log_ratio = np.log10(np.maximum(var_decomp.ratio, 1.0e-6))
-    pct_task_dominant = 100.0 * float(np.mean(np.greater(log_ratio, 0.0)))
+    pct_task_dominant = 100.0 * np.mean(log_ratio > 0.0)
 
     with figure(
         basename.with_stem(f"{basename.stem}-task-vs-subject-ratio"),
@@ -633,9 +659,10 @@ def plot_task_vs_subject_ratio(
             label=r"$MS_{\text{task}} = MS_{\text{subject}}$",
         )
         ax.set_xlabel(r"$\log_{10}(MS_{\text{task}} / MS_{\text{subject}})$")
-        ax.set_ylabel(r"Density")
-        task_dom_str = f"{pct_task_dominant:.1f}\\%"
-        ax.set_title(rf"Task vs Subject Variance (Task Dominant: {task_dom_str})")
+        ax.set_ylabel("Density")
+        ax.set_title(
+            f"Task vs Subject Variance (Task Dominant: {pct_task_dominant:.1f}\\%)"
+        )
         ax.legend(fontsize="small")
 
     with figure(
@@ -661,11 +688,8 @@ def plot_task_vs_subject_ratio(
             color="navy",
             edgecolor="none",
         )
-        max_val = max(
-            float(np.max(var_decomp.eta2_subject)),
-            float(np.max(var_decomp.eta2_task)),
-        )
-        ax.plot([0, max_val], [0, max_val], "k--", lw=1.2, label=r"y = x")
+        max_val = max(np.max(var_decomp.eta2_subject), np.max(var_decomp.eta2_task))
+        ax.plot([0, max_val], [0, max_val], "k--", lw=1.2, label="y = x")
         ax.set_xlabel(r"$\eta^2_{\text{subject}}$")
         ax.set_ylabel(r"$\eta^2_{\text{task}}$")
         ax.set_title("Subject vs. Task Effect Size")
@@ -702,13 +726,12 @@ def main(
             ret = 1
             continue
 
-        suffix = ""
         if outfile is None:
-            basename = filename.with_stem(f"{filename.stem}{suffix}").with_suffix("")
+            basename = filename.with_suffix("")
         elif len(filenames) == 1:
-            basename = outfile.with_stem(f"{outfile.stem}{suffix}").with_suffix("")
+            basename = outfile.with_suffix("")
         else:
-            basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}{suffix}")
+            basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}")
 
         nsubjects, nclasses, nfeatures = ds.x.shape
         log.info(
@@ -726,9 +749,10 @@ def main(
         rdm = compute_centroid_rdm(ds.x)
         plot_rdm(basename, rdm, ds.class_names, overwrite=overwrite)
 
-        # 2. In-sample PCA+LDA
-        log.info("Computing in-sample PCA+LDA projection...")
+        # 2. Held-out PCA+LDA
+        log.info("Computing held-out PCA+LDA projection...")
         lda = compute_pca_lda(ds.x, ds.labels, standardize=standardize)
+        log.info("Held-out PCA+LDA balanced accuracy: %.2f%%", lda.test_accuracy * 100)
         plot_pca_lda(basename, lda, ds, overwrite=overwrite)
 
         # 2b. Held-out G-SVD LDA
