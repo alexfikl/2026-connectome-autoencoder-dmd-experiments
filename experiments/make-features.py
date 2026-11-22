@@ -641,10 +641,45 @@ def make_image_features(
 # }}}
 
 
-# {{{ make_geometry_features
+# {{{ _make_contour
 
 
-def make_geometry_features(
+def _make_contour(
+    binary: Array2D[np.integer[Any]],
+    bbox: tuple[float, float, float, float],
+) -> tuple[Any, float, float, float]:
+    """Retrieve the largest outer contour of the binary mask.
+
+    Returns the contour together with the pixel scales ``dx`` and ``dy`` and
+    the contour perimeter in pixels.
+    """
+    import cv2  # ty: ignore[import-not-found]
+
+    xmin, xmax, ymin, ymax = bbox
+    height, width = binary.shape
+    dx = (xmax - xmin) / width
+    dy = (ymax - ymin) / height
+    mask = np.where(binary == 0, np.uint8(255), np.uint8(0))
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        raise RuntimeError("could not find contours")
+
+    c = max(contours, key=cv2.contourArea)
+    if len(c) < 3:
+        raise RuntimeError("invalid contour")
+
+    perimeter_px = cv2.arcLength(c, closed=True)
+    return c, dx, dy, perimeter_px
+
+
+# }}}
+
+
+# {{{ make_fourier_features
+
+
+def make_fourier_features(
     binary: Array2D[np.integer[Any]],
     bbox: tuple[float, float, float, float],
     *,
@@ -653,13 +688,10 @@ def make_geometry_features(
     eps: float = 5.0e-4,
     normalize: bool = True,
 ) -> FeatureDataset:
-    """Compute boundary descriptors and geometric measures.
+    """Compute Fourier descriptors of the boundary contour.
 
-    The descriptor groups contain the real and imaginary parts of the
-    low-order boundary modes ``m_{-ncoeffs}, ..., m_{-1}, m_1, ..., m_{ncoeffs}``.
-    The geometry groups contain the real-axis chord, the bounding box,
-    area and perimeter, and orientation-invariant landmark measures
-    from Radulescu et al. (2025). No landmark-side assumptions are made.
+    The groups contain the real and imaginary parts of the low-order boundary
+    modes ``m_{-ncoeffs}, ..., m_{-1}, m_1, ..., m_{ncoeffs}``.
     """
     import cv2  # ty: ignore[import-not-found]
 
@@ -674,21 +706,77 @@ def make_geometry_features(
 
     xmin, xmax, ymin, ymax = bbox
     height, width = binary.shape
-    dx = (xmax - xmin) / width
-    dy = (ymax - ymin) / height
-    mask = np.where(binary == 0, np.uint8(255), np.uint8(0))
+    c, _, _, perimeter_px = _make_contour(binary, bbox)
 
-    # 1. retrieve outer contour
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        raise RuntimeError("could not find contours")
+    # approximate polygon and resample to equidistant arc-length points
+    approx = cv2.approxPolyDP(c, perimeter_px * eps, closed=True)
+    pts = approx[:, 0, :]
 
-    c = max(contours, key=cv2.contourArea)
-    perimeter_px = cv2.arcLength(c, closed=True)
-    if len(c) < 3:
-        raise RuntimeError("invalid contour")
+    # NOTE: image row 0 corresponds to ymax, as in the paper's MATLAB code
+    x = xmin + pts[:, 0] * ((xmax - xmin) / width)
+    y = ymax - pts[:, 1] * ((ymax - ymin) / height)
 
-    # 2. geometry
+    z = x + 1j * y
+    z = np.append(z, z[0])
+    dists = np.insert(np.cumsum(np.abs(np.diff(z))), 0, 0.0)
+    target_dists = np.linspace(0.0, dists[-1], nsamples, endpoint=False)
+
+    z = np.interp(target_dists, dists, z.real) + 1j * np.interp(
+        target_dists, dists, z.imag
+    )
+
+    # symmetric low-order boundary descriptors
+    # NOTE: centering makes the m_0 coefficient zero, so it is omitted
+    z = z - np.mean(z)
+    if normalize:
+        scale = np.sqrt(np.mean(np.abs(z) ** 2))
+        if scale < 1.0e-12:
+            scale = 1.0
+        z = z / scale
+
+    # NOTE: the phases depend on where the contour starts, so anchor it at
+    # the rightmost point, which is stable across all equi-M sets
+    z = np.roll(z, -int(np.argmax(z.real)))
+
+    F = np.fft.fft(z)
+    freqs = np.rint(np.fft.fftfreq(nsamples, d=1.0 / nsamples)).astype(int)
+    index = {int(k): i for i, k in enumerate(freqs)}
+    modes = [*range(-ncoeffs, 0), *range(1, ncoeffs + 1)]
+    values = F[[index[k] for k in modes]]
+
+    descriptors = np.concatenate([values.real, values.imag])
+    starts = np.cumsum([0, values.size, values.size])
+
+    return FeatureDataset(
+        x=descriptors,
+        starts=starts,
+        descrs=("Descriptor Real", "Descriptor Imag"),
+    )
+
+
+# }}}
+
+
+# {{{ make_geometry_features
+
+
+def make_geometry_features(
+    binary: Array2D[np.integer[Any]],
+    bbox: tuple[float, float, float, float],
+) -> FeatureDataset:
+    """Compute geometric measures of the boundary contour.
+
+    The groups contain the real-axis chord, the bounding box, area and
+    perimeter, and orientation-invariant landmark measures from Radulescu
+    et al. (2025). No landmark-side assumptions are made.
+    """
+    import cv2  # ty: ignore[import-not-found]
+
+    xmin, _, _, ymax = bbox
+    height = binary.shape[0]
+    c, dx, dy, perimeter_px = _make_contour(binary, bbox)
+
+    # geometry
     area = cv2.contourArea(c) * dx * dy
     perimeter = perimeter_px * np.sqrt(dx * dy)
 
@@ -718,7 +806,7 @@ def make_geometry_features(
     x_at_y_max = px[int(np.argmax(py))]
     y_at_x_max = abs(py[int(np.argmax(px))])
 
-    geometry = np.array([
+    features = np.array([
         x_min_y0,
         x_max_y0,
         x_max,
@@ -731,53 +819,12 @@ def make_geometry_features(
         x_at_y_max,
         y_at_x_max,
     ])
-
-    # 3. approximate polygon and resample to equidistant arc-length points
-    approx = cv2.approxPolyDP(c, perimeter_px * eps, closed=True)
-    pts = approx[:, 0, :]
-
-    # NOTE: image row 0 corresponds to ymax, as in the paper's MATLAB code
-    x = xmin + pts[:, 0] * ((xmax - xmin) / width)
-    y = ymax - pts[:, 1] * ((ymax - ymin) / height)
-
-    z = x + 1j * y
-    z = np.append(z, z[0])
-    dists = np.insert(np.cumsum(np.abs(np.diff(z))), 0, 0.0)
-    target_dists = np.linspace(0.0, dists[-1], nsamples, endpoint=False)
-
-    z = np.interp(target_dists, dists, z.real) + 1j * np.interp(
-        target_dists, dists, z.imag
-    )
-
-    # 4. symmetric low-order boundary descriptors
-    # NOTE: centering makes the m_0 coefficient zero, so it is omitted
-    z = z - np.mean(z)
-    if normalize:
-        scale = np.sqrt(np.mean(np.abs(z) ** 2))
-        if scale < 1.0e-12:
-            scale = 1.0
-        z = z / scale
-
-    # NOTE: the phases depend on where the contour starts, so anchor it at
-    # the rightmost point, which is stable across all equi-M sets
-    z = np.roll(z, -int(np.argmax(z.real)))
-
-    F = np.fft.fft(z)
-    freqs = np.rint(np.fft.fftfreq(nsamples, d=1.0 / nsamples)).astype(int)
-    index = {int(k): i for i, k in enumerate(freqs)}
-    modes = [*range(-ncoeffs, 0), *range(1, ncoeffs + 1)]
-    values = F[[index[k] for k in modes]]
-
-    descriptors = np.concatenate([values.real, values.imag])
-    x = np.concatenate([descriptors, geometry])
-    starts = np.cumsum([0, values.size, values.size, *([1] * geometry.size)])
+    starts = np.cumsum([0, *([1] * features.size)])
 
     return FeatureDataset(
-        x=x,
+        x=features,
         starts=starts,
         descrs=(
-            "Descriptor Real",
-            "Descriptor Imag",
             "x_min_y0",
             "x_max_y0",
             "x_max",
@@ -801,7 +848,15 @@ def make_features(
     *,
     outfile: pathlib.Path | None = None,
     ftype: Literal[
-        "local", "global", "matrix", "dmd", "eig", "geometry", "image", "scale"
+        "local",
+        "global",
+        "matrix",
+        "dmd",
+        "eig",
+        "geometry",
+        "fourier",
+        "image",
+        "scale",
     ] = "matrix",
     key: str | None = None,
     eps: float | None = None,
@@ -820,7 +875,9 @@ def make_features(
         return 1
 
     if key is None:
-        key = "images_binary" if ftype in {"geometry", "image"} else "matrices"
+        key = (
+            "images_binary" if ftype in {"geometry", "fourier", "image"} else "matrices"
+        )
 
     # {{{ load matrices
 
@@ -867,7 +924,7 @@ def make_features(
             except ValueError:
                 feps = -1.0
 
-        if ftype in {"geometry", "image"}:
+        if ftype in {"geometry", "fourier", "image"}:
             result = matrices
             bbox = data["images_bbox"]
         else:
@@ -938,6 +995,11 @@ def make_features(
                         mat_i,
                         (xmin, xmax, ymin, ymax),
                     )
+                elif ftype == "fourier":
+                    features = make_fourier_features(
+                        mat_i,
+                        (xmin, xmax, ymin, ymax),
+                    )
                 elif ftype == "image":
                     features = make_image_features(mat_i)
                 else:
@@ -1005,6 +1067,7 @@ if __name__ == "__main__":
             "dmd",
             "eig",
             "geometry",
+            "fourier",
             "image",
             "scale",
         ),

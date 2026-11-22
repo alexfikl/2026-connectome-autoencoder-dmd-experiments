@@ -154,6 +154,7 @@ features:
     @just make_features dmd data/*_LR_Task.npz data/Structural_LR.npz
     @just make_features image data/task-*-fractal.npz data/structural-fractal.npz
     @just make_features geometry data/task-*-fractal.npz data/structural-fractal.npz
+    @just make_features fourier data/task-*-fractal.npz data/structural-fractal.npz
     @just make_ae_features data/ae-dmd
 
 # }}}
