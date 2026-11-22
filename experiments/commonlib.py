@@ -94,40 +94,51 @@ def gpu_array_namespace() -> tuple[Any, str]:
 
 
 class FeatureDataset(NamedTuple):
-    x: Array3D[np.floating[Any]]
-    """Feature tensor of shape ``(nsamples, nclasses, nfeatures)``."""
-    labels: Array3D[np.integer[Any]]
-    """Class index for each entry of :attr:`x` of shape ``(nsamples, nclasses, 1)``. """
+    x: tuple[Array2D[np.floating[Any]], ...]
+    """One feature matrix of shape ``(nsamples, nfeatures)`` per class."""
+    groups: tuple[Array1D[np.integer[Any]], ...]
+    """Group index (e.g. subject) for each row of :attr:`x`."""
     class_names: tuple[str, ...]
-    """Class name for each entry along the class axis of :attr:`x`."""
+    """Class name for each entry of :attr:`x`."""
     starts: Array1D[np.integer[Any]]
     """Feature group boundaries of length ``ngroups + 1``."""
     descrs: tuple[str, ...]
     """Description of each feature group."""
 
 
-def make_class_labels(
-    x: Array3D[np.floating[Any]],
-    *,
-    xp: Any = None,
-) -> Array3D[np.integer[Any]]:
-    if xp is None:
-        xp = array_api_compat.array_namespace(x)
+SCAN_TYPE_LABELS = {"fmri": "Functional", "mri": "Structural"}
 
-    nsamples, nclasses, _ = x.shape
-    indices = xp.arange(nclasses, dtype=xp.int64, device=array_api_compat.device(x))
-    return xp.tile(indices[None, :, None], (nsamples, 1, 1))
+
+def flatten_feature_datasets(
+    ds: FeatureDataset,
+) -> tuple[
+    Array2D[np.floating[Any]],
+    Array1D[np.integer[Any]],
+    Array1D[np.integer[Any]],
+]:
+    """Concatenate the per-class arrays into ``(x, labels, groups)``."""
+    x = np.concatenate([np.asarray(xi) for xi in ds.x], axis=0)
+    labels = np.concatenate([
+        np.full(np.asarray(xi).shape[0], i, dtype=np.int64) for i, xi in enumerate(ds.x)
+    ])
+    groups = np.concatenate([np.asarray(g) for g in ds.groups], axis=0)
+
+    return x, labels, groups
 
 
 def load_feature_datasets(
     filename: pathlib.Path,
     *,
-    exclude: tuple[str, ...] | None = None,
+    binary: bool = False,
     datakey: str = "datasets",
     device: Any = None,
     xp: Any = None,
 ) -> FeatureDataset:
     """Load a feature file written by ``make-features.py``.
+
+    With ``binary=False`` only the functional classes are returned, one array
+    per task. With ``binary=True`` classes are grouped by scan type and
+    concatenated, e.g. all functional scans and the structural scans.
 
     :arg datakey: name of the variable holding the class dictionary.
     """
@@ -152,10 +163,6 @@ def load_feature_datasets(
     if len(datasets) <= 1:
         raise ValueError(f"dataset does not have sufficient classes: {len(datasets)}")
 
-    if exclude is None:
-        exclude = ()
-    excludes = set(exclude)
-
     descrs = data["descrs"]
     if descrs.ndim == 0:
         descrs = descrs[()]
@@ -164,32 +171,57 @@ def load_feature_datasets(
     if xp is None:
         xp = array_api_compat.array_namespace(np.array([0]))
 
-    classes = []
-    xs: list[Array2D[np.floating[Any]]] = []
+    classes: list[str] = []
+    arrays: list[Array2D[np.floating[Any]]] = []
     for name, x in datasets.items():
-        if name in excludes:
-            continue
-
         if x.ndim != 2:
             raise ValueError(f"expected a 2d array for class '{name}': {x.shape}")
 
-        if xs and x.shape[1] != xs[-1].shape[1]:
+        if arrays and x.shape[1] != arrays[-1].shape[1]:
             raise ValueError(f"class '{name}' has inconsistent feature size: {x.shape}")
-
-        if xs and x.shape[0] != xs[-1].shape[0]:
-            raise ValueError(f"class '{name}' has inconsistent sample size: {x.shape}")
 
         if not np.all(np.isfinite(x)):
             raise ValueError(f"class '{name}' contains NaN or inf values")
 
-        xs.append(x)
         classes.append(name)
+        arrays.append(x)
 
-    x = xp.asarray(np.stack(xs, axis=1), device=device)
+    scan_types = data["scan_types"]
+    if scan_types.ndim == 0:
+        scan_types = scan_types[()]
+    scan_types = tuple(str(scan_types[name]) for name in classes)
+
+    group_types = sorted(set(scan_types))
+    if group_types != ["fmri", "mri"]:
+        raise ValueError(f"invalid groups: {group_types}")
+
+    if binary:
+        xs: list[Array2D[np.floating[Any]]] = []
+        groups: list[Array1D[np.integer[Any]]] = []
+        class_names: list[str] = []
+
+        for group in group_types:
+            indices = [i for i, name in enumerate(scan_types) if name == group]
+            xs.append(np.concatenate([arrays[i] for i in indices], axis=0))
+            groups.append(
+                np.concatenate([
+                    np.arange(arrays[i].shape[0], dtype=np.int64) for i in indices
+                ])
+            )
+            class_names.append(SCAN_TYPE_LABELS.get(group, group.upper()))
+    else:
+        indices = [i for i, name in enumerate(scan_types) if name == "fmri"]
+        if not indices:
+            raise ValueError("feature dataset does not contain 'fmri' classes")
+
+        xs = [arrays[i] for i in indices]
+        groups = [np.arange(arrays[i].shape[0], dtype=np.int64) for i in indices]
+        class_names = [classes[i] for i in indices]
+
     return FeatureDataset(
-        x=x,
-        labels=make_class_labels(x),
-        class_names=tuple(classes),
+        x=tuple(xp.asarray(xi, device=device) for xi in xs),
+        groups=tuple(xp.asarray(group) for group in groups),
+        class_names=tuple(class_names),
         starts=xp.asarray(data["starts"], device=device),
         descrs=tuple(descrs),
     )
