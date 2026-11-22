@@ -5,14 +5,15 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Any, Literal, cast, get_args
+from typing import Any, Literal, get_args
 
 import numpy as np
 import torch
 
-from commonlib import load_feature_datasets
+from commonlib import FeatureDataset, load_feature_datasets
 from nneuroutil.helpers import FuzzyChoiceAction
 from nneuroutil.interop.torch import available_device_names, torch_default_device
+from nneuroutil.typing import Array1D, Array2D
 from nneuroutil.visualization import figure, make_colorbar_axes
 
 log = logging.getLogger("lib.autoencoder_network")
@@ -29,26 +30,123 @@ Example:
 ClassificationMethod = Literal["lda", "svm", "mlp"]
 
 
+def filter_feature_groups(
+    ds: FeatureDataset,
+    *,
+    include_groups: tuple[str, ...] | None = None,
+    exclude_groups: tuple[str, ...] | None = None,
+) -> tuple[Array2D[np.floating[Any]], tuple[str, ...]]:
+    """Return stacked 2D feature matrix filtered by group descriptions."""
+    x_all = np.concatenate(ds.x, axis=0)
+    if not include_groups and not exclude_groups:
+        return x_all, ds.descrs
+
+    selected_idx: list[int] = []
+    selected_descrs: list[str] = []
+    for i, descr in enumerate(ds.descrs):
+        d_low = descr.lower()
+        if include_groups and not any(g.lower() in d_low for g in include_groups):
+            continue
+        if exclude_groups and any(g.lower() in d_low for g in exclude_groups):
+            continue
+
+        start, end = ds.starts[i], ds.starts[i + 1]
+        selected_idx.extend(range(start, end))
+        selected_descrs.append(descr)
+
+    if not selected_idx:
+        raise ValueError(
+            f"no feature groups matched include={include_groups}, "
+            f"exclude={exclude_groups} among {ds.descrs}"
+        )
+
+    return x_all[:, selected_idx], tuple(selected_descrs)
+
+
+def _fit_and_predict(
+    x_train_list: list[torch.Tensor],
+    y_train_list: list[int],
+    x_test: torch.Tensor,
+    method: ClassificationMethod,
+    *,
+    seed: int,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Fit classifier on training tensors and return ``(y_pred, scores)``."""
+    if method == "lda":
+        from nneuroutil.classifier import classify_linear_discriminant_analysis
+
+        clf = classify_linear_discriminant_analysis(x_train_list, y_train_list)
+        return clf.predict(x_test, metric="l2"), None  # ty: ignore[invalid-explicit-return]
+
+    if method == "svm":
+        from nneuroutil.classifier import classify_support_vector_machine
+
+        clf = classify_support_vector_machine(x_train_list, y_train_list)
+        return clf.predict(x_test), None  # ty: ignore[invalid-explicit-return]
+
+    if method == "mlp":
+        from torchlib import classify_multilayer_perceptron
+
+        torch.manual_seed(seed)
+        clf = classify_multilayer_perceptron(
+            x_train_list, y_train_list, learning_rate_init=1.0e-2, max_iter=400
+        )
+
+        y_pred = clf.predict(x_test)
+        with torch.no_grad():
+            logits = clf.model(x_test.to(dtype=clf.dtype, device=clf.device))
+            probs = torch.softmax(logits, dim=1)
+
+        scores = probs[:, 1] if probs.shape[1] == 2 else probs
+        return y_pred, scores
+
+    raise ValueError(f"unknown method: {method!r}")
+
+
+def _bootstrap_subject_ci(
+    y_true: Array1D[np.integer[Any]],
+    oof_preds: Array2D[np.integer[Any]],
+    groups: Array1D[np.integer[Any]],
+    *,
+    n_bootstrap: int = 1000,
+    seed: int = 42,
+) -> tuple[float, float]:
+    """Compute 95% bootstrap CI over subjects for balanced accuracy."""
+    from sklearn.metrics import balanced_accuracy_score
+
+    unique_subjects = np.unique(groups)
+    subj_rows = [np.flatnonzero(groups == s) for s in unique_subjects]
+    n_repeats = oof_preds.shape[0]
+    y_rep = np.repeat(y_true[None, :], n_repeats, axis=0)
+
+    rng = np.random.default_rng(seed)
+    vals = np.empty(n_bootstrap, dtype=np.float64)
+    for b in range(n_bootstrap):
+        sampled = rng.integers(0, len(subj_rows), size=len(subj_rows))
+        idx = np.concatenate([subj_rows[s] for s in sampled])
+        vals[b] = balanced_accuracy_score(
+            y_rep[:, idx].ravel(), oof_preds[:, idx].ravel()
+        )
+
+    lo, hi = np.percentile(vals, [2.5, 97.5])
+    return lo, hi
+
+
 # {{{ plot_confusion
 
 
 def plot_confusion(
     basename: pathlib.Path,
-    y_pred: list[Any],
+    cm: Array2D[np.integer[Any]],
     class_names: tuple[str, ...],
     *,
     method: str,
+    balanced_acc: float,
     overwrite: bool = False,
 ) -> None:
-    """Plot the per-class confusion matrix of the test predictions."""
+    """Plot the aggregated confusion matrix of the out-of-fold predictions."""
     nclasses = len(class_names)
-    cm = np.zeros((nclasses, nclasses), dtype=int)
-    for i, pred in enumerate(y_pred):
-        for p in pred.tolist():
-            cm[i, int(p)] += 1
-
-    accuracy = float(np.trace(cm)) / max(int(np.sum(cm)), 1)
-    vmax = max(int(np.max(cm)), 1)
+    vmax = max(np.max(cm), 1)
 
     with figure(
         basename.with_stem(f"{basename.stem}-confusion-{method}"),
@@ -63,9 +161,9 @@ def plot_confusion(
         ax.set_yticks(range(nclasses))
         ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize="medium")
         ax.set_yticklabels(class_names, fontsize="medium")
-        ax.set_xlabel("Predicted task")
-        ax.set_ylabel("True task")
-        ax.set_title(rf"{method.upper()} (accuracy ${accuracy:.3f}$)")
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("True")
+        ax.set_title(rf"{method.upper()} (bal. acc. ${balanced_acc:.3f}$)")
 
         for i in range(nclasses):
             for j in range(nclasses):
@@ -89,15 +187,99 @@ def plot_confusion(
 # }}}
 
 
+def _run_cv(
+    x: Array2D[np.floating[Any]],
+    y: Array1D[np.integer[Any]],
+    groups: Array1D[np.integer[Any]],
+    *,
+    nclasses: int,
+    method: ClassificationMethod,
+    zscore_features: bool,
+    n_splits: int,
+    n_repeats: int,
+    seed: int,
+    device: torch.device | str,
+) -> tuple[
+    Array2D[np.integer[Any]],
+    Array2D[np.floating[Any]] | None,
+    list[float],
+    list[float],
+]:
+    """Run repeated subject-grouped K-fold CV on ``(nsamples, nfeatures)``."""
+    from sklearn.metrics import balanced_accuracy_score, f1_score
+    from sklearn.model_selection import RepeatedKFold
+
+    unique_subjects = np.unique(groups)
+    rkf = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=seed)
+
+    nsamples = x.shape[0]
+    oof_preds = np.empty((n_repeats, nsamples), dtype=np.int64)
+    oof_scores: Array2D[np.floating[Any]] | None = None
+    fold_bacc: list[float] = []
+    fold_f1: list[float] = []
+
+    for fold_idx, (train_idx, test_idx) in enumerate(rkf.split(unique_subjects)):
+        rep = fold_idx // n_splits
+        train_mask = np.isin(groups, unique_subjects[train_idx])
+        test_mask = np.isin(groups, unique_subjects[test_idx])
+
+        x_tr_np = x[train_mask]
+        y_tr_np = y[train_mask]
+        x_te_np = x[test_mask]
+        y_te_np = y[test_mask]
+
+        if zscore_features:
+            mean = np.mean(x_tr_np, axis=0)
+            std = np.std(x_tr_np, axis=0)
+            std = np.where(std > 1.0e-12, std, 1.0)
+            x_tr_np = (x_tr_np - mean) / std
+            x_te_np = (x_te_np - mean) / std
+
+        x_train_list = [
+            torch.from_numpy(x_tr_np[y_tr_np == c]).to(device) for c in range(nclasses)
+        ]
+        y_train_list = list(range(nclasses))
+        x_test_t = torch.from_numpy(x_te_np).to(device)
+
+        y_pred_t, scores_t = _fit_and_predict(
+            x_train_list,
+            y_train_list,
+            x_test_t,
+            method,
+            seed=seed + fold_idx,
+        )
+        y_pred = y_pred_t.detach().cpu().numpy()
+        scores = scores_t.detach().cpu().numpy() if scores_t is not None else None
+
+        oof_preds[rep, test_mask] = y_pred
+        if scores is not None and scores.ndim == 1:
+            if oof_scores is None:
+                oof_scores = np.empty((n_repeats, nsamples), dtype=np.float64)
+            oof_scores[rep, test_mask] = scores
+
+        fold_bacc.append(balanced_accuracy_score(y_te_np, y_pred))
+        fold_f1.append(f1_score(y_te_np, y_pred, average="macro"))
+
+    return oof_preds, oof_scores, fold_bacc, fold_f1
+
+
 def main(
     filename: pathlib.Path,
     *,
     method: ClassificationMethod = "svm",
+    binary: bool = False,
     zscore_features: bool = True,
+    include_groups: tuple[str, ...] | None = None,
+    exclude_groups: tuple[str, ...] | None = None,
+    n_splits: int = 5,
+    n_repeats: int = 5,
+    n_permutations: int = 0,
+    seed: int = 42,
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
 ) -> int:
-    ret = 0
+    from sklearn.metrics import balanced_accuracy_score, confusion_matrix, roc_auc_score
+
     device = torch.get_default_device()
     log.info("Device: %s", device)
 
@@ -106,121 +288,119 @@ def main(
         return 1
 
     try:
-        ds = load_feature_datasets(filename)
+        ds = load_feature_datasets(filename, binary=binary)
     except Exception as exc:
         log.error("Failed to load features from '%s': %s", filename, exc)
         return 1
 
-    sample_counts = {np.asarray(x).shape[0] for x in ds.x}
-    if len(sample_counts) != 1:
-        log.error(
-            "Expected all classes to have the same number of samples: %s.",
-            sorted(sample_counts),
-        )
-        return 1
+    x, selected_descrs = filter_feature_groups(
+        ds, include_groups=include_groups, exclude_groups=exclude_groups
+    )
+    groups = np.concatenate(ds.groups, axis=0)
+    y = np.concatenate([
+        np.full(xi.shape[0], c, dtype=np.int64) for c, xi in enumerate(ds.x)
+    ])
+    class_names = ds.class_names
+    nclasses = len(class_names)
+    unique_subjects = np.unique(groups)
 
-    basename = filename.with_suffix("") if outfile is None else outfile.with_suffix("")
-    suffix = "-zscore" if zscore_features else ""
-    basename = basename.with_stem(f"{basename.stem}{suffix}")
+    log.info(
+        "Evaluating '%s' (%s, %s, z=%s): %d samples (%d subjects), %d features (%s).",
+        filename.stem,
+        "binary" if binary else "multiclass",
+        method.upper(),
+        zscore_features,
+        x.shape[0],
+        unique_subjects.size,
+        x.shape[1],
+        ", ".join(selected_descrs),
+    )
 
-    from nneuroutil.data import random_split
+    oof_preds, oof_scores, fold_bacc, fold_f1 = _run_cv(
+        x,
+        y,
+        groups,
+        nclasses=nclasses,
+        method=method,
+        zscore_features=zscore_features,
+        n_splits=n_splits,
+        n_repeats=n_repeats,
+        seed=seed,
+        device=device,
+    )
 
-    x_train: list[torch.Tensor] = []
-    y_train: list[int] = []
+    mean_bacc = np.mean(fold_bacc)
+    std_bacc = np.std(fold_bacc)
+    mean_f1 = np.mean(fold_f1)
+    ci_lo, ci_hi = _bootstrap_subject_ci(y, oof_preds, groups, seed=seed)
 
-    x_test: list[torch.Tensor] = []
-    y_test: list[int] = []
+    roc_auc_str = ""
+    if binary and oof_scores is not None:
+        aucs = [roc_auc_score(y, oof_scores[r]) for r in range(n_repeats)]
+        roc_auc_str = f" | ROC-AUC: {np.mean(aucs):.4f} +/- {np.std(aucs):.4f}"
 
-    idx_train: torch.Tensor | None = None
-    idx_test: torch.Tensor | None = None
-
-    for label, x_i in enumerate(ds.x):
-        x = torch.from_numpy(np.asarray(x_i)).to(device)
-
-        # split each dataset for training / testing as is tradition
-        # NOTE: we only do this once because the various datasets seem to be the
-        # same subjects in the same order, so this doesn't contaminate
-        if idx_train is None and idx_test is None:
-            (idx_train,), (idx_test,) = cast(
-                tuple[tuple[torch.Tensor], tuple[torch.Tensor]],
-                random_split((torch.arange(x.shape[0]),), (0.6, 0.4)),
+    perm_str = ""
+    if n_permutations > 0:
+        rng = np.random.default_rng(seed)
+        null_baccs = np.empty(n_permutations, dtype=np.float64)
+        subj_rows = [np.flatnonzero(groups == s) for s in unique_subjects]
+        for p in range(n_permutations):
+            y_perm = y.copy()
+            for rows in subj_rows:
+                y_perm[rows] = rng.permutation(y_perm[rows])
+            _, _, p_bacc, _ = _run_cv(
+                x,
+                y_perm,
+                groups,
+                nclasses=nclasses,
+                method=method,
+                zscore_features=zscore_features,
+                n_splits=n_splits,
+                n_repeats=1,
+                seed=seed + 1000 + p,
+                device=device,
             )
+            null_baccs[p] = np.mean(p_bacc)
+        p_val = (np.sum(null_baccs >= mean_bacc) + 1) / (n_permutations + 1)
+        perm_str = f" | perm p={p_val:.4g} (null={np.mean(null_baccs):.4f})"
 
-        x_train.append(x[idx_train])
-        y_train.append(label)
+    log.info(
+        "Bal. Acc.: %.4f +/- %.4f (95%% CI [%.4f, %.4f]) | Macro-F1: %.4f%s%s",
+        mean_bacc,
+        std_bacc,
+        ci_lo,
+        ci_hi,
+        mean_f1,
+        roc_auc_str,
+        perm_str,
+    )
 
-        x_test.append(x[idx_test])
-        y_test.append(label)
+    y_rep = np.repeat(y[None, :], n_repeats, axis=0)
+    cm = confusion_matrix(
+        y_rep.ravel(),
+        oof_preds.ravel(),  # ty: ignore[missing-attribute]
+        labels=list(range(nclasses)),
+    )
+    overall_bacc = balanced_accuracy_score(y_rep.ravel(), oof_preds.ravel())  # ty: ignore[missing-attribute]
 
+    suffix = "-binary" if binary else "-multiclass"
     if zscore_features:
-        mean = torch.mean(torch.cat(x_train, dim=0), dim=0)
-        std = torch.std(torch.cat(x_train, dim=0), dim=0)
-        std = torch.where(std > 0.0, std, torch.ones_like(std))
+        suffix += "-zscore"
+    basename = (
+        filename.with_stem(f"{filename.stem}{suffix}").with_suffix("")
+        if outfile is None
+        else outfile.with_suffix("")
+    )
+    plot_confusion(
+        basename,
+        cm,
+        class_names,
+        method=method,
+        balanced_acc=overall_bacc,
+        overwrite=overwrite,
+    )
 
-        x_train = [(x - mean) / std for x in x_train]
-        x_test = [(x - mean) / std for x in x_test]
-
-    y_pred: list[Any] = []
-
-    if method == "lda":
-        from nneuroutil.classifier import classify_linear_discriminant_analysis
-
-        lda = classify_linear_discriminant_analysis(x_train, y_train)
-
-        for i, (x_test_i, y_test_i) in enumerate(zip(x_test, y_test, strict=True)):
-            y_test_lda = lda.predict(x_test_i, metric="l2")
-            matched = torch.sum(torch.eq(y_test_lda, y_test_i))  # ty: ignore[no-matching-overload]
-
-            log.info(
-                "%20s: Match %d out of %d (%.2f%%)",
-                ds.class_names[i],
-                matched,
-                x_test_i.shape[0],
-                matched / x_test_i.shape[0] * 100,
-            )
-            y_pred.append(y_test_lda)
-    elif method == "svm":
-        from nneuroutil.classifier import classify_support_vector_machine
-
-        svm = classify_support_vector_machine(x_train, y_train)
-
-        for i, (x_test_i, y_test_i) in enumerate(zip(x_test, y_test, strict=True)):
-            y_test_lda = svm.predict(x_test_i)
-            matched = torch.sum(torch.eq(y_test_lda, y_test_i))  # ty: ignore[no-matching-overload]
-
-            log.info(
-                "%20s: Match %d out of %d (%.2f%%)",
-                ds.class_names[i],
-                matched,
-                x_test_i.shape[0],
-                matched / x_test_i.shape[0] * 100,
-            )
-            y_pred.append(y_test_lda)
-    elif method == "mlp":
-        from torchlib import classify_multilayer_perceptron
-
-        mlp = classify_multilayer_perceptron(
-            x_train, y_train, learning_rate_init=1.0e-2, max_iter=400
-        )
-
-        for i, (x_test_i, y_test_i) in enumerate(zip(x_test, y_test, strict=True)):
-            y_test_mlp = mlp.predict(x_test_i)
-            matched = torch.sum(torch.eq(y_test_mlp, y_test_i))
-
-            log.info(
-                "%20s: Match %d out of %d (%.2f%%)",
-                ds.class_names[i],
-                matched,
-                x_test_i.shape[0],
-                matched / x_test_i.shape[0] * 100,
-            )
-            y_pred.append(y_test_mlp)
-    else:
-        raise ValueError(f"unknown method: {method!r}")
-
-    plot_confusion(basename, y_pred, ds.class_names, method=method, overwrite=overwrite)
-
-    return ret
+    return 0
 
 
 if __name__ == "__main__":
@@ -249,6 +429,47 @@ if __name__ == "__main__":
         choices=get_args(ClassificationMethod),
         default="lda",
         help="The method used to do the classification",
+    )
+    parser.add_argument(
+        "--binary",
+        action="store_true",
+        help="Group classes by scan type (Functional vs. Structural)",
+    )
+    parser.add_argument(
+        "--include-groups",
+        action="append",
+        default=None,
+        help="Only keep feature groups matching these substrings",
+    )
+    parser.add_argument(
+        "--exclude-groups",
+        action="append",
+        default=None,
+        help="Drop feature groups matching these substrings",
+    )
+    parser.add_argument(
+        "--n-splits",
+        type=int,
+        default=5,
+        help="Number of subject-grouped CV folds",
+    )
+    parser.add_argument(
+        "--n-repeats",
+        type=int,
+        default=5,
+        help="Number of repeated CV runs",
+    )
+    parser.add_argument(
+        "--n-permutations",
+        type=int,
+        default=0,
+        help="Number of subject-level label permutations (0 to skip)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for CV splits and permutations",
     )
     parser.add_argument(
         "--no-zscore",
@@ -288,7 +509,18 @@ if __name__ == "__main__":
                 args.filename,
                 outfile=args.outfile,
                 method=args.method,
+                binary=args.binary,
                 zscore_features=args.zscore,
+                include_groups=(
+                    tuple(args.include_groups) if args.include_groups else None
+                ),
+                exclude_groups=(
+                    tuple(args.exclude_groups) if args.exclude_groups else None
+                ),
+                n_splits=args.n_splits,
+                n_repeats=args.n_repeats,
+                n_permutations=args.n_permutations,
+                seed=args.seed,
                 overwrite=args.force,
             )
         )
