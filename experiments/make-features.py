@@ -72,6 +72,29 @@ def make_matrix_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
 # }}}
 
 
+# {{{ make_scale_features
+
+
+def make_scale_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
+    n, m = mat.shape
+    if n != m:
+        raise ValueError(f"'mat' is not square: {mat.shape}")
+
+    fro = np.linalg.norm(mat, ord="fro")
+    eigs = np.linalg.eigvalsh(mat)
+    spectral_radius = np.max(np.abs(eigs))
+    entry_range = np.max(mat) - np.min(mat)
+
+    features = np.array([fro, spectral_radius, entry_range], dtype=np.float64)
+    starts = np.array([0, 1, 2, 3])
+    descrs = ("Frobenius Norm", "Spectral Radius", "Entry Range")
+
+    return FeatureDataset(x=features, starts=starts, descrs=descrs)
+
+
+# }}}
+
+
 # {{{ make_eig_features
 
 
@@ -592,6 +615,32 @@ def make_dmd_features(
 # }}}
 
 
+# {{{ make_image_features
+
+
+def make_image_features(
+    binary: Array2D[np.integer[Any]],
+    *,
+    size: int = 32,
+) -> FeatureDataset:
+    """Block-average a binary equi-M set image to a ``size x size`` image."""
+    height, width = binary.shape
+    if height % size != 0 or width % size != 0:
+        raise ValueError(f"image size {height}x{width} is not divisible by {size}")
+
+    blocks = binary.reshape(size, height // size, size, width // size)
+    features = blocks.mean(axis=(1, 3), dtype=np.float64).reshape(-1)
+
+    return FeatureDataset(
+        x=features,
+        starts=np.array([0, features.size]),
+        descrs=("Image",),
+    )
+
+
+# }}}
+
+
 # {{{ make_geometry_features
 
 
@@ -751,7 +800,9 @@ def make_features(
     filenames: Sequence[pathlib.Path],
     *,
     outfile: pathlib.Path | None = None,
-    ftype: Literal["local", "global", "matrix", "dmd", "eig", "geometry"] = "matrix",
+    ftype: Literal[
+        "local", "global", "matrix", "dmd", "eig", "geometry", "image", "scale"
+    ] = "matrix",
     key: str | None = None,
     eps: float | None = None,
     density: float | None = None,
@@ -769,7 +820,7 @@ def make_features(
         return 1
 
     if key is None:
-        key = "images_binary" if ftype == "geometry" else "matrices"
+        key = "images_binary" if ftype in {"geometry", "image"} else "matrices"
 
     # {{{ load matrices
 
@@ -816,7 +867,7 @@ def make_features(
             except ValueError:
                 feps = -1.0
 
-        if ftype == "geometry":
+        if ftype in {"geometry", "image"}:
             result = matrices
             bbox = data["images_bbox"]
         else:
@@ -872,6 +923,8 @@ def make_features(
             try:  # ruff: ignore[too-many-statements-in-try-clause]
                 if ftype == "matrix":
                     features = make_matrix_features(mat_i)
+                elif ftype == "scale":
+                    features = make_scale_features(mat_i)
                 elif ftype == "eig":
                     features = make_eig_features(mat_i)
                 elif ftype == "local":
@@ -885,6 +938,8 @@ def make_features(
                         mat_i,
                         (xmin, xmax, ymin, ymax),
                     )
+                elif ftype == "image":
+                    features = make_image_features(mat_i)
                 else:
                     raise ValueError(f"unknown feature type: {ftype!r}")
             except Exception as exc:
@@ -943,7 +998,16 @@ if __name__ == "__main__":
     parser.add_argument("filenames", nargs="+", type=pathlib.Path)
     parser.add_argument(
         "--features",
-        choices=("local", "global", "matrix", "dmd", "eig", "geometry"),
+        choices=(
+            "local",
+            "global",
+            "matrix",
+            "dmd",
+            "eig",
+            "geometry",
+            "image",
+            "scale",
+        ),
         default="matrix",
         help="Type of the features to compute",
     )
