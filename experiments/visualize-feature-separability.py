@@ -322,11 +322,6 @@ def compute_task_subject_variance(
 # {{{ plots
 
 
-def clean_label(name: str) -> str:
-    """Shorten task name for clean plotting."""
-    return name.split("_", maxsplit=1)[0]
-
-
 def plot_rdm(
     basename: pathlib.Path,
     rdm: Array2D[np.floating[Any]],
@@ -335,7 +330,7 @@ def plot_rdm(
     overwrite: bool = False,
 ) -> None:
     """Plot Representational Dissimilarity Matrix."""
-    labels = [clean_label(n) for n in label_names]
+    labels = list(label_names)
     nclasses = len(labels)
 
     with figure(
@@ -411,7 +406,7 @@ def plot_lda(
                 lda.test_coords[mask, 1],
                 s=28,
                 alpha=0.75,
-                label=clean_label(class_name),
+                label=class_name,
             )
             ax.scatter(
                 lda.proj_centroids[i, 0],
@@ -508,7 +503,7 @@ def plot_decoding_cv(
     overwrite: bool = False,
 ) -> None:
     """Plot cross-validated decoding confusion matrix and per-class accuracy."""
-    labels = [clean_label(n) for n in label_names]
+    labels = list(label_names)
     nclasses = len(labels)
     chance = 1.0 / nclasses
 

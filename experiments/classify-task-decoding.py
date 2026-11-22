@@ -218,12 +218,7 @@ def main(
     else:
         raise ValueError(f"unknown method: {method!r}")
 
-    class_names = tuple([
-        # NOTE: classes are named `Emotion_LR_Task` or `task-emotion-fractal`
-        (name.split("_")[0] if "_" in name else name.split("-")[1]).title()
-        for name in ds.class_names
-    ])
-    plot_confusion(basename, y_pred, class_names, method=method, overwrite=overwrite)
+    plot_confusion(basename, y_pred, ds.class_names, method=method, overwrite=overwrite)
 
     return ret
 

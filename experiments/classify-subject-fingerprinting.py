@@ -45,7 +45,7 @@ EPS = 1.0e-12
 
 
 def clean_label(name: str) -> str:
-    """Shorten a task name for clean plotting."""
+    """Shorten a dataset name for clean plotting."""
     label = name.split("_", maxsplit=1)[0]
     return label.removeprefix("task-").removesuffix("-fractal")
 
@@ -299,7 +299,7 @@ def plot_identifiability(
     *,
     overwrite: bool = False,
 ) -> None:
-    labels = [clean_label(name) for name in label_names]
+    labels = list(label_names)
     ntasks = len(labels)
 
     with figure(

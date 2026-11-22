@@ -108,6 +108,27 @@ class FeatureDataset(NamedTuple):
 
 SCAN_TYPE_LABELS = {"fmri": "Functional", "mri": "Structural"}
 
+TASK_LABELS = {
+    "emotion": "Emotion",
+    "gambling": "Gambling",
+    "language": "Language",
+    "relational": "Relational",
+    "rest": "Rest",
+    "social": "Social",
+    "wm": "WM",
+}
+
+
+def _clean_class_name(name: str) -> str:
+    """Reduce a raw class key such as ``task-emotion-fractal`` to a label."""
+    if "_" in name:
+        name, _ = name.split("_", maxsplit=1)
+    else:
+        parts = name.split("-")
+        name = parts[0] if len(parts) == 2 else parts[1]
+
+    return upper if (upper := name.upper()) == "WM" else name.title()
+
 
 def flatten_feature_datasets(
     ds: FeatureDataset,
@@ -205,7 +226,7 @@ def load_feature_datasets(
         class_names = [SCAN_TYPE_LABELS[group] for group in group_types]
     else:
         selections = [[i] for i, name in enumerate(scan_types) if name == "fmri"]
-        class_names = [classes[indices[0]] for indices in selections]
+        class_names = [_clean_class_name(classes[indices[0]]) for indices in selections]
 
     xs: list[Array2D[np.floating[Any]]] = []
     groups: list[Array1D[np.integer[Any]]] = []

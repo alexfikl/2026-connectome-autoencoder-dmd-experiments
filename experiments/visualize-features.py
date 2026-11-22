@@ -180,7 +180,7 @@ def plot_embedding(
                 coords[mask, 1],
                 s=18,
                 alpha=0.75,
-                label=name.split("_")[0],
+                label=name,
             )
 
         ax.set_xlabel("Component 1")
