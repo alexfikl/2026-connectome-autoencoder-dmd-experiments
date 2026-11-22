@@ -70,19 +70,19 @@ def _fit_and_predict(
     method: ClassificationMethod,
     *,
     seed: int,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Fit classifier on training tensors and return ``(y_pred, scores)``."""
+) -> torch.Tensor:
+    """Fit classifier on training tensors and return predicted labels."""
     if method == "lda":
         from nneuroutil.classifier import classify_linear_discriminant_analysis
 
         clf = classify_linear_discriminant_analysis(x_train_list, y_train_list)
-        return clf.predict(x_test, metric="l2"), None  # ty: ignore[invalid-explicit-return]
+        return clf.predict(x_test, metric="l2")  # ty: ignore[invalid-explicit-return]
 
     if method == "svm":
         from nneuroutil.classifier import classify_support_vector_machine
 
         clf = classify_support_vector_machine(x_train_list, y_train_list)
-        return clf.predict(x_test), None  # ty: ignore[invalid-explicit-return]
+        return clf.predict(x_test)  # ty: ignore[invalid-explicit-return]
 
     if method == "mlp":
         from torchlib import classify_multilayer_perceptron
@@ -91,14 +91,7 @@ def _fit_and_predict(
         clf = classify_multilayer_perceptron(
             x_train_list, y_train_list, learning_rate_init=1.0e-2, max_iter=400
         )
-
-        y_pred = clf.predict(x_test)
-        with torch.no_grad():
-            logits = clf.model(x_test.to(dtype=clf.dtype, device=clf.device))
-            probs = torch.softmax(logits, dim=1)
-
-        scores = probs[:, 1] if probs.shape[1] == 2 else probs
-        return y_pred, scores
+        return clf.predict(x_test)
 
     raise ValueError(f"unknown method: {method!r}")
 
@@ -201,7 +194,6 @@ def _run_cv(
     device: torch.device | str,
 ) -> tuple[
     Array2D[np.integer[Any]],
-    Array2D[np.floating[Any]] | None,
     list[float],
     list[float],
 ]:
@@ -214,7 +206,6 @@ def _run_cv(
 
     nsamples = x.shape[0]
     oof_preds = np.empty((n_repeats, nsamples), dtype=np.int64)
-    oof_scores: Array2D[np.floating[Any]] | None = None
     fold_bacc: list[float] = []
     fold_f1: list[float] = []
 
@@ -241,7 +232,7 @@ def _run_cv(
         y_train_list = list(range(nclasses))
         x_test_t = torch.from_numpy(x_te_np).to(device)
 
-        y_pred_t, scores_t = _fit_and_predict(
+        y_pred_t = _fit_and_predict(
             x_train_list,
             y_train_list,
             x_test_t,
@@ -249,18 +240,12 @@ def _run_cv(
             seed=seed + fold_idx,
         )
         y_pred = y_pred_t.detach().cpu().numpy()
-        scores = scores_t.detach().cpu().numpy() if scores_t is not None else None
 
         oof_preds[rep, test_mask] = y_pred
-        if scores is not None and scores.ndim == 1:
-            if oof_scores is None:
-                oof_scores = np.empty((n_repeats, nsamples), dtype=np.float64)
-            oof_scores[rep, test_mask] = scores
-
         fold_bacc.append(balanced_accuracy_score(y_te_np, y_pred))
         fold_f1.append(f1_score(y_te_np, y_pred, average="macro"))
 
-    return oof_preds, oof_scores, fold_bacc, fold_f1
+    return oof_preds, fold_bacc, fold_f1
 
 
 def main(
@@ -278,7 +263,7 @@ def main(
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
 ) -> int:
-    from sklearn.metrics import balanced_accuracy_score, confusion_matrix, roc_auc_score
+    from sklearn.metrics import balanced_accuracy_score, confusion_matrix
 
     device = torch.get_default_device()
     log.info("Device: %s", device)
@@ -316,7 +301,7 @@ def main(
         ", ".join(selected_descrs),
     )
 
-    oof_preds, oof_scores, fold_bacc, fold_f1 = _run_cv(
+    oof_preds, fold_bacc, fold_f1 = _run_cv(
         x,
         y,
         groups,
@@ -334,11 +319,6 @@ def main(
     mean_f1 = np.mean(fold_f1)
     ci_lo, ci_hi = _bootstrap_subject_ci(y, oof_preds, groups, seed=seed)
 
-    roc_auc_str = ""
-    if binary and oof_scores is not None:
-        aucs = [roc_auc_score(y, oof_scores[r]) for r in range(n_repeats)]
-        roc_auc_str = f" | ROC-AUC: {np.mean(aucs):.4f} +/- {np.std(aucs):.4f}"
-
     perm_str = ""
     if n_permutations > 0:
         rng = np.random.default_rng(seed)
@@ -348,7 +328,7 @@ def main(
             y_perm = y.copy()
             for rows in subj_rows:
                 y_perm[rows] = rng.permutation(y_perm[rows])
-            _, _, p_bacc, _ = _run_cv(
+            _, p_bacc, _ = _run_cv(
                 x,
                 y_perm,
                 groups,
@@ -365,23 +345,22 @@ def main(
         perm_str = f" | perm p={p_val:.4g} (null={np.mean(null_baccs):.4f})"
 
     log.info(
-        "Bal. Acc.: %.4f +/- %.4f (95%% CI [%.4f, %.4f]) | Macro-F1: %.4f%s%s",
+        "Bal. Acc.: %.4f +/- %.4f (95%% CI [%.4f, %.4f]) | Macro-F1: %.4f%s",
         mean_bacc,
         std_bacc,
         ci_lo,
         ci_hi,
         mean_f1,
-        roc_auc_str,
         perm_str,
     )
 
     y_rep = np.repeat(y[None, :], n_repeats, axis=0)
     cm = confusion_matrix(
-        y_rep.ravel(),
-        oof_preds.ravel(),  # ty: ignore[missing-attribute]
+        np.ravel(y_rep),
+        np.ravel(oof_preds),
         labels=list(range(nclasses)),
     )
-    overall_bacc = balanced_accuracy_score(y_rep.ravel(), oof_preds.ravel())  # ty: ignore[missing-attribute]
+    overall_bacc = balanced_accuracy_score(np.ravel(y_rep), np.ravel(oof_preds))
 
     suffix = "-binary" if binary else "-multiclass"
     if zscore_features:
