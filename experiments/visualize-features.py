@@ -198,7 +198,7 @@ def main(
     outfile: pathlib.Path | None = None,
     pca_components: int = 50,
     perplexity: float = 30.0,
-    standardize_features: bool = False,
+    zscore_features: bool = True,
     eps: float = 1.0e-12,
     exclude: tuple[str, ...] | None = None,
     overwrite: bool = False,
@@ -220,7 +220,7 @@ def main(
             ret = 1
             continue
 
-        suffix = "-zscore" if standardize_features else ""
+        suffix = "-zscore" if zscore_features else ""
         if outfile is None:
             basename = filename.with_stem(f"{filename.stem}{suffix}").with_suffix("")
         elif len(filenames) == 1:
@@ -246,7 +246,7 @@ def main(
         # flatten the (subjects, classes, features) tensor for the embeddings
         x = np.reshape(x, (nsubjects * nclasses, nfeatures))
 
-        if standardize_features:
+        if zscore_features:
             x = zscore(x, ddof=1)
 
         plot_pca_variance(basename, x, overwrite=overwrite)
@@ -307,9 +307,10 @@ if __name__ == "__main__":
         help="Perplexity used by t-SNE",
     )
     parser.add_argument(
-        "--standardize",
-        action="store_true",
-        help="Standardize each feature to zero mean and unit variance",
+        "--no-zscore",
+        action="store_false",
+        dest="zscore",
+        help="Disable z-scoring each feature to zero mean and unit variance",
     )
     parser.add_argument(
         "-o",
@@ -345,7 +346,7 @@ if __name__ == "__main__":
             outfile=args.outfile,
             pca_components=args.pca_components,
             perplexity=args.perplexity,
-            standardize_features=args.standardize,
+            zscore_features=args.zscore,
             exclude=args.exclude,
             overwrite=args.force,
         )

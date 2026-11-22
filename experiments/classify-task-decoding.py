@@ -93,7 +93,7 @@ def main(
     filename: pathlib.Path,
     *,
     method: ClassificationMethod = "svm",
-    standardize_features: bool = False,
+    zscore_features: bool = True,
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
 ) -> int:
@@ -112,6 +112,8 @@ def main(
         return 1
 
     basename = filename.with_suffix("") if outfile is None else outfile.with_suffix("")
+    suffix = "-zscore" if zscore_features else ""
+    basename = basename.with_stem(f"{basename.stem}{suffix}")
 
     from nneuroutil.data import random_split
 
@@ -142,7 +144,7 @@ def main(
         x_test.append(x[idx_test])
         y_test.append(label)
 
-    if standardize_features:
+    if zscore_features:
         mean = torch.mean(torch.cat(x_train, dim=0), dim=0)
         std = torch.std(torch.cat(x_train, dim=0), dim=0)
         std = torch.where(std > 0.0, std, torch.ones_like(std))
@@ -246,9 +248,10 @@ if __name__ == "__main__":
         help="The method used to do the classification",
     )
     parser.add_argument(
-        "--standardize",
-        action="store_true",
-        help="Standardize each feature to zero mean and unit variance",
+        "--no-zscore",
+        action="store_false",
+        dest="zscore",
+        help="Disable z-scoring each feature to zero mean and unit variance",
     )
     parser.add_argument(
         "-o",
@@ -282,7 +285,7 @@ if __name__ == "__main__":
                 args.filename,
                 outfile=args.outfile,
                 method=args.method,
-                standardize_features=args.standardize,
+                zscore_features=args.zscore,
                 overwrite=args.force,
             )
         )

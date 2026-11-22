@@ -75,7 +75,7 @@ def compute_pca_lda(
     labels: Array3D[np.integer[Any]],
     *,
     pca_max_components: int = 50,
-    standardize: bool = False,
+    zscore: bool = True,
     random_state: int = 42,
 ) -> PcaLdaResults:
     """Fit PCA+LDA on training subjects and project held-out test subjects."""
@@ -100,7 +100,7 @@ def compute_pca_lda(
     max_components = min(nclasses - 1, nfeatures)
 
     estimators = []
-    if standardize:
+    if zscore:
         estimators.append(StandardScaler())
 
     # When features exceed samples, project with PCA first to avoid singular Sw
@@ -142,7 +142,7 @@ def compute_gsvd_lda(
     x: Array3D[np.floating[Any]],
     labels: Array3D[np.integer[Any]],
     *,
-    standardize: bool = False,
+    zscore: bool = True,
     random_state: int = 42,
 ) -> GsvdLdaResults:
     """Fit G-SVD LDA on training subjects and project held-out test subjects."""
@@ -160,7 +160,7 @@ def compute_gsvd_lda(
     x_train = x[train_idx]
     x_test = x[test_idx]
 
-    if standardize:
+    if zscore:
         scaler = StandardScaler()
         scaler.fit(np.reshape(x_train, (train_idx.size * nclasses, nfeatures)))
         x_train = np.reshape(
@@ -213,7 +213,7 @@ def compute_cross_validated_decoding(
     labels: Array3D[np.integer[Any]],
     *,
     cv_folds: int = 5,
-    standardize: bool = False,
+    zscore: bool = True,
     random_state: int = 42,
 ) -> DecodingResults:
     """Evaluate linear decodability using cross-validation."""
@@ -228,7 +228,7 @@ def compute_cross_validated_decoding(
     labels = np.reshape(labels, -1)
 
     clf = RidgeClassifier(alpha=1.0)
-    if standardize:
+    if zscore:
         # NOTE: the scaler is fit on the training folds only
         clf = make_pipeline(StandardScaler(), clf)
 
@@ -707,7 +707,7 @@ def main(
     *,
     outfile: pathlib.Path | None = None,
     cv_folds: int = 5,
-    standardize: bool = False,
+    zscore: bool = True,
     exclude: tuple[str, ...] | None = None,
     overwrite: bool = False,
 ) -> int:
@@ -733,6 +733,9 @@ def main(
         else:
             basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}")
 
+        suffix = "-zscore" if zscore else ""
+        basename = basename.with_stem(f"{basename.stem}{suffix}")
+
         nsubjects, nclasses, nfeatures = ds.x.shape
         log.info(
             "Loaded '%s': %d samples, %d features, %d classes.",
@@ -751,13 +754,13 @@ def main(
 
         # 2. Held-out PCA+LDA
         log.info("Computing held-out PCA+LDA projection...")
-        lda = compute_pca_lda(ds.x, ds.labels, standardize=standardize)
+        lda = compute_pca_lda(ds.x, ds.labels, zscore=zscore)
         log.info("Held-out PCA+LDA balanced accuracy: %.2f%%", lda.test_accuracy * 100)
         plot_pca_lda(basename, lda, ds, overwrite=overwrite)
 
         # 2b. Held-out G-SVD LDA
         log.info("Computing held-out G-SVD LDA projection...")
-        gsvd_lda = compute_gsvd_lda(ds.x, ds.labels, standardize=standardize)
+        gsvd_lda = compute_gsvd_lda(ds.x, ds.labels, zscore=zscore)
         log.info(
             "Held-out G-SVD LDA balanced accuracy: %.2f%%",
             gsvd_lda.test_accuracy * 100,
@@ -773,7 +776,7 @@ def main(
         # 4. Cross-validated linear decoding
         log.info("Evaluating cross-validated decodability (%d-fold)...", cv_folds)
         decoding = compute_cross_validated_decoding(
-            ds.x, ds.labels, cv_folds=cv_folds, standardize=standardize
+            ds.x, ds.labels, cv_folds=cv_folds, zscore=zscore
         )
         log.info(
             "Cross-validated balanced accuracy: %.2f%%",
@@ -826,9 +829,10 @@ if __name__ == "__main__":
         help="Number of cross-validation folds for decoding",
     )
     parser.add_argument(
-        "--standardize",
-        action="store_true",
-        help="Standardize each feature to zero mean and unit variance",
+        "--no-zscore",
+        action="store_false",
+        dest="zscore",
+        help="Disable z-scoring each feature to zero mean and unit variance",
     )
     parser.add_argument(
         "--force",
@@ -851,7 +855,7 @@ if __name__ == "__main__":
             args.filenames,
             outfile=args.outfile,
             cv_folds=args.cv_folds,
-            standardize=args.standardize,
+            zscore=args.zscore,
             exclude=args.exclude,
             overwrite=args.force,
         )
