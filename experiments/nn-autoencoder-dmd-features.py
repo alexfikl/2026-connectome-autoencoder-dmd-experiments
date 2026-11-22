@@ -203,6 +203,24 @@ def _compute_one(
 
     device = torch.get_default_device()
     checkpoint = torch.load(weightsfile, map_location=device, weights_only=True)
+
+    inputfile = checkpoint.get("inputfile")
+    if inputfile is None:
+        log.error("Checkpoint does not contain an 'inputfile': '%s'.", weightsfile)
+        return 1
+
+    inputfile = pathlib.Path(inputfile)
+    if not inputfile.exists():
+        log.error("Input file does not exist: '%s'.", inputfile)
+        return 1
+
+    with np.load(inputfile) as data:
+        if "scan_type" not in data:
+            log.error("Input file does not contain 'scan_type': '%s'.", inputfile)
+            return 1
+
+        scan_type = str(data["scan_type"])
+
     config = dmdaelib.DMDConfig.from_sources(checkpoint["config"])
     dmdc = dmdaelib.load_latent_dmd(checkpoint)
 
@@ -241,6 +259,7 @@ def _compute_one(
     feats["dmdc_B"] = dmdc.B.detach().cpu().numpy()  # ty: ignore[missing-attribute]
     feats["x"], feats["starts"], descrs = make_feature_vector(feats)
     feats["descrs"] = np.array(descrs)
+    feats["scan_type"] = np.array(scan_type)
     if "loss_test" in checkpoint:
         feats["loss_test"] = checkpoint["loss_test"].detach().cpu().numpy()
 
@@ -317,6 +336,7 @@ def merge(
         return 1
 
     datasets = {}
+    scan_types: dict[str, str] = {}
     starts = None
     descrs = None
 
@@ -338,6 +358,7 @@ def merge(
             return 1
 
         xs = []
+        scan_type: str | None = None
         for filename in found:
             with np.load(filename) as data:
                 if starts is None:
@@ -350,12 +371,36 @@ def merge(
                     log.error("Inconsistent feature groups: '%s'.", filename)
                     return 1
 
+                if "scan_type" not in data:
+                    log.error("File does not contain 'scan_type': '%s'.", filename)
+                    return 1
+
+                filename_scan_type = str(data["scan_type"])
+                if scan_type is None:
+                    scan_type = filename_scan_type
+                elif filename_scan_type != scan_type:
+                    log.error(
+                        "Inconsistent scan types in '%s': '%s' != '%s'.",
+                        indir,
+                        scan_type,
+                        filename_scan_type,
+                    )
+                    return 1
+
                 xs.append(data["x"])
 
+        assert scan_type is not None
         datasets[name] = np.stack(xs)
+        scan_types[name] = scan_type
         log.info("Gathered %d matrices for '%s'.", len(xs), name)
 
-    np.savez(outfile, datasets=datasets, starts=starts, descrs=descrs)
+    np.savez(
+        outfile,
+        datasets=datasets,
+        scan_types=scan_types,
+        starts=starts,
+        descrs=descrs,
+    )
     log.info("Saved merged features: '%s'.", outfile)
 
     return 0

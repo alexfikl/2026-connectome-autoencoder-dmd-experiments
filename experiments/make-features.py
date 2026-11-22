@@ -776,6 +776,7 @@ def make_features(
     ret = 0
     inputs = {}
     bboxes = {}
+    scan_types: dict[str, str] = {}
 
     for filename in filenames:
         if not filename.exists():
@@ -800,6 +801,13 @@ def make_features(
             log.error("Expected a 3 dimensional array: %s.", matrices.shape)
             ret = 1
             continue
+
+        if "scan_type" not in data:
+            log.error("File does not contain 'scan_type' dataset: '%s'.", filename)
+            ret = 1
+            continue
+
+        scan_type = str(data["scan_type"])
 
         feps = eps
         if feps is None:
@@ -842,6 +850,7 @@ def make_features(
         assert filename.stem not in inputs
         inputs[filename.stem] = result
         bboxes[filename.stem] = bbox
+        scan_types[filename.stem] = scan_type
 
     # }}}
 
@@ -908,6 +917,7 @@ def make_features(
     np.savez(
         outfile,
         datasets=datasets,
+        scan_types=scan_types,
         starts=features.starts,
         descrs=features.descrs,
         density=density,
