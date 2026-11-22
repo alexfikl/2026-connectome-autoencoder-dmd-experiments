@@ -51,10 +51,12 @@ def clean_label(name: str) -> str:
 
 
 def to_tensor(ds: FeatureDataset) -> Array3D[np.floating[Any]]:
-    """Reshape matched-subject features to ``(ntasks, nsubjects, nfeatures)``."""
-    # NOTE: the dataset stores (nsubjects, ntasks, nfeatures), so this is just a
-    # zero-copy view with the task axis moved to the front
-    return np.transpose(ds.x, (1, 0, 2))
+    """Stack matched-subject features to ``(ntasks, nsubjects, nfeatures)``."""
+    shapes = {np.asarray(x).shape for x in ds.x}
+    if len(shapes) != 1:
+        raise ValueError("expected all classes to have the same shape")
+
+    return np.stack([np.asarray(x) for x in ds.x], axis=0)
 
 
 def _normalize_rows(x: Array2D[np.floating[Any]]) -> Array2D[np.floating[Any]]:

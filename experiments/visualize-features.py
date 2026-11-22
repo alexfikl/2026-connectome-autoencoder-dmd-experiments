@@ -10,7 +10,7 @@ from typing import Any, Literal, get_args
 
 import numpy as np
 
-from commonlib import FeatureDataset, load_feature_datasets
+from commonlib import flatten_feature_datasets, load_feature_datasets
 from nneuroutil.typing import Array1D, Array2D
 from nneuroutil.visualization import figure
 
@@ -23,6 +23,8 @@ Visualize the features computed by make-features.py.
 Each input file (e.g. ``dataset-features-matrix.npz``) is embedded into two
 dimensions and plotted colored by class. The explained variance of a PCA is
 also plotted to give an idea of the intrinsic dimensionality of the features.
+Only the functional (fMRI) classes are used by default; pass ``--binary`` to
+compare all functional scans against the structural scans.
 
 Example:
 
@@ -156,17 +158,13 @@ def plot_embedding(
     basename: pathlib.Path,
     method: EmbeddingMethod,
     coords: Array2D[np.floating[Any]],
-    ds: FeatureDataset,
+    labels: Array1D[np.integer[Any]],
+    class_names: tuple[str, ...],
     *,
     overwrite: bool = False,
 ) -> None:
-    nsubjects, nclasses, _ = ds.x.shape
-    labels = np.reshape(ds.labels, -1)
-
     silhouette = compute_silhouette(coords, labels)
     log.info("    Silhouette: %.3f", silhouette)
-
-    coords = np.reshape(coords, (nsubjects, nclasses, coords.shape[-1]))
 
     with figure(
         basename.with_stem(f"{basename.stem}-embedding-{method}"),
@@ -175,9 +173,15 @@ def plot_embedding(
     ) as fig:
         ax = fig.gca()
 
-        for i, name in enumerate(ds.class_names):
-            label = name.split("_")[0]
-            ax.scatter(coords[:, i, 0], coords[:, i, 1], s=18, alpha=0.75, label=label)
+        for i, name in enumerate(class_names):
+            mask = labels == i
+            ax.scatter(
+                coords[mask, 0],
+                coords[mask, 1],
+                s=18,
+                alpha=0.75,
+                label=name.split("_")[0],
+            )
 
         ax.set_xlabel("Component 1")
         ax.set_ylabel("Component 2")
@@ -200,7 +204,7 @@ def main(
     perplexity: float = 30.0,
     zscore_features: bool = True,
     eps: float = 1.0e-12,
-    exclude: tuple[str, ...] | None = None,
+    binary: bool = False,
     overwrite: bool = False,
 ) -> int:
     from scipy.stats import zscore
@@ -214,13 +218,17 @@ def main(
             continue
 
         try:
-            ds = load_feature_datasets(filename, exclude=exclude)
+            ds = load_feature_datasets(filename, binary=binary)
+            x, labels, _ = flatten_feature_datasets(ds)
         except Exception as exc:
             log.error("Failed to load features from '%s': %s", filename, exc)
             ret = 1
             continue
 
-        suffix = "-zscore" if zscore_features else ""
+        suffix = "-fmri-vs-mri" if binary else "-fmri-only"
+        if zscore_features:
+            suffix += "-zscore"
+
         if outfile is None:
             basename = filename.with_stem(f"{filename.stem}{suffix}").with_suffix("")
         elif len(filenames) == 1:
@@ -228,23 +236,18 @@ def main(
         else:
             basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}{suffix}")
 
-        x = ds.x
-        keep = np.var(x, axis=(0, 1)) > eps
+        keep = np.var(x, axis=0) > eps
         if not np.all(keep):
             log.info("Dropping %d constant features.", np.sum(~keep))
-            x = x[:, :, keep]
+            x = x[:, keep]
 
-        nsubjects, nclasses, nfeatures = x.shape
         log.info(
             "Features '%s': %d samples, %d features, %d classes.",
             filename.stem,
-            nsubjects * nclasses,
-            nfeatures,
-            nclasses,
+            x.shape[0],
+            x.shape[1],
+            len(ds.class_names),
         )
-
-        # flatten the (subjects, classes, features) tensor for the embeddings
-        x = np.reshape(x, (nsubjects * nclasses, nfeatures))
 
         if zscore_features:
             x = zscore(x, ddof=1)
@@ -259,7 +262,14 @@ def main(
                 pca_components=pca_components,
                 perplexity=perplexity,
             )
-            plot_embedding(basename, method, coords, ds, overwrite=overwrite)
+            plot_embedding(
+                basename,
+                method,
+                coords,
+                labels,
+                ds.class_names,
+                overwrite=overwrite,
+            )
 
     return ret
 
@@ -289,10 +299,12 @@ if __name__ == "__main__":
         help="Embedding method(s) to compute",
     )
     parser.add_argument(
-        "--exclude",
-        action="append",
-        default=None,
-        help="Classes to exclude from the visualization",
+        "--binary",
+        action="store_true",
+        help=(
+            "Compare functional against structural scans; the default only "
+            "compares the functional classes"
+        ),
     )
     parser.add_argument(
         "--pca-components",
@@ -347,7 +359,7 @@ if __name__ == "__main__":
             pca_components=args.pca_components,
             perplexity=args.perplexity,
             zscore_features=args.zscore,
-            exclude=args.exclude,
+            binary=args.binary,
             overwrite=args.force,
         )
     )

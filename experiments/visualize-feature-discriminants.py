@@ -10,7 +10,7 @@ from typing import Any, Literal, NamedTuple
 
 import numpy as np
 
-from commonlib import FeatureDataset, load_feature_datasets
+from commonlib import FeatureDataset, flatten_feature_datasets, load_feature_datasets
 from nneuroutil.typing import Array1D, Array2D
 from nneuroutil.visualization import figure, make_colorbar_axes
 
@@ -263,7 +263,6 @@ def main(
     outfile: pathlib.Path | None = None,
     top_k: int = 30,
     mi_seeds: int = 32,
-    exclude: tuple[str, ...] | None = None,
     overwrite: bool = False,
 ) -> int:
     ret = 0
@@ -275,7 +274,7 @@ def main(
             continue
 
         try:
-            ds = load_feature_datasets(filename, exclude=exclude)
+            ds = load_feature_datasets(filename)
         except Exception as exc:
             log.error("Failed to load features from '%s': %s", filename, exc)
             ret = 1
@@ -289,9 +288,9 @@ def main(
         else:
             basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}{suffix}")
 
-        nsubjects, nclasses, nfeatures = ds.x.shape
-        x = np.reshape(ds.x, (nsubjects * nclasses, nfeatures))
-        labels = np.reshape(ds.labels, -1)
+        x, labels, _ = flatten_feature_datasets(ds)
+        nclasses = len(ds.class_names)
+        nfeatures = x.shape[1]
 
         groups = expand_groups(ds.starts, ds.descrs, nfeatures)
         scores = compute_scores(x, labels, mi_seeds=mi_seeds)
@@ -299,7 +298,7 @@ def main(
         log.info(
             "Features '%s': %d samples, %d features, %d classes.",
             filename.stem,
-            nsubjects * nclasses,
+            x.shape[0],
             nfeatures,
             nclasses,
         )
@@ -382,12 +381,6 @@ if __name__ == "__main__":
     )
     parser.add_argument("filenames", nargs="+", type=pathlib.Path)
     parser.add_argument(
-        "--exclude",
-        action="append",
-        default=None,
-        help="Classes to exclude from the visualization",
-    )
-    parser.add_argument(
         "--top-k",
         type=int,
         default=30,
@@ -428,7 +421,6 @@ if __name__ == "__main__":
             outfile=args.outfile,
             top_k=args.top_k,
             mi_seeds=args.mi_seeds,
-            exclude=args.exclude,
             overwrite=args.force,
         )
     )

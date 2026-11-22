@@ -111,6 +111,14 @@ def main(
         log.error("Failed to load features from '%s': %s", filename, exc)
         return 1
 
+    sample_counts = {np.asarray(x).shape[0] for x in ds.x}
+    if len(sample_counts) != 1:
+        log.error(
+            "Expected all classes to have the same number of samples: %s.",
+            sorted(sample_counts),
+        )
+        return 1
+
     basename = filename.with_suffix("") if outfile is None else outfile.with_suffix("")
     suffix = "-zscore" if zscore_features else ""
     basename = basename.with_stem(f"{basename.stem}{suffix}")
@@ -126,8 +134,8 @@ def main(
     idx_train: torch.Tensor | None = None
     idx_test: torch.Tensor | None = None
 
-    for label in range(len(ds.class_names)):
-        x = torch.from_numpy(ds.x[:, label, :]).to(device)
+    for label, x_i in enumerate(ds.x):
+        x = torch.from_numpy(np.asarray(x_i)).to(device)
 
         # split each dataset for training / testing as is tradition
         # NOTE: we only do this once because the various datasets seem to be the

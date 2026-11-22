@@ -10,13 +10,13 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from commonlib import FeatureDataset, load_feature_datasets
+from commonlib import flatten_feature_datasets, load_feature_datasets
 from nneuroutil.classifier import (
     AnovaScores,
     classify_linear_discriminant_analysis,
     compute_anova_scores,
 )
-from nneuroutil.typing import Array1D, Array2D, Array3D
+from nneuroutil.typing import Array1D, Array2D
 from nneuroutil.visualization import figure, make_colorbar_axes
 
 log = logging.getLogger("lib.visualize_feature_separability")
@@ -24,6 +24,10 @@ log = logging.getLogger("lib.visualize_feature_separability")
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
 Diagnose feature separability and discriminative power for classification.
+
+Only the functional (fMRI) classes are used by default. Pass ``--binary`` to
+pool all functional scans against the structural scans, using subject-grouped
+cross-validation.
 
 Evaluates high- and low-dimensional features for:
 1. Representational dissimilarity (class centroid distance matrix).
@@ -44,12 +48,14 @@ EPS = 1.0e-12
 
 
 def compute_centroid_rdm(
-    x: Array3D[np.floating[Any]],
+    x: Array2D[np.floating[Any]],
+    labels: Array1D[np.integer[Any]],
 ) -> Array2D[np.floating[Any]]:
     """Compute class centroid correlation distance matrix."""
     from scipy.spatial.distance import cdist
 
-    centroids = np.mean(x, axis=0)
+    classes = np.unique(labels)
+    centroids = np.stack([np.mean(x[labels == c], axis=0) for c in classes])
 
     # correlation distance: 1 - pearson_r(u, v)
     rdm = cdist(centroids, centroids, metric="correlation")
@@ -59,44 +65,58 @@ def compute_centroid_rdm(
     return rdm
 
 
-class PcaLdaResults(NamedTuple):
-    test_coords: Array3D[np.floating[Any]]
-    """Held-out test subject coordinates of shape ``(n_test, nclasses, k - 1)``."""
+class LdaResults(NamedTuple):
+    test_coords: Array2D[np.floating[Any]]
+    """Held-out test scan coordinates of shape ``(n_test, k - 1)``."""
+    test_labels: Array1D[np.integer[Any]]
+    """Class index for each held-out test scan."""
     proj_centroids: Array2D[np.floating[Any]]
     """Projected training class centroids of shape ``(nclasses, k - 1)``."""
     explained_variance_ratio: Array1D[np.floating[Any]]
     """Ratio of between-class variance explained by each canonical component."""
     test_accuracy: float
-    """Balanced accuracy on held-out test subjects."""
+    """Balanced accuracy on held-out test scans."""
+
+
+def _split_groups(
+    groups: Array1D[np.integer[Any]],
+    *,
+    random_state: int = 42,
+) -> tuple[Array1D[np.integer[Any]], Array1D[np.integer[Any]]]:
+    from sklearn.model_selection import GroupShuffleSplit
+
+    split = GroupShuffleSplit(n_splits=1, test_size=0.3, random_state=random_state)
+    train_idx, test_idx = next(split.split(groups, groups=groups))
+
+    return train_idx, test_idx
 
 
 def compute_pca_lda(
-    x: Array3D[np.floating[Any]],
-    labels: Array3D[np.integer[Any]],
+    x: Array2D[np.floating[Any]],
+    labels: Array1D[np.integer[Any]],
+    groups: Array1D[np.integer[Any]],
     *,
     pca_max_components: int = 50,
     zscore: bool = True,
     random_state: int = 42,
-) -> PcaLdaResults:
-    """Fit PCA+LDA on training subjects and project held-out test subjects."""
+) -> LdaResults:
+    """Fit PCA+LDA on training subjects and project held-out test scans."""
     from sklearn.decomposition import PCA
     from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
     from sklearn.metrics import balanced_accuracy_score
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
 
-    nsubjects, nclasses, nfeatures = x.shape
-    rng = np.random.default_rng(random_state)
-    perm = rng.permutation(nsubjects)
-    n_test = max(1, round(0.3 * nsubjects))
-    test_idx = perm[:n_test]
-    train_idx = perm[n_test:]
+    nfeatures = x.shape[1]
+    train_idx, test_idx = _split_groups(groups, random_state=random_state)
 
-    x_train = np.reshape(x[train_idx], (train_idx.size * nclasses, nfeatures))
-    y_train = np.reshape(labels[train_idx], -1)
-    x_test = np.reshape(x[test_idx], (n_test * nclasses, nfeatures))
-    y_test = np.reshape(labels[test_idx], -1)
+    x_train = x[train_idx]
+    y_train = labels[train_idx]
+    x_test = x[test_idx]
+    y_test = labels[test_idx]
 
+    classes = np.unique(labels)
+    nclasses = classes.size
     max_components = min(nclasses - 1, nfeatures)
 
     estimators = []
@@ -111,88 +131,67 @@ def compute_pca_lda(
     estimators.append(LinearDiscriminantAnalysis(n_components=max_components))
     lda = make_pipeline(*estimators)
 
-    train_coords = np.reshape(
-        lda.fit_transform(x_train, y_train), (train_idx.size, nclasses, -1)
-    )
-    proj_centroids = np.mean(train_coords, axis=0)
-    test_coords = np.reshape(lda.transform(x_test), (n_test, nclasses, -1))
+    train_coords = lda.fit_transform(x_train, y_train)
+    proj_centroids = np.stack([
+        np.mean(train_coords[y_train == c], axis=0) for c in classes
+    ])
+    test_coords = lda.transform(x_test)
     evr = lda[-1].explained_variance_ratio_
     test_accuracy = balanced_accuracy_score(y_test, lda.predict(x_test))
 
-    return PcaLdaResults(
+    return LdaResults(
         test_coords=test_coords,
+        test_labels=y_test,
         proj_centroids=proj_centroids,
         explained_variance_ratio=evr,
         test_accuracy=test_accuracy,
     )
 
 
-class GsvdLdaResults(NamedTuple):
-    test_coords: Array3D[np.floating[Any]]
-    """Held-out test subject coordinates of shape ``(n_test, nclasses, k - 1)``."""
-    proj_centroids: Array2D[np.floating[Any]]
-    """Projected training class centroids of shape ``(nclasses, k - 1)``."""
-    explained_variance_ratio: Array1D[np.floating[Any]]
-    """Fraction of projected between-class variance explained by each axis."""
-    test_accuracy: float
-    """Balanced accuracy on held-out test subjects."""
-
-
 def compute_gsvd_lda(
-    x: Array3D[np.floating[Any]],
-    labels: Array3D[np.integer[Any]],
+    x: Array2D[np.floating[Any]],
+    labels: Array1D[np.integer[Any]],
+    groups: Array1D[np.integer[Any]],
     *,
     zscore: bool = True,
     random_state: int = 42,
-) -> GsvdLdaResults:
-    """Fit G-SVD LDA on training subjects and project held-out test subjects."""
+) -> LdaResults:
+    """Fit G-SVD LDA on training subjects and project held-out test scans."""
     from sklearn.metrics import balanced_accuracy_score
     from sklearn.preprocessing import StandardScaler
 
-    nsubjects, nclasses, nfeatures = x.shape
-    labels_2d = np.reshape(labels, (nsubjects, nclasses))
-    rng = np.random.default_rng(random_state)
-    perm = rng.permutation(nsubjects)
-    n_test = max(1, round(0.3 * nsubjects))
-    test_idx = perm[:n_test]
-    train_idx = perm[n_test:]
+    train_idx, test_idx = _split_groups(groups, random_state=random_state)
 
     x_train = x[train_idx]
+    y_train = labels[train_idx]
     x_test = x[test_idx]
+    y_test = labels[test_idx]
 
     if zscore:
         scaler = StandardScaler()
-        scaler.fit(np.reshape(x_train, (train_idx.size * nclasses, nfeatures)))
-        x_train = np.reshape(
-            scaler.transform(np.reshape(x_train, (-1, nfeatures))),
-            x_train.shape,
-        )
-        x_test = np.reshape(
-            scaler.transform(np.reshape(x_test, (-1, nfeatures))),
-            x_test.shape,
-        )
+        x_train = scaler.fit_transform(x_train)
+        x_test = scaler.transform(x_test)
 
-    class_labels = list(labels_2d[0])
+    classes = np.unique(labels)
+    class_labels = [int(c) for c in classes]
     lda = classify_linear_discriminant_analysis(
-        [x_train[:, i, :] for i in range(nclasses)],
+        [x_train[y_train == c] for c in classes],
         class_labels,
         shrinkage=1.0,
     )
 
-    x_test_flat = np.reshape(x_test, (n_test * nclasses, nfeatures))
-    y_test_flat = np.reshape(labels_2d[test_idx], -1)
-    y_pred = lda.predict(x_test_flat, metric="l2")
-    test_accuracy = balanced_accuracy_score(y_test_flat, y_pred)
+    y_pred = lda.predict(x_test, metric="l2")
+    test_accuracy = balanced_accuracy_score(y_test, y_pred)
 
-    test_coords_flat = (x_test_flat - lda.centroids) @ lda.G
-    test_coords = np.reshape(test_coords_flat, (n_test, nclasses, -1))
+    test_coords = (x_test - lda.centroids) @ lda.G
 
     between_var = np.sum(lda.proj_centroids**2, axis=0)
     total_var = np.sum(between_var)
     evr = between_var / total_var if total_var > 0.0 else between_var
 
-    return GsvdLdaResults(
+    return LdaResults(
         test_coords=test_coords,
+        test_labels=y_test,
         proj_centroids=lda.proj_centroids,
         explained_variance_ratio=evr,
         test_accuracy=test_accuracy,
@@ -209,31 +208,30 @@ class DecodingResults(NamedTuple):
 
 
 def compute_cross_validated_decoding(
-    x: Array3D[np.floating[Any]],
-    labels: Array3D[np.integer[Any]],
+    x: Array2D[np.floating[Any]],
+    labels: Array1D[np.integer[Any]],
+    groups: Array1D[np.integer[Any]],
     *,
     cv_folds: int = 5,
     zscore: bool = True,
     random_state: int = 42,
 ) -> DecodingResults:
-    """Evaluate linear decodability using cross-validation."""
+    """Evaluate linear decodability using subject-grouped cross-validation."""
     from sklearn.linear_model import RidgeClassifier
     from sklearn.metrics import confusion_matrix
-    from sklearn.model_selection import StratifiedKFold, cross_val_predict
+    from sklearn.model_selection import StratifiedGroupKFold, cross_val_predict
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
-
-    nsamples, nclasses, nfeatures = x.shape
-    x = np.reshape(x, (nsamples * nclasses, nfeatures))
-    labels = np.reshape(labels, -1)
 
     clf = RidgeClassifier(alpha=1.0)
     if zscore:
         # NOTE: the scaler is fit on the training folds only
         clf = make_pipeline(StandardScaler(), clf)
 
-    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
-    preds = cross_val_predict(clf, x, labels, cv=cv)
+    cv = StratifiedGroupKFold(
+        n_splits=cv_folds, shuffle=True, random_state=random_state
+    )
+    preds = cross_val_predict(clf, x, labels, cv=cv, groups=groups)
 
     cm = confusion_matrix(labels, preds, normalize="true")
     per_class = np.diag(cm)
@@ -260,20 +258,28 @@ class VarianceDecomposition(NamedTuple):
 
 
 def compute_task_subject_variance(
-    x: Array3D[np.floating[Any]],
+    x: Array2D[np.floating[Any]],
+    labels: Array1D[np.integer[Any]],
+    groups: Array1D[np.integer[Any]],
 ) -> VarianceDecomposition | None:
-    """Decompose feature variance into task vs. subject components."""
-    nsubjects, nclasses, nfeatures = x.shape
+    """Decompose feature variance into class vs. subject components."""
+    classes, class_counts = np.unique(labels, return_counts=True)
+    unique_groups, subject_counts = np.unique(groups, return_counts=True)
+    nclasses = classes.size
+    nsubjects = unique_groups.size
     if nsubjects < 2 or nclasses < 2:
         return None
 
-    grand_mean = np.mean(x, axis=(0, 1), keepdims=True)
-    task_mean = np.mean(x, axis=0, keepdims=True)
-    subject_mean = np.mean(x, axis=1, keepdims=True)
+    nfeatures = x.shape[1]
+    grand_mean = np.mean(x, axis=0)
+    class_means = np.stack([np.mean(x[labels == c], axis=0) for c in classes])
+    subject_means = np.stack([np.mean(x[groups == g], axis=0) for g in unique_groups])
 
-    ss_task = nsubjects * np.sum((task_mean - grand_mean) ** 2, axis=(0, 1))
-    ss_subject = nclasses * np.sum((subject_mean - grand_mean) ** 2, axis=(0, 1))
-    ss_total = np.sum((x - grand_mean) ** 2, axis=(0, 1))
+    ss_task = np.sum(class_counts[:, None] * (class_means - grand_mean) ** 2, axis=0)
+    ss_subject = np.sum(
+        subject_counts[:, None] * (subject_means - grand_mean) ** 2, axis=0
+    )
+    ss_total = np.sum((x - grand_mean) ** 2, axis=0)
 
     df_task = max(nclasses - 1, 1)
     df_subject = max(nsubjects - 1, 1)
@@ -364,16 +370,18 @@ def plot_rdm(
         ax.set_title("Centroid Dissimilarity (RDM)")
 
 
-def plot_pca_lda(
+def plot_lda(
     basename: pathlib.Path,
-    lda: PcaLdaResults,
-    ds: FeatureDataset,
+    lda: LdaResults,
+    class_names: tuple[str, ...],
     *,
+    stem: str,
+    name: str,
     overwrite: bool = False,
 ) -> None:
-    """Plot held-out PCA+LDA canonical spectrum and 2D test-subject projection."""
+    """Plot a held-out LDA spectrum and, if possible, the Fisher map."""
     with figure(
-        basename.with_stem(f"{basename.stem}-lda-pca-spectrum"),
+        basename.with_stem(f"{basename.stem}-lda-{stem}-spectrum"),
         figsize=(7, 5.5),
         overwrite=overwrite,
     ) as fig:
@@ -384,92 +392,41 @@ def plot_pca_lda(
         ax.bar(idx, lda.explained_variance_ratio, color="steelblue", width=0.6)
         ax.set_xlabel("Canonical Component")
         ax.set_ylabel("Between-Class Variance Ratio")
-        ax.set_title("PCA+LDA Discriminant Spectrum")
+        ax.set_title(f"{name} Discriminant Spectrum")
         ax.set_xticks(idx)
 
-    if lda.test_coords.shape[2] >= 2:
-        with figure(
-            basename.with_stem(f"{basename.stem}-lda-pca-map"),
-            figsize=(8, 6),
-            overwrite=overwrite,
-        ) as fig:
-            ax = fig.gca()
-            for i, name in enumerate(ds.class_names):
-                label = clean_label(name)
-                sc = ax.scatter(
-                    lda.test_coords[:, i, 0],
-                    lda.test_coords[:, i, 1],
-                    s=28,
-                    alpha=0.75,
-                    label=label,
-                )
-                ax.scatter(
-                    lda.proj_centroids[i, 0],
-                    lda.proj_centroids[i, 1],
-                    marker="x",
-                    s=90,
-                    linewidths=2.0,
-                    color=sc.get_facecolor()[0],
-                )
-            ax.set_xlabel("Canonical Component 1")
-            ax.set_ylabel("Canonical Component 2")
-            acc = 100.0 * lda.test_accuracy
-            ax.set_title(f"Held-Out PCA+LDA Fisher Map (Test Acc: {acc:.1f}\\%)")
-            ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize="small")
+    if lda.test_coords.shape[1] < 2:
+        return
 
-
-def plot_gsvd_lda(
-    basename: pathlib.Path,
-    lda: GsvdLdaResults,
-    ds: FeatureDataset,
-    *,
-    overwrite: bool = False,
-) -> None:
-    """Plot held-out G-SVD LDA canonical spectrum and 2D test-subject projection."""
     with figure(
-        basename.with_stem(f"{basename.stem}-lda-gsvd-spectrum"),
-        figsize=(7, 5.5),
+        basename.with_stem(f"{basename.stem}-lda-{stem}-map"),
+        figsize=(8, 6),
         overwrite=overwrite,
     ) as fig:
         ax = fig.gca()
+        for i, class_name in enumerate(class_names):
+            mask = lda.test_labels == i
+            sc = ax.scatter(
+                lda.test_coords[mask, 0],
+                lda.test_coords[mask, 1],
+                s=28,
+                alpha=0.75,
+                label=clean_label(class_name),
+            )
+            ax.scatter(
+                lda.proj_centroids[i, 0],
+                lda.proj_centroids[i, 1],
+                marker="x",
+                s=90,
+                linewidths=2.0,
+                color=sc.get_facecolor()[0],
+            )
 
-        ncomp = np.size(lda.explained_variance_ratio)
-        idx = np.arange(1, ncomp + 1)
-        ax.bar(idx, lda.explained_variance_ratio, color="steelblue", width=0.6)
-        ax.set_xlabel("Canonical Component")
-        ax.set_ylabel("Between-Class Variance Ratio")
-        ax.set_title("G-SVD Discriminant Spectrum")
-        ax.set_xticks(idx)
-
-    if lda.test_coords.shape[2] >= 2:
-        with figure(
-            basename.with_stem(f"{basename.stem}-lda-gsvd-map"),
-            figsize=(8, 6),
-            overwrite=overwrite,
-        ) as fig:
-            ax = fig.gca()
-            for i, name in enumerate(ds.class_names):
-                label = clean_label(name)
-                sc = ax.scatter(
-                    lda.test_coords[:, i, 0],
-                    lda.test_coords[:, i, 1],
-                    s=28,
-                    alpha=0.75,
-                    label=label,
-                )
-                ax.scatter(
-                    lda.proj_centroids[i, 0],
-                    lda.proj_centroids[i, 1],
-                    marker="x",
-                    s=90,
-                    linewidths=2.0,
-                    color=sc.get_facecolor()[0],
-                )
-            ax.set_xlabel("Canonical Component 1")
-            ax.set_ylabel("Canonical Component 2")
-            acc = 100.0 * lda.test_accuracy
-            ax.set_title(f"Held-Out G-SVD Fisher Map (Test Acc: {acc:.1f}\\%)")
-            ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize="small")
+        ax.set_xlabel("Canonical Component 1")
+        ax.set_ylabel("Canonical Component 2")
+        acc = 100.0 * lda.test_accuracy
+        ax.set_title(f"Held-Out {name} Fisher Map (Test Acc: {acc:.1f}\\%)")
+        ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize="small")
 
 
 def plot_effect_size_dist(
@@ -708,7 +665,7 @@ def main(
     outfile: pathlib.Path | None = None,
     cv_folds: int = 5,
     zscore: bool = True,
-    exclude: tuple[str, ...] | None = None,
+    binary: bool = False,
     overwrite: bool = False,
 ) -> int:
     ret = 0
@@ -720,7 +677,8 @@ def main(
             continue
 
         try:
-            ds = load_feature_datasets(filename, exclude=exclude)
+            ds = load_feature_datasets(filename, binary=binary)
+            x, labels, groups = flatten_feature_datasets(ds)
         except Exception as exc:
             log.error("Failed to load features from '%s': %s", filename, exc)
             ret = 1
@@ -733,50 +691,73 @@ def main(
         else:
             basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}")
 
-        suffix = "-zscore" if zscore else ""
+        suffix = "-fmri-vs-mri" if binary else "-fmri-only"
+        if zscore:
+            suffix += "-zscore"
         basename = basename.with_stem(f"{basename.stem}{suffix}")
 
-        nsubjects, nclasses, nfeatures = ds.x.shape
         log.info(
             "Loaded '%s': %d samples, %d features, %d classes.",
             filename.stem,
-            nsubjects * nclasses,
-            nfeatures,
-            nclasses,
+            x.shape[0],
+            x.shape[1],
+            len(ds.class_names),
         )
 
-        var_decomp = compute_task_subject_variance(ds.x)
+        var_decomp = None
+        if binary:
+            log.info("Skipping task vs subject variance for the unbalanced design.")
+        else:
+            var_decomp = compute_task_subject_variance(x, labels, groups)
 
         # 1. RDM
         log.info("Computing Representational Dissimilarity Matrix...")
-        rdm = compute_centroid_rdm(ds.x)
+        rdm = compute_centroid_rdm(x, labels)
         plot_rdm(basename, rdm, ds.class_names, overwrite=overwrite)
 
         # 2. Held-out PCA+LDA
         log.info("Computing held-out PCA+LDA projection...")
-        lda = compute_pca_lda(ds.x, ds.labels, zscore=zscore)
+        lda = compute_pca_lda(x, labels, groups, zscore=zscore)
         log.info("Held-out PCA+LDA balanced accuracy: %.2f%%", lda.test_accuracy * 100)
-        plot_pca_lda(basename, lda, ds, overwrite=overwrite)
+        plot_lda(
+            basename,
+            lda,
+            ds.class_names,
+            stem="pca",
+            name="PCA+LDA",
+            overwrite=overwrite,
+        )
 
         # 2b. Held-out G-SVD LDA
         log.info("Computing held-out G-SVD LDA projection...")
-        gsvd_lda = compute_gsvd_lda(ds.x, ds.labels, zscore=zscore)
+        gsvd_lda = compute_gsvd_lda(x, labels, groups, zscore=zscore)
         log.info(
             "Held-out G-SVD LDA balanced accuracy: %.2f%%",
             gsvd_lda.test_accuracy * 100,
         )
-        plot_gsvd_lda(basename, gsvd_lda, ds, overwrite=overwrite)
+        plot_lda(
+            basename,
+            gsvd_lda,
+            ds.class_names,
+            stem="gsvd",
+            name="G-SVD",
+            overwrite=overwrite,
+        )
 
         # 3. Effect sizes
         log.info("Computing vectorized ANOVA effect sizes...")
-        features = [ds.x[:, i, :] for i in range(nclasses)]
+        features = [np.asarray(xi) for xi in ds.x]
         scores = compute_anova_scores(features, eps=EPS)
         plot_effect_size_dist(basename, scores, overwrite=overwrite)
 
         # 4. Cross-validated linear decoding
         log.info("Evaluating cross-validated decodability (%d-fold)...", cv_folds)
         decoding = compute_cross_validated_decoding(
-            ds.x, ds.labels, cv_folds=cv_folds, zscore=zscore
+            x,
+            labels,
+            groups,
+            cv_folds=cv_folds,
+            zscore=zscore,
         )
         log.info(
             "Cross-validated balanced accuracy: %.2f%%",
@@ -810,10 +791,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("filenames", nargs="+", type=pathlib.Path)
     parser.add_argument(
-        "--exclude",
-        action="append",
-        default=None,
-        help="Classes to exclude from the visualization",
+        "--binary",
+        action="store_true",
+        help=(
+            "Compare functional against structural scans; the default only "
+            "compares the functional classes"
+        ),
     )
     parser.add_argument(
         "-o",
@@ -856,7 +839,7 @@ if __name__ == "__main__":
             outfile=args.outfile,
             cv_folds=args.cv_folds,
             zscore=args.zscore,
-            exclude=args.exclude,
+            binary=args.binary,
             overwrite=args.force,
         )
     )

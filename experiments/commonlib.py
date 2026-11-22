@@ -117,10 +117,12 @@ def flatten_feature_datasets(
     Array1D[np.integer[Any]],
 ]:
     """Concatenate the per-class arrays into ``(x, labels, groups)``."""
-    x = np.concatenate([np.asarray(xi) for xi in ds.x], axis=0)
-    labels = np.concatenate([
-        np.full(np.asarray(xi).shape[0], i, dtype=np.int64) for i, xi in enumerate(ds.x)
-    ])
+    arrays = [np.asarray(xi) for xi in ds.x]
+    x = np.concatenate(arrays, axis=0)
+    labels = np.repeat(
+        np.arange(len(arrays), dtype=np.int64),
+        [array.shape[0] for array in arrays],
+    )
     groups = np.concatenate([np.asarray(g) for g in ds.groups], axis=0)
 
     return x, labels, groups
@@ -196,27 +198,24 @@ def load_feature_datasets(
         raise ValueError(f"invalid groups: {group_types}")
 
     if binary:
-        xs: list[Array2D[np.floating[Any]]] = []
-        groups: list[Array1D[np.integer[Any]]] = []
-        class_names: list[str] = []
-
-        for group in group_types:
-            indices = [i for i, name in enumerate(scan_types) if name == group]
-            xs.append(np.concatenate([arrays[i] for i in indices], axis=0))
-            groups.append(
-                np.concatenate([
-                    np.arange(arrays[i].shape[0], dtype=np.int64) for i in indices
-                ])
-            )
-            class_names.append(SCAN_TYPE_LABELS.get(group, group.upper()))
+        selections = [
+            [i for i, name in enumerate(scan_types) if name == group]
+            for group in group_types
+        ]
+        class_names = [SCAN_TYPE_LABELS[group] for group in group_types]
     else:
-        indices = [i for i, name in enumerate(scan_types) if name == "fmri"]
-        if not indices:
-            raise ValueError("feature dataset does not contain 'fmri' classes")
+        selections = [[i] for i, name in enumerate(scan_types) if name == "fmri"]
+        class_names = [classes[indices[0]] for indices in selections]
 
-        xs = [arrays[i] for i in indices]
-        groups = [np.arange(arrays[i].shape[0], dtype=np.int64) for i in indices]
-        class_names = [classes[i] for i in indices]
+    xs: list[Array2D[np.floating[Any]]] = []
+    groups: list[Array1D[np.integer[Any]]] = []
+    for indices in selections:
+        xs.append(np.concatenate([arrays[i] for i in indices], axis=0))
+        groups.append(
+            np.concatenate([
+                np.arange(arrays[i].shape[0], dtype=np.int64) for i in indices
+            ])
+        )
 
     return FeatureDataset(
         x=tuple(xp.asarray(xi, device=device) for xi in xs),
