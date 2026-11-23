@@ -335,8 +335,9 @@ def evaluate_dataset(
     return result, y, oof_preds, class_names
 
 
-def _format_score(res: ClassificationResult) -> str:
-    return f"${res.mean_bacc:.3f} \\pm {res.std_bacc:.3f}$"
+def _format_score(res: ClassificationResult, *, underline: bool = False) -> str:
+    score = f"${res.mean_bacc:.3f} \\pm {res.std_bacc:.3f}$"
+    return f"\\underline{{{score}}}" if underline else score
 
 
 def format_latex_table(
@@ -348,13 +349,19 @@ def format_latex_table(
         r"\textbf{Feature family} & \textbf{Dim.} & \textbf{LDA} & \textbf{MLP} \\",
         r"\midrule",
     ]
-    for res_lda, res_mlp in rows:
-        lines.append(
-            f"{res_lda.label} & {res_lda.nfeatures:,} & "
-            f"{_format_score(res_lda)} & {_format_score(res_mlp)} \\\\"
-        )
-
     if rows:
+        # NOTE: underline the lowest score in each method column
+        lda_min = min(res_lda.mean_bacc for res_lda, _ in rows)
+        mlp_min = min(res_mlp.mean_bacc for _, res_mlp in rows)
+
+        for res_lda, res_mlp in rows:
+            lines.append(
+                f"{res_lda.label} & {res_lda.nfeatures:,} & "
+                f"{_format_score(res_lda, underline=res_lda.mean_bacc == lda_min)}"
+                f" & {_format_score(res_mlp, underline=res_mlp.mean_bacc == mlp_min)}"
+                r" \\"
+            )
+
         chance = 1.0 / rows[0][0].nclasses
         lines.extend([
             r"\midrule",

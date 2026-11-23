@@ -208,7 +208,7 @@ ablation filename dataidx="0" *ARGS:
 [doc("Generate Table 6")]
 table6:
     {{ PYTHON }} experiments/classify-task-decoding.py \
-        summary --force --binary \
+        summary --force --binary --device cuda \
         data/dataset-features-*.npz
 
 # }}}

@@ -97,11 +97,10 @@ def make_scale_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     fro = np.linalg.norm(mat, ord="fro")
     eigs = np.linalg.eigvalsh(mat)
     spectral_radius = np.max(np.abs(eigs))
-    entry_range = np.max(mat) - np.min(mat)
 
-    features = np.array([fro, spectral_radius, entry_range], dtype=mat.dtype)
-    starts = np.array([0, 1, 2, 3])
-    descrs = ("Frobenius Norm", "Spectral Radius", "Entry Range")
+    features = np.array([fro, spectral_radius], dtype=mat.dtype)
+    starts = np.array([0, 1, 2])
+    descrs = ("Frobenius Norm", "Spectral Radius")
 
     return FeatureDataset(x=features, starts=starts, descrs=descrs)
 
