@@ -183,6 +183,7 @@ def run_cross_validation(
     """Run repeated subject-grouped K-fold CV on ``(nsamples, nfeatures)``."""
     from sklearn.metrics import balanced_accuracy_score, f1_score
     from sklearn.model_selection import RepeatedKFold
+    from sklearn.preprocessing import StandardScaler
 
     unique_subjects = np.unique(groups)
     rkf = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=seed)
@@ -203,11 +204,9 @@ def run_cross_validation(
         y_te_np = y[test_mask]
 
         if zscore_features:
-            mean = np.mean(x_tr_np, axis=0)
-            std = np.std(x_tr_np, axis=0)
-            std = np.where(std > 1.0e-12, std, 1.0)
-            x_tr_np = (x_tr_np - mean) / std
-            x_te_np = (x_te_np - mean) / std
+            scaler = StandardScaler()
+            x_tr_np = scaler.fit_transform(x_tr_np)
+            x_te_np = scaler.transform(x_te_np)
 
         x_train_list = [
             torch.from_numpy(x_tr_np[y_tr_np == c]).to(device) for c in range(nclasses)
