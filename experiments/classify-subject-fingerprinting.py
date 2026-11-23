@@ -6,48 +6,48 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections.abc import Sequence
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple, get_args
 
 import numpy as np
+import torch
 
 from commonlib import FeatureDataset, load_feature_datasets
-from nneuroutil.typing import Array1D, Array2D, Array3D
-from nneuroutil.visualization import figure, make_colorbar_axes
+from nneuroutil.helpers import FuzzyChoiceAction
+from nneuroutil.interop.torch import available_device_names, torch_default_device
+from nneuroutil.typing import Array2D, Array3D
+from nneuroutil.visualization import figure
 
 log = logging.getLogger("lib.classify_subject_fingerprinting")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
-Evaluate subject fingerprinting (identification) from feature datasets.
+Evaluate leave-one-condition-out subject fingerprinting from feature datasets.
 
 For each feature file, the features are reshaped to ``(ntasks, nsubjects,
-nfeatures)``, assuming matched subjects in the same order in every class. We
-then measure how well a held-out task can identify the correct subject:
+nfeatures)``, assuming matched subjects in the same order in every class. In
+each fold, one task is held out and the remaining ``ntasks - 1`` tasks are used
+to z-score the features and train the classifier (G-SVD LDA or MLP, following
+Hannum et al., 2023).
 
-1. Leave-one-task-out nearest-neighbour identification (rank-k accuracy).
-2. Task-by-task identifiability matrix (reference task vs. test task).
-3. Leave-one-task-out subject classification (balanced accuracy).
-4. Split-half reliability (self vs. other subject similarity).
-5. Permutation null for the rank-1 identification accuracy.
+Examples:
 
-Example:
-
-    > {SCRIPT_PATH.name} dataset-features-matrix.npz dataset-features-landmarks.npz
+    > {SCRIPT_PATH.name} run --method lda data/dataset-features-matrix.npz
+    > {SCRIPT_PATH.name} summary --device cuda data/dataset-features-*.npz
 """
 
-SimilarityMetric = Literal["correlation", "cosine", "euclidean"]
-ClassificationMethod = Literal["lda", "ridge"]
-
-EPS = 1.0e-12
+ClassificationMethod = Literal["lda", "svm", "mlp"]
 
 
-# {{{ helpers
-
-
-def clean_label(name: str) -> str:
-    """Shorten a dataset name for clean plotting."""
-    label = name.split("_", maxsplit=1)[0]
-    return label.removeprefix("task-").removesuffix("-fractal")
+class ClassificationResult(NamedTuple):
+    label: str
+    nfeatures: int
+    nsubjects: int
+    method: ClassificationMethod
+    mean_bacc: float
+    std_bacc: float
+    ci_lo: float
+    ci_hi: float
+    p_val: float | None
 
 
 def to_tensor(ds: FeatureDataset) -> Array3D[np.floating[Any]]:
@@ -59,608 +59,382 @@ def to_tensor(ds: FeatureDataset) -> Array3D[np.floating[Any]]:
     return np.stack([np.asarray(x) for x in ds.x], axis=0)
 
 
-def _normalize_rows(x: Array2D[np.floating[Any]]) -> Array2D[np.floating[Any]]:
-    norm = np.linalg.norm(x, axis=-1, keepdims=True)
-    return x / np.maximum(norm, EPS)
-
-
-def similarity(
-    a: Array2D[np.floating[Any]],
-    b: Array2D[np.floating[Any]],
-    metric: SimilarityMetric,
-) -> Array2D[np.floating[Any]]:
-    """Pairwise similarity of two ``(nsamples, nfeatures)`` blocks.
-
-    Higher values mean more similar. For ``euclidean`` we return the negated
-    distance so that the same ranking code can be reused.
-    """
-    a = np.asarray(a, dtype=np.float64)
-    b = np.asarray(b, dtype=np.float64)
-
-    if metric == "correlation":
-        a = _normalize_rows(a - np.mean(a, axis=-1, keepdims=True))
-        b = _normalize_rows(b - np.mean(b, axis=-1, keepdims=True))
-        return a @ b.T  # ty: ignore[missing-attribute]
-
-    if metric == "cosine":
-        return _normalize_rows(a) @ _normalize_rows(b).T  # ty: ignore[missing-attribute]
-
-    if metric == "euclidean":
-        from scipy.spatial.distance import cdist
-
-        return -cdist(a, b, metric="euclidean")
-
-    raise ValueError(f"unknown similarity metric: {metric!r}")
-
-
-def _ranks(sim: Array2D[np.floating[Any]]) -> Array1D[np.integer[Any]]:
-    """Zero-based rank of the matched row/column in a square similarity matrix."""
-    if sim.shape[0] != sim.shape[1]:
-        raise ValueError(f"expected a square similarity matrix, got {sim.shape}")
-
-    order = np.argsort(-sim, axis=1)
-    target = np.arange(sim.shape[0])[:, None]
-    return np.argmax(order == target, axis=1)
-
-
-# }}}
-
-
-# {{{ identification
-
-
-class IdentificationResults(NamedTuple):
-    ranks: Array2D[np.integer[Any]]
-    """Zero-based rank of the correct subject for each (task, subject)."""
-    rank_curve: Array1D[np.floating[Any]]
-    """Fraction with rank ``< k`` for ``k = 1, ..., nsubjects``."""
-
-    @property
-    def rank1(self) -> float:
-        return float(np.mean(self.ranks == 0))
-
-    @property
-    def rank5(self) -> float:
-        return np.mean(self.ranks < 5)  # ty: ignore[unsupported-operator]
-
-    @property
-    def mean_rank(self) -> float:
-        """One-based mean rank (chance is ``(nsubjects + 1) / 2``)."""
-        return float(1.0 + np.mean(self.ranks))
-
-
-def compute_leave_one_task_out(
-    x: Array3D[np.floating[Any]],
-    metric: SimilarityMetric,
+def fit_and_predict(
+    x_train_list: list[torch.Tensor],
+    y_train_list: list[int],
+    x_test: torch.Tensor,
+    method: ClassificationMethod,
     *,
-    zscore: bool = True,
-) -> IdentificationResults:
-    """Identify subjects from a held-out task using all other tasks."""
-    from sklearn.preprocessing import StandardScaler
-
-    ntasks, nsubjects, nfeatures = x.shape
-    ranks = np.zeros((ntasks, nsubjects), dtype=int)
-
-    for t in range(ntasks):
-        ref_scans = np.delete(x, t, axis=0)
-        test_scans = x[t]
-        if zscore:
-            scaler = StandardScaler()
-            ref_flat = scaler.fit_transform(np.reshape(ref_scans, (-1, nfeatures)))
-            test_scans = scaler.transform(test_scans)
-            ref_scans = np.reshape(ref_flat, (ntasks - 1, nsubjects, nfeatures))
-
-        reference = ref_scans.mean(axis=0)
-        ranks[t] = _ranks(similarity(test_scans, reference, metric))
-
-    flat = np.ravel(ranks)
-    rank_curve = np.array([np.mean(flat < k) for k in range(1, nsubjects + 1)])
-
-    return IdentificationResults(ranks=ranks, rank_curve=rank_curve)
-
-
-def compute_identifiability_matrix(
-    x: Array3D[np.floating[Any]],
-    metric: SimilarityMetric,
-    *,
-    zscore: bool = True,
-) -> Array2D[np.floating[Any]]:
-    """Rank-1 identification using one reference task against one test task."""
-    from sklearn.preprocessing import StandardScaler
-
-    ntasks = x.shape[0]
-    identifiability = np.full((ntasks, ntasks), np.nan)
-
-    for i in range(ntasks):
-        for j in range(ntasks):
-            if i == j:
-                continue
-
-            ref_scans, test_scans = x[i], x[j]
-            if zscore:
-                scaler = StandardScaler()
-                ref_scans = scaler.fit_transform(ref_scans)
-                test_scans = scaler.transform(test_scans)
-
-            identifiability[i, j] = np.mean(
-                _ranks(similarity(test_scans, ref_scans, metric)) == 0
-            )
-
-    return identifiability
-
-
-def compute_cross_validated_classification(
-    x: Array3D[np.floating[Any]],
-    *,
-    method: ClassificationMethod = "lda",
-) -> float:
-    """Leave-one-task-out subject classification (balanced accuracy)."""
-    from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-    from sklearn.linear_model import RidgeClassifier
-    from sklearn.metrics import balanced_accuracy_score
-    from sklearn.model_selection import LeaveOneGroupOut
-    from sklearn.pipeline import make_pipeline
-    from sklearn.preprocessing import StandardScaler
-
-    ntasks, nsubjects, nfeatures = x.shape
-    x_flat = np.reshape(x, (ntasks * nsubjects, nfeatures))
-    groups = np.repeat(np.arange(ntasks), nsubjects)
-    labels = np.tile(np.arange(nsubjects), ntasks)
-
+    seed: int,
+) -> torch.Tensor:
+    """Fit classifier on training tensors and return predicted subject labels."""
     if method == "lda":
-        # NOTE: 'lsqr' with automatic shrinkage handles the nfeatures >> nsamples
-        # regime without an explicit PCA pre-reduction
-        clf = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
-    elif method == "ridge":
-        clf = RidgeClassifier(alpha=1.0)
-    else:
-        raise ValueError(f"unknown classification method: {method!r}")
+        from nneuroutil.classifier import classify_linear_discriminant_analysis
 
-    model = make_pipeline(StandardScaler(), clf)
+        clf = classify_linear_discriminant_analysis(x_train_list, y_train_list)
+        return clf.predict(x_test, metric="l2")  # ty: ignore[invalid-explicit-return]
 
-    scores = []
-    for train, test in LeaveOneGroupOut().split(x_flat, labels, groups):
-        model.fit(x_flat[train], labels[train])
-        predictions = model.predict(x_flat[test])
-        scores.append(balanced_accuracy_score(labels[test], predictions))
+    if method == "svm":
+        from nneuroutil.classifier import classify_support_vector_machine
 
-    return float(np.mean(scores))
+        clf = classify_support_vector_machine(x_train_list, y_train_list)
+        return clf.predict(x_test)  # ty: ignore[invalid-explicit-return]
 
+    if method == "mlp":
+        from torchlib import classify_multilayer_perceptron
 
-def compute_split_half_reliability(
-    x: Array3D[np.floating[Any]],
-    metric: SimilarityMetric,
-    *,
-    zscore: bool = True,
-    random_state: int = 42,
-) -> tuple[Array1D[np.floating[Any]], Array1D[np.floating[Any]]]:
-    """Per-subject self vs. mean-other similarity across two task halves."""
-    from sklearn.preprocessing import StandardScaler
+        torch.manual_seed(seed)
+        clf = classify_multilayer_perceptron(
+            x_train_list, y_train_list, learning_rate_init=1.0e-2, max_iter=400
+        )
+        return clf.predict(x_test)
 
-    ntasks, nsubjects, nfeatures = x.shape
-    rng = np.random.default_rng(random_state)
-    idx = rng.permutation(ntasks)
-    half = max(1, ntasks // 2)
-
-    first_scans = x[idx[:half]]
-    second_scans = x[idx[half:]]
-    if zscore:
-        scaler = StandardScaler()
-        first_flat = scaler.fit_transform(np.reshape(first_scans, (-1, nfeatures)))
-        second_flat = scaler.transform(np.reshape(second_scans, (-1, nfeatures)))
-        first_scans = np.reshape(first_flat, first_scans.shape)
-        second_scans = np.reshape(second_flat, second_scans.shape)
-
-    first = first_scans.mean(axis=0)
-    second = second_scans.mean(axis=0)
-    sim = similarity(first, second, metric)
-
-    self = np.diag(sim).copy()
-    others = (np.sum(sim, axis=1) - self) / (nsubjects - 1)
-
-    return self, others
+    raise ValueError(f"unknown method: {method!r}")
 
 
-class PermutationNull(NamedTuple):
-    rank1: Array1D[np.floating[Any]]
-    rank5: Array1D[np.floating[Any]]
-
-
-def bootstrap_rank_ci(
-    ranks: Array2D[np.integer[Any]],
+def bootstrap_subject_ci(
+    oof_preds: Array2D[np.integer[Any]],
     *,
     n_bootstrap: int = 1000,
     seed: int = 42,
-) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Compute subject-level 95% bootstrap CIs for rank-1 and rank-5 accuracy."""
-    nsubjects = ranks.shape[1]
-    rng = np.random.default_rng(seed)
+) -> tuple[float, float]:
+    """Compute 95% bootstrap CI over subjects for identification accuracy."""
+    _ntasks, nsubjects = oof_preds.shape
+    targets = np.arange(nsubjects)[None, :]
+    correct = oof_preds == targets
 
-    boot_r1 = np.empty(n_bootstrap, dtype=np.float64)
-    boot_r5 = np.empty(n_bootstrap, dtype=np.float64)
+    rng = np.random.default_rng(seed)
+    vals = np.empty(n_bootstrap, dtype=np.float64)
     for b in range(n_bootstrap):
         sampled = rng.integers(0, nsubjects, size=nsubjects)
-        sampled_ranks = ranks[:, sampled]
-        boot_r1[b] = np.mean(sampled_ranks == 0)
-        boot_r5[b] = np.mean(sampled_ranks < 5)  # ty: ignore[unsupported-operator]
+        vals[b] = np.mean(correct[:, sampled])  # ty: ignore[not-subscriptable]
 
-    r1_lo, r1_hi = np.percentile(boot_r1, [2.5, 97.5])
-    r5_lo, r5_hi = np.percentile(boot_r5, [2.5, 97.5])
-    return (float(r1_lo), float(r1_hi)), (float(r5_lo), float(r5_hi))
+    lo, hi = np.percentile(vals, [2.5, 97.5])
+    return float(lo), float(hi)
 
 
-def compute_permutation_null(
+def run_cross_validation(
     x: Array3D[np.floating[Any]],
-    metric: SimilarityMetric,
     *,
-    zscore: bool = True,
-    nperm: int = 200,
-    random_state: int = 42,
-) -> PermutationNull:
-    """Null rank-1 and rank-5 identification accuracy with shuffled subject labels."""
-    rng = np.random.default_rng(random_state)
-    ntasks, nsubjects, _ = x.shape
-    null_r1 = np.empty(nperm, dtype=np.float64)
-    null_r5 = np.empty(nperm, dtype=np.float64)
+    method: ClassificationMethod,
+    zscore_features: bool,
+    seed: int,
+    device: torch.device | str,
+) -> tuple[Array2D[np.integer[Any]], list[float]]:
+    """Run leave-one-condition-out CV on ``(ntasks, nsubjects, nfeatures)``."""
+    from sklearn.metrics import balanced_accuracy_score
+    from sklearn.preprocessing import StandardScaler
 
-    for p in range(nperm):
-        permuted = np.copy(x)
-        for t in range(ntasks):
-            permuted[t] = permuted[t][rng.permutation(nsubjects)]
+    ntasks, nsubjects, nfeatures = x.shape
+    y_train_list = list(range(nsubjects))
+    y_test = np.arange(nsubjects, dtype=np.int64)
 
-        res = compute_leave_one_task_out(permuted, metric, zscore=zscore)
-        null_r1[p] = res.rank1
-        null_r5[p] = res.rank5
+    oof_preds = np.empty((ntasks, nsubjects), dtype=np.int64)
+    fold_bacc: list[float] = []
 
-    return PermutationNull(rank1=null_r1, rank5=null_r5)
+    for t in range(ntasks):
+        x_tr_np = np.delete(x, t, axis=0)
+        x_te_np = x[t]
+
+        if zscore_features:
+            scaler = StandardScaler()
+            tr_flat = scaler.fit_transform(np.reshape(x_tr_np, (-1, nfeatures)))
+            x_te_np = scaler.transform(x_te_np)
+            x_tr_np = np.reshape(tr_flat, (ntasks - 1, nsubjects, nfeatures))
+
+        x_train_list = [
+            torch.from_numpy(x_tr_np[:, s, :]).to(device) for s in range(nsubjects)
+        ]
+        x_test_t = torch.from_numpy(x_te_np).to(device)
+
+        y_pred_t = fit_and_predict(
+            x_train_list,
+            y_train_list,
+            x_test_t,
+            method,
+            seed=seed + t,
+        )
+        y_pred = y_pred_t.detach().cpu().numpy()
+
+        oof_preds[t] = y_pred
+        fold_bacc.append(float(balanced_accuracy_score(y_test, y_pred)))
+
+    return oof_preds, fold_bacc
 
 
-# }}}
+def evaluate_dataset(
+    filename: pathlib.Path,
+    *,
+    method: ClassificationMethod,
+    zscore_features: bool,
+    n_permutations: int,
+    seed: int,
+    device: torch.device | str,
+) -> tuple[
+    ClassificationResult,
+    list[float],
+    tuple[str, ...],
+]:
+    ds = load_feature_datasets(filename)
+    x = to_tensor(ds)
+    ntasks, nsubjects, nfeatures = x.shape
+
+    log.info(
+        "Evaluating '%s' (%s, z=%s): %d tasks x %d subjects, %d features.",
+        filename.stem,
+        method.upper(),
+        zscore_features,
+        ntasks,
+        nsubjects,
+        nfeatures,
+    )
+
+    oof_preds, fold_bacc = run_cross_validation(
+        x,
+        method=method,
+        zscore_features=zscore_features,
+        seed=seed,
+        device=device,
+    )
+
+    mean_bacc = float(np.mean(fold_bacc))
+    std_bacc = float(np.std(fold_bacc))
+    ci_lo, ci_hi = bootstrap_subject_ci(oof_preds, seed=seed)
+
+    p_val: float | None = None
+    perm_str = ""
+    if n_permutations > 0:
+        rng = np.random.default_rng(seed)
+        null_baccs = np.empty(n_permutations, dtype=np.float64)
+        for p in range(n_permutations):
+            x_perm = np.copy(x)
+            for t in range(ntasks):
+                x_perm[t] = x_perm[t][rng.permutation(nsubjects)]
+
+            _, p_bacc = run_cross_validation(
+                x_perm,
+                method=method,
+                zscore_features=zscore_features,
+                seed=seed + 1000 + p,
+                device=device,
+            )
+            null_baccs[p] = np.mean(p_bacc)
+
+        p_val = float((np.sum(null_baccs >= mean_bacc) + 1) / (n_permutations + 1))
+        perm_str = f" | perm p={p_val:.4g} (null={np.mean(null_baccs):.4f})"
+
+    log.info(
+        "Bal. Acc.: %.4f +/- %.4f (95%% CI [%.4f, %.4f])%s",
+        mean_bacc,
+        std_bacc,
+        ci_lo,
+        ci_hi,
+        perm_str,
+    )
+
+    result = ClassificationResult(
+        label=ds.label,
+        nfeatures=nfeatures,
+        nsubjects=nsubjects,
+        method=method,
+        mean_bacc=mean_bacc,
+        std_bacc=std_bacc,
+        ci_lo=ci_lo,
+        ci_hi=ci_hi,
+        p_val=p_val,
+    )
+    return result, fold_bacc, ds.class_names
 
 
 # {{{ plots
 
 
-def plot_rank_curve(
+def plot_task_accuracy(
     basename: pathlib.Path,
-    results: IdentificationResults,
+    fold_bacc: Sequence[float],
+    class_names: tuple[str, ...],
     *,
-    label: str = "",
+    method: str,
+    nsubjects: int,
     overwrite: bool = False,
 ) -> None:
-    nsubjects = results.ranks.shape[1]
-    ranks = np.arange(1, nsubjects + 1)
+    """Plot leave-one-condition-out fingerprinting accuracy per held-out task."""
+    ntasks = len(class_names)
+    xpos = np.arange(ntasks)
+    chance = 1.0 / nsubjects
+    mean_bacc = float(np.mean(fold_bacc))
 
     with figure(
-        basename.with_stem(f"{basename.stem}-rank-curve"),
-        figsize=(7, 5.5),
+        basename.with_stem(f"{basename.stem}-fingerprinting-{method}"),
+        figsize=(8, 5.5),
         overwrite=overwrite,
     ) as fig:
         ax = fig.gca()
-
-        ax.plot(
-            ranks,
-            results.rank_curve,
-            "o-",
-            markersize=4,
-            label=label or "features",
-        )
-        ax.plot(
-            ranks,
-            ranks / nsubjects,
+        ax.bar(xpos, fold_bacc, color="darkcyan", width=0.55)
+        ax.axhline(
+            chance,
             color="crimson",
-            lw=1.0,
             ls="--",
-            label="chance (random)",
+            lw=1.5,
+            label=rf"Chance ({chance:.3f})",
         )
-        ax.axhline(1.0, color="k", lw=1.0, ls=":")
-        ax.set_xlabel("Rank $k$")
-        ax.set_ylabel(r"Cumulative accuracy (rank $\leq k$)")
-        ax.set_xlim((0, nsubjects + 1))
+        ax.axhline(
+            mean_bacc,
+            color="black",
+            ls=":",
+            lw=1.5,
+            label=rf"Mean ({mean_bacc:.3f})",
+        )
+        ax.set_xticks(xpos)
+        ax.set_xticklabels(list(class_names), rotation=45, ha="right")
+        ax.set_xlabel("Held-out condition")
+        ax.set_ylabel("Balanced accuracy")
         ax.set_ylim((0.0, 1.05))
-        ax.set_title(rf"Subject ID (rank-1 ${results.rank1:.3f}$)")
-        ax.legend(loc="lower right", fontsize="small")
-
-
-def plot_identifiability(
-    basename: pathlib.Path,
-    identifiability: Array2D[np.floating[Any]],
-    label_names: tuple[str, ...],
-    *,
-    overwrite: bool = False,
-) -> None:
-    labels = list(label_names)
-    ntasks = len(labels)
-
-    with figure(
-        basename.with_stem(f"{basename.stem}-identifiability"),
-        figsize=(8, 7),
-        overwrite=overwrite,
-    ) as fig:
-        ax = fig.gca()
-        ax.grid(visible=False)
-
-        im = ax.imshow(identifiability, cmap="viridis", vmin=0.0, vmax=1.0)
-        ax.set_xticks(range(ntasks))
-        ax.set_yticks(range(ntasks))
-        ax.set_xticklabels(labels, rotation=45, ha="right", fontsize="medium")
-        ax.set_yticklabels(labels, fontsize="medium")
-        ax.set_xlabel("Test task")
-        ax.set_ylabel("Reference task")
-        ax.set_title("Rank-1 identification")
-
-        for i in range(ntasks):
-            for j in range(ntasks):
-                if i == j:
-                    continue
-
-                val = identifiability[i, j]
-                color = "white" if val < 0.6 else "black"
-                ax.text(
-                    j,
-                    i,
-                    f"{val:.2f}",
-                    ha="center",
-                    va="center",
-                    color=color,
-                    fontsize="small",
-                )
-
-        fig.colorbar(im, cax=make_colorbar_axes(ax), label="Rank-1 accuracy")
-
-
-def plot_permutation_null(
-    basename: pathlib.Path,
-    null: Array1D[np.floating[Any]],
-    observed: float,
-    *,
-    overwrite: bool = False,
-) -> None:
-    with figure(
-        basename.with_stem(f"{basename.stem}-null"),
-        figsize=(7, 5.5),
-        overwrite=overwrite,
-    ) as fig:
-        ax = fig.gca()
-
-        ax.hist(null, bins=20, color="cornflowerblue", alpha=0.8, edgecolor="none")
-        ax.axvline(observed, color="crimson", lw=2, label=rf"observed ${observed:.3f}$")
-        ax.set_xlabel("Rank-1 accuracy")
-        ax.set_ylabel("Count")
-        ax.set_title("Permutation null")
+        ax.set_title(rf"Subject fingerprinting ({method.upper()})")
         ax.legend(fontsize="small")
 
 
-def plot_reliability(
-    basename: pathlib.Path,
-    self_similarity: Array1D[np.floating[Any]],
-    other_similarity: Array1D[np.floating[Any]],
-    *,
-    overwrite: bool = False,
-) -> None:
-    with figure(
-        basename.with_stem(f"{basename.stem}-reliability"),
-        ncols=2,
-        figsize=(13, 5.5),
-        overwrite=overwrite,
-    ) as fig:
-        ax1, ax2 = fig.axes
-
-        lo = min(np.min(self_similarity), np.min(other_similarity))
-        hi = max(np.max(self_similarity), np.max(other_similarity))
-        bins = np.linspace(lo, hi, 25)
-
-        ax1.hist(self_similarity, bins=bins, alpha=0.7, label="same subject")  # ty: ignore[invalid-argument-type]
-        ax1.hist(other_similarity, bins=bins, alpha=0.7, label="other subjects")  # ty: ignore[invalid-argument-type]
-        ax1.set_xlabel("Similarity (split-half)")
-        ax1.set_ylabel("Count")
-        ax1.set_title("Split-half reliability")
-        ax1.legend(fontsize="small")
-
-        ax2.scatter(other_similarity, self_similarity, s=24, alpha=0.8)
-        ax2.plot([lo, hi], [lo, hi], "k--", lw=1.0, label="y = x")
-        ax2.set_xlabel("Other-subject similarity")
-        ax2.set_ylabel("Same-subject similarity")
-        ax2.set_title("Self vs. others")
-        ax2.legend(fontsize="small")
-
-
-def plot_comparison(
-    basename: pathlib.Path,
-    labels: Sequence[str],
-    rank1: Sequence[float],
-    null_std: Sequence[float],
-    cv_accuracy: Sequence[float],
-    *,
-    chance: float,
-    overwrite: bool = False,
-) -> None:
-    xpos = np.arange(len(labels))
-
-    with figure(
-        basename.with_stem(f"{basename.stem}-comparison"),
-        ncols=2,
-        figsize=(14, 5.5),
-        overwrite=overwrite,
-    ) as fig:
-        ax1, ax2 = fig.axes
-
-        ax1.bar(xpos, rank1, color="steelblue", width=0.6)
-        ax1.errorbar(xpos, rank1, yerr=null_std, fmt="none", ecolor="k", capsize=3)
-        ax1.axhline(chance, color="crimson", ls="--", lw=1.2, label="chance")
-        ax1.set_xticks(xpos)
-        ax1.set_xticklabels(labels, rotation=45, ha="right")
-        ax1.set_ylabel("Rank-1 accuracy")
-        ax1.set_ylim((0.0, 1.05))
-        ax1.set_title("Subject identification")
-        ax1.legend(fontsize="small")
-
-        ax2.bar(xpos, cv_accuracy, color="darkcyan", width=0.6)
-        ax2.axhline(chance, color="crimson", ls="--", lw=1.2, label="chance")
-        ax2.set_xticks(xpos)
-        ax2.set_xticklabels(labels, rotation=45, ha="right")
-        ax2.set_ylabel("Balanced accuracy")
-        ax2.set_ylim((0.0, 1.05))
-        ax2.set_title("Leave-one-task-out classification")
-        ax2.legend(fontsize="small")
-
-
 # }}}
 
 
-# {{{ main
+# {{{ table
+
+
+def _format_score(res: ClassificationResult, *, underline: bool = False) -> str:
+    score = f"${res.mean_bacc:.3f} \\pm {res.std_bacc:.3f}$"
+    return f"\\underline{{{score}}}" if underline else score
+
+
+def format_latex_table(
+    rows: Sequence[tuple[ClassificationResult, ClassificationResult]],
+) -> str:
+    lines = [
+        r"\begin{tabular}{@{}lrrr@{}}",
+        r"\toprule",
+        r"\textbf{Feature family} & \textbf{Size} & \textbf{LDA} & \textbf{MLP} \\",
+        r"\midrule",
+    ]
+    if rows:
+        lda_min = min(res_lda.mean_bacc for res_lda, _ in rows)
+        mlp_min = min(res_mlp.mean_bacc for _, res_mlp in rows)
+
+        for res_lda, res_mlp in rows:
+            lines.append(
+                f"{res_lda.label} & {res_lda.nfeatures:,} & "
+                f"{_format_score(res_lda, underline=res_lda.mean_bacc == lda_min)}"
+                f" & {_format_score(res_mlp, underline=res_mlp.mean_bacc == mlp_min)}"
+                r" \\"
+            )
+
+        chance = 1.0 / rows[0][0].nsubjects
+        lines.extend([
+            r"\midrule",
+            f"Chance & -- & ${chance:.3f}$ & ${chance:.3f}$ \\\\",
+        ])
+
+    lines.extend([
+        r"\bottomrule",
+        r"\end{tabular}",
+    ])
+    return "\n".join(lines)
+
+
+# }}}
 
 
 def main(
-    filenames: Sequence[pathlib.Path],
+    filename: pathlib.Path,
     *,
-    outfile: pathlib.Path | None = None,
-    metric: SimilarityMetric = "correlation",
     method: ClassificationMethod = "lda",
-    zscore: bool = True,
-    nperm: int = 200,
-    random_state: int = 42,
+    zscore_features: bool = True,
+    n_permutations: int = 0,
+    seed: int = 42,
+    outfile: pathlib.Path | None = None,
     overwrite: bool = False,
 ) -> int:
-    ret = 0
+    device = torch.get_default_device()
+    log.info("Device: %s", device)
 
-    summary_labels: list[str] = []
-    summary_rank1: list[float] = []
-    summary_null_std: list[float] = []
-    summary_cv: list[float] = []
-    chance = 0.0
+    try:
+        res, fold_bacc, class_names = evaluate_dataset(
+            filename,
+            method=method,
+            zscore_features=zscore_features,
+            n_permutations=n_permutations,
+            seed=seed,
+            device=device,
+        )
+    except Exception as exc:
+        log.error("Failed to evaluate '%s': %s", filename, exc)
+        return 1
 
+    suffix = "-zscore" if zscore_features else ""
+    basename = (
+        filename.with_stem(f"{filename.stem}{suffix}").with_suffix("")
+        if outfile is None
+        else outfile.with_suffix("")
+    )
+    plot_task_accuracy(
+        basename,
+        fold_bacc,
+        class_names,
+        method=method,
+        nsubjects=res.nsubjects,
+        overwrite=overwrite,
+    )
+
+    return 0
+
+
+def summary(
+    filenames: Sequence[pathlib.Path],
+    *,
+    zscore_features: bool = True,
+    n_permutations: int = 0,
+    seed: int = 42,
+    outfile: pathlib.Path | None = None,
+    overwrite: bool = False,
+) -> int:
+    device = torch.get_default_device()
+    log.info("Device: %s", device)
+
+    rows: list[tuple[ClassificationResult, ClassificationResult]] = []
     for filename in filenames:
-        if not filename.exists():
-            log.error("File does not exist: '%s'.", filename)
-            ret = 1
-            continue
-
         try:
-            ds = load_feature_datasets(filename)
+            res_lda, _, _ = evaluate_dataset(
+                filename,
+                method="lda",
+                zscore_features=zscore_features,
+                n_permutations=n_permutations,
+                seed=seed,
+                device=device,
+            )
+            res_mlp, _, _ = evaluate_dataset(
+                filename,
+                method="mlp",
+                zscore_features=zscore_features,
+                n_permutations=n_permutations,
+                seed=seed,
+                device=device,
+            )
         except Exception as exc:
-            log.error("Failed to load features from '%s': %s", filename, exc)
-            ret = 1
-            continue
+            log.error("Failed to evaluate '%s': %s", filename, exc)
+            return 1
 
-        try:
-            x = to_tensor(ds)
-        except ValueError as exc:
-            log.error("Failed to reshape features from '%s': %s", filename, exc)
-            ret = 1
-            continue
+        rows.append((res_lda, res_mlp))
 
-        ntasks, nsubjects, nfeatures = x.shape
-        chance = 1.0 / nsubjects
-        log.info(
-            "Loaded '%s': %d tasks, %d subjects, %d features.",
-            filename.stem,
-            ntasks,
-            nsubjects,
-            nfeatures,
-        )
+    table = format_latex_table(rows)
+    if outfile is None:
+        print(table)
+    else:
+        if outfile.exists() and not overwrite:
+            log.error("Output file '%s' exists (use --force to overwrite).", outfile)
+            return 1
 
-        if outfile is None:
-            basename = filename.with_suffix("")
-        elif len(filenames) == 1:
-            basename = outfile.with_suffix("")
-        else:
-            basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}")
+        outfile.write_text(f"{table}\n", encoding="utf-8")
+        log.info("Wrote summary table to '%s'.", outfile)
 
-        # 1. leave-one-task-out identification
-        results = compute_leave_one_task_out(x, metric, zscore=zscore)
-        (r1_lo, r1_hi), (r5_lo, r5_hi) = bootstrap_rank_ci(
-            results.ranks, seed=random_state
-        )
-        log.info(
-            "    Rank-1: %.3f (95%% CI [%.3f, %.3f]) | rank-5: %.3f (95%% CI [%.3f, %.3f]) | mean rank: %.2f (chance %.4f)",
-            results.rank1,
-            r1_lo,
-            r1_hi,
-            results.rank5,
-            r5_lo,
-            r5_hi,
-            results.mean_rank,
-            chance,
-        )
-        plot_rank_curve(
-            basename, results, label=clean_label(filename.stem), overwrite=overwrite
-        )
-
-        # 2. identifiability matrix
-        identifiability = compute_identifiability_matrix(x, metric, zscore=zscore)
-        plot_identifiability(
-            basename, identifiability, ds.class_names, overwrite=overwrite
-        )
-
-        # 3. leave-one-task-out classification
-        cv_accuracy = compute_cross_validated_classification(x, method=method)
-        log.info("    Balanced accuracy (%s): %.3f", method, cv_accuracy)
-
-        # 4. split-half reliability
-        self_similarity, other_similarity = compute_split_half_reliability(
-            x, metric, zscore=zscore, random_state=random_state
-        )
-        margin = self_similarity - other_similarity
-        log.info(
-            "    Split-half similarity: self %.3f vs others %.3f (margin %.3f +/- %.3f)",
-            np.mean(self_similarity),
-            np.mean(other_similarity),
-            np.mean(margin),
-            np.std(margin),
-        )
-        plot_reliability(
-            basename, self_similarity, other_similarity, overwrite=overwrite
-        )
-
-        # 5. permutation null
-        if nperm > 0:
-            null = compute_permutation_null(
-                x, metric, zscore=zscore, nperm=nperm, random_state=random_state
-            )
-            p_r1 = float((np.sum(null.rank1 >= results.rank1) + 1) / (nperm + 1))
-            p_r5 = float((np.sum(null.rank5 >= results.rank5) + 1) / (nperm + 1))
-            null_std = float(np.std(null.rank1))
-            log.info(
-                "    Permutation null R1: %.3f +/- %.3f (p=%.4g) | R5: %.3f +/- %.3f (p=%.4g)",
-                np.mean(null.rank1),
-                null_std,
-                p_r1,
-                np.mean(null.rank5),
-                np.std(null.rank5),
-                p_r5,
-            )
-            plot_permutation_null(
-                basename, null.rank1, results.rank1, overwrite=overwrite
-            )
-        else:
-            null_std = 0.0
-
-        summary_labels.append(clean_label(filename.stem))
-        summary_rank1.append(results.rank1)
-        summary_null_std.append(null_std)
-        summary_cv.append(cv_accuracy)
-
-    if len(summary_labels) > 1:
-        if outfile is not None:
-            compare_basename = outfile.with_suffix("")
-        else:
-            compare_basename = filenames[0].parent / "dataset-features"
-
-        plot_comparison(
-            compare_basename,
-            summary_labels,
-            summary_rank1,
-            summary_null_std,
-            summary_cv,
-            chance=chance,
-            overwrite=overwrite,
-        )
-
-    return ret
-
-
-# }}}
+    return 0
 
 
 if __name__ == "__main__":
@@ -672,73 +446,117 @@ if __name__ == "__main__":
     ):
         pass
 
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--device",
+        action=FuzzyChoiceAction,
+        choices=sorted(available_device_names()),
+        default="cpu",
+        help="The default device used by the framework",
+    )
+    common.add_argument(
+        "--n-permutations",
+        type=int,
+        default=0,
+        help="Number of label permutations (0 to skip)",
+    )
+    common.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for permutations and MLP initialization",
+    )
+    common.add_argument(
+        "--no-zscore",
+        action="store_false",
+        dest="zscore",
+        help="Disable z-scoring each feature on the training conditions",
+    )
+    common.add_argument(
+        "--force",
+        action="store_true",
+        help="Force overwrite of existing files",
+    )
+    common.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Only show error messages",
+    )
+
     parser = argparse.ArgumentParser(
         formatter_class=HelpFormatter,
         description=SCRIPT_LONG_HELP,
     )
-    parser.add_argument("filenames", nargs="+", type=pathlib.Path)
-    parser.add_argument(
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    run_parser = subparsers.add_parser(
+        "run",
+        parents=[common],
+        formatter_class=HelpFormatter,
+        help="Evaluate a single feature dataset and plot per-task accuracy",
+    )
+    run_parser.add_argument("filename", type=pathlib.Path)
+    run_parser.add_argument(
+        "--method",
+        choices=get_args(ClassificationMethod),
+        default="lda",
+        help="The method used to do the classification",
+    )
+    run_parser.add_argument(
         "-o",
         "--outfile",
         type=pathlib.Path,
         default=None,
         help="Basename for output files (named '{basename}-XX')",
     )
-    parser.add_argument(
-        "--metric",
-        choices=("correlation", "cosine", "euclidean"),
-        default="correlation",
-        help="Similarity metric used for identification",
+
+    summary_parser = subparsers.add_parser(
+        "summary",
+        parents=[common],
+        formatter_class=HelpFormatter,
+        help="Evaluate multiple feature datasets (LDA and MLP) and emit a LaTeX table",
     )
-    parser.add_argument(
-        "--method",
-        choices=("lda", "ridge"),
-        default="lda",
-        help="Classifier used for leave-one-task-out classification",
+    summary_parser.add_argument("filenames", nargs="+", type=pathlib.Path)
+    summary_parser.add_argument(
+        "-o",
+        "--outfile",
+        type=pathlib.Path,
+        default=None,
+        help="Optional output .tex file (defaults to stdout)",
     )
-    parser.add_argument(
-        "--no-zscore",
-        action="store_false",
-        dest="zscore",
-        help="Disable z-scoring each feature on the reference set",
-    )
-    parser.add_argument(
-        "--nperm",
-        type=int,
-        default=200,
-        help="Number of permutation-null samples",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Force overwrite of existing files",
-    )
-    parser.add_argument(
-        "-q",
-        "--quiet",
-        action="store_true",
-        help="Only show error messages",
-    )
+
     args = parser.parse_args()
 
     if not args.quiet:
         log.setLevel(logging.INFO)
+    logging.getLogger("lib.torchlib").setLevel(logging.WARNING)
 
-    raise SystemExit(
-        main(
-            args.filenames,
-            outfile=args.outfile,
-            metric=args.metric,
-            method=args.method,
-            zscore=args.zscore,
-            nperm=args.nperm,
-            random_state=args.seed,
-            overwrite=args.force,
-        )
-    )
+    with torch_default_device(args.device):
+        torch.set_float32_matmul_precision("high")
+
+        if args.command == "run":
+            raise SystemExit(
+                main(
+                    args.filename,
+                    outfile=args.outfile,
+                    method=args.method,
+                    zscore_features=args.zscore,
+                    n_permutations=args.n_permutations,
+                    seed=args.seed,
+                    overwrite=args.force,
+                )
+            )
+        elif args.command == "summary":
+            raise SystemExit(
+                summary(
+                    args.filenames,
+                    zscore_features=args.zscore,
+                    n_permutations=args.n_permutations,
+                    seed=args.seed,
+                    outfile=args.outfile,
+                    overwrite=args.force,
+                )
+            )
+        else:
+            raise ValueError(f"unsupported command: {args.command}")
