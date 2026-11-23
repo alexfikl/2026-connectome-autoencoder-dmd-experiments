@@ -284,7 +284,7 @@ def plot_dataset_statistics(
 
         bins = np.arange(1, n_levels + 2) - 0.5
         ax.hist(
-            np.asarray(escape_time)[escapers].ravel(),
+            np.ravel(np.asarray(escape_time)[escapers]),
             bins=bins,  # ty: ignore[invalid-argument-type]
             color="C0",
             label="Escaped",

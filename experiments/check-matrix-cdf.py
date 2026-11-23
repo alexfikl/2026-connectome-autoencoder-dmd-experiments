@@ -31,7 +31,7 @@ ArrayND: TypeAlias = np.ndarray[tuple[int, ...], np.dtype[np.floating[Any]]]
 
 
 def compute_cdf(matrices: ArrayND) -> tuple[Array1D, Array1D]:
-    amat = np.abs(matrices.ravel())
+    amat = np.abs(np.ravel(matrices))
     amat = amat[amat > 0.0]
     amat_sorted = np.sort(amat)
     cdf = np.arange(1, len(amat_sorted) + 1) / len(amat_sorted)

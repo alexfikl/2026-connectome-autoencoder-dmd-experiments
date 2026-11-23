@@ -10,13 +10,13 @@ from typing import Any, Literal, get_args
 import numpy as np
 import torch
 
-from commonlib import load_feature_datasets
+from commonlib import flatten_feature_datasets, load_feature_datasets
 from nneuroutil.helpers import FuzzyChoiceAction
 from nneuroutil.interop.torch import available_device_names, torch_default_device
 from nneuroutil.typing import Array1D, Array2D
 from nneuroutil.visualization import figure, make_colorbar_axes
 
-log = logging.getLogger("lib.autoencoder_network")
+log = logging.getLogger("lib.classify_task_decoding")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
@@ -63,6 +63,11 @@ def _fit_and_predict(
     raise ValueError(f"unknown method: {method!r}")
 
 
+def _subject_rows(groups: Array1D[np.integer[Any]]) -> list[Array1D[np.integer[Any]]]:
+    """Return the row indices of each subject in ``groups``."""
+    return [np.flatnonzero(groups == s) for s in np.unique(groups)]
+
+
 def _bootstrap_subject_ci(
     y_true: Array1D[np.integer[Any]],
     oof_preds: Array2D[np.integer[Any]],
@@ -74,18 +79,17 @@ def _bootstrap_subject_ci(
     """Compute 95% bootstrap CI over subjects for balanced accuracy."""
     from sklearn.metrics import balanced_accuracy_score
 
-    unique_subjects = np.unique(groups)
-    subj_rows = [np.flatnonzero(groups == s) for s in unique_subjects]
+    subj_rows = _subject_rows(groups)
+    n_subjects = len(subj_rows)
     n_repeats = oof_preds.shape[0]
-    y_rep = np.repeat(y_true[None, :], n_repeats, axis=0)
 
     rng = np.random.default_rng(seed)
     vals = np.empty(n_bootstrap, dtype=np.float64)
     for b in range(n_bootstrap):
-        sampled = rng.integers(0, len(subj_rows), size=len(subj_rows))
+        sampled = rng.integers(0, n_subjects, size=n_subjects)
         idx = np.concatenate([subj_rows[s] for s in sampled])
         vals[b] = balanced_accuracy_score(
-            y_rep[:, idx].ravel(), oof_preds[:, idx].ravel()
+            np.tile(y_true[idx], n_repeats), np.ravel(oof_preds[:, idx])
         )
 
     lo, hi = np.percentile(vals, [2.5, 97.5])
@@ -125,21 +129,20 @@ def plot_confusion(
         ax.set_ylabel("True")
         ax.set_title(rf"{method.upper()} (bal. acc. ${balanced_acc:.3f}$)")
 
-        for i in range(nclasses):
-            for j in range(nclasses):
-                if cm[i, j] == 0:
-                    continue
+        for i, j in np.ndindex(cm.shape):
+            if cm[i, j] == 0:
+                continue
 
-                color = "white" if cm[i, j] > 0.5 * vmax else "black"
-                ax.text(
-                    j,
-                    i,
-                    str(cm[i, j]),
-                    ha="center",
-                    va="center",
-                    color=color,
-                    fontsize="small",
-                )
+            color = "white" if cm[i, j] > 0.5 * vmax else "black"
+            ax.text(
+                j,
+                i,
+                str(cm[i, j]),
+                ha="center",
+                va="center",
+                color=color,
+                fontsize="small",
+            )
 
         fig.colorbar(im, cax=make_colorbar_axes(ax), label="Count")
 
@@ -159,11 +162,7 @@ def _run_cv(
     n_repeats: int,
     seed: int,
     device: torch.device | str,
-) -> tuple[
-    Array2D[np.integer[Any]],
-    list[float],
-    list[float],
-]:
+) -> tuple[Array2D[np.integer[Any]], list[float], list[float]]:
     """Run repeated subject-grouped K-fold CV on ``(nsamples, nfeatures)``."""
     from sklearn.metrics import balanced_accuracy_score, f1_score
     from sklearn.model_selection import RepeatedKFold
@@ -233,21 +232,13 @@ def main(
     device = torch.get_default_device()
     log.info("Device: %s", device)
 
-    if not filename.exists():
-        log.error("File does not exist: '%s'.", filename)
-        return 1
-
     try:
         ds = load_feature_datasets(filename, binary=binary)
     except Exception as exc:
         log.error("Failed to load features from '%s': %s", filename, exc)
         return 1
 
-    x = np.concatenate(ds.x, axis=0)
-    groups = np.concatenate(ds.groups, axis=0)
-    y = np.concatenate([
-        np.full(xi.shape[0], c, dtype=np.int64) for c, xi in enumerate(ds.x)
-    ])
+    x, y, groups = flatten_feature_datasets(ds)
     class_names = ds.class_names
     nclasses = len(class_names)
     unique_subjects = np.unique(groups)
@@ -286,9 +277,9 @@ def main(
     if n_permutations > 0:
         rng = np.random.default_rng(seed)
         null_baccs = np.empty(n_permutations, dtype=np.float64)
-        subj_rows = [np.flatnonzero(groups == s) for s in unique_subjects]
+        subj_rows = _subject_rows(groups)
         for p in range(n_permutations):
-            y_perm = y.copy()
+            y_perm = np.copy(y)
             for rows in subj_rows:
                 y_perm[rows] = rng.permutation(y_perm[rows])
             _, p_bacc, _ = _run_cv(
@@ -317,13 +308,9 @@ def main(
         perm_str,
     )
 
-    y_rep = np.repeat(y[None, :], n_repeats, axis=0)
-    cm = confusion_matrix(
-        np.ravel(y_rep),
-        np.ravel(oof_preds),
-        labels=list(range(nclasses)),
-    )
-    overall_bacc = balanced_accuracy_score(np.ravel(y_rep), np.ravel(oof_preds))
+    y_rep = np.tile(y, n_repeats)
+    cm = confusion_matrix(y_rep, np.ravel(oof_preds), labels=list(range(nclasses)))
+    overall_bacc = balanced_accuracy_score(y_rep, np.ravel(oof_preds))
 
     suffix = "-binary" if binary else "-multiclass"
     if zscore_features:
@@ -364,7 +351,7 @@ if __name__ == "__main__":
         action=FuzzyChoiceAction,
         choices=sorted(available_device_names()),
         default="cpu",
-        help="The default deviced used by the framework",
+        help="The default device used by the framework",
     )
     parser.add_argument(
         "--method",

@@ -140,7 +140,7 @@ def compute_leave_one_task_out(
         reference = np.delete(x, t, axis=0).mean(axis=0)
         ranks[t] = _ranks(similarity(x[t], reference, metric))
 
-    flat = ranks.ravel()
+    flat = np.ravel(ranks)
     rank_curve = np.array([np.mean(flat < k) for k in range(1, nsubjects + 1)])
 
     return IdentificationResults(ranks=ranks, rank_curve=rank_curve)
