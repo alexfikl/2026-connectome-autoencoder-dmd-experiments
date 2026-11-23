@@ -83,9 +83,14 @@ def fit_and_predict(
     if method == "mlp":
         from torchlib import classify_multilayer_perceptron
 
+        # NOTE: the features are stored as float64, but the MLP is significantly
+        # faster in single precision and the resulting accuracy is unchanged
         torch.manual_seed(seed)
         clf = classify_multilayer_perceptron(
-            x_train_list, y_train_list, learning_rate_init=1.0e-2, max_iter=400
+            [xi.float() for xi in x_train_list],
+            y_train_list,
+            learning_rate_init=1.0e-2,
+            max_iter=400,
         )
         return clf.predict(x_test)
 

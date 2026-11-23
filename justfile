@@ -214,13 +214,13 @@ table6:
 [doc("Generate Table 7 (task decoding)")]
 table7a:
     {{ PYTHON }} experiments/classify-task-decoding.py \
-        summary --force --device cuda --n-permutations 100 \
+        summary --force --device cuda --n-permutations 0 \
         data/dataset-features-*.npz
 
 [doc("Generate Table 7 (subject fingerprinting)")]
 table7b:
     {{ PYTHON }} experiments/classify-subject-fingerprinting.py \
-        summary --force --device cuda --n-permutations 100 \
+        summary --force --device cuda --n-permutations 0 \
         data/dataset-features-*.npz
 
 # }}}
