@@ -10,7 +10,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from commonlib import load_feature_datasets
+from commonlib import flatten_feature_datasets, load_feature_datasets
 from nneuroutil.typing import Array1D, Array2D
 from nneuroutil.visualization import figure
 
@@ -48,10 +48,26 @@ class RegressionResult(NamedTuple):
     is_structural: Array1D[np.bool]
 
 
+class SubjectIndex(NamedTuple):
+    unique: Array1D[np.integer[Any]]
+    idx: Array1D[np.integer[Any]]
+    rows: list[Array1D[np.integer[Any]]]
+
+
+def make_subject_index(groups: Array1D[np.integer[Any]]) -> SubjectIndex:
+    """Map each sample to its subject and collect the rows of each subject."""
+    unique, idx = np.unique(groups, return_inverse=True)
+    return SubjectIndex(
+        unique=unique,
+        idx=idx,
+        rows=[np.flatnonzero(idx == s) for s in range(unique.size)],
+    )
+
+
 def run_ridge_cv(
     x: Array2D[np.floating[Any]],
     y: Array1D[np.floating[Any]],
-    groups: Array1D[np.integer[Any]],
+    subjects: SubjectIndex,
     is_structural: Array1D[np.bool],
     *,
     name: str,
@@ -67,7 +83,6 @@ def run_ridge_cv(
     from sklearn.model_selection import RepeatedKFold
     from sklearn.preprocessing import StandardScaler
 
-    unique_subjects = np.unique(groups)
     rkf = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=seed)
     alphas = np.logspace(-3, 5, 25)
 
@@ -76,10 +91,10 @@ def run_ridge_cv(
     fold_r2 = np.empty(n_splits * n_repeats, dtype=x.dtype)
 
     # go through all the folds: fit + compute the R2 scores
-    for fold_idx, (train_idx, test_idx) in enumerate(rkf.split(unique_subjects)):
+    for fold_idx, (train_idx, test_idx) in enumerate(rkf.split(subjects.unique)):
         rep = fold_idx // n_splits
-        train_mask = np.isin(groups, unique_subjects[train_idx])
-        test_mask = np.isin(groups, unique_subjects[test_idx])
+        train_mask = np.isin(subjects.idx, train_idx)
+        test_mask = np.isin(subjects.idx, test_idx)
 
         scaler = StandardScaler()
         x_tr_s = scaler.fit_transform(x[train_mask])
@@ -95,13 +110,12 @@ def run_ridge_cv(
     y_pred_mean = np.mean(oof_pred, axis=0)
 
     # compute confidence intervals
-    subj_rows = [np.flatnonzero(groups == s) for s in unique_subjects]
     rng = np.random.default_rng(seed)
     boot_r2 = np.empty(n_bootstrap, dtype=x.dtype)
 
     for b in range(n_bootstrap):
-        sampled = rng.integers(0, len(subj_rows), size=len(subj_rows))
-        idx = np.concatenate([subj_rows[s] for s in sampled])
+        sampled = rng.integers(0, len(subjects.rows), size=len(subjects.rows))
+        idx = np.concatenate([subjects.rows[s] for s in sampled])
         boot_r2[b] = r2_score(y[idx], y_pred_mean[idx])
 
     ci_lo, ci_hi = np.percentile(boot_r2, [2.5, 97.5])
@@ -129,7 +143,6 @@ def plot_scale_regression(
     results_fro: list[RegressionResult],
     results_rho: list[RegressionResult],
     *,
-    scatter_index: int = -1,
     overwrite: bool = False,
 ) -> None:
     """Plot the Ridge R^2 bars and the predicted vs. true scatter."""
@@ -173,45 +186,45 @@ def plot_scale_regression(
         )
         ax.set_xticks(x_pos)
         ax.set_xticklabels(names)
-        ax.set_ylabel(r"Out-of-fold $R^2$")
+        ax.set_ylabel(r"$R^2$")
         ax.set_ylim(min(0.0, np.min(fro_means) - 0.05), 1.05)
-        ax.set_title(r"Global scale prediction ($R^2$)")
-        ax.legend(fontsize="small")
+        ax.grid(visible=False, which="both")
+        ax.legend()
 
-    scatter_res = results_fro[scatter_index]
-    with figure(
-        outfile.with_stem(f"{outfile.stem}-scatter"),
-        figsize=(5.0, 4.5),
-        overwrite=overwrite,
-    ) as fig:
-        (ax,) = fig.axes
-        struct = scatter_res.is_structural
-        func = ~struct  # ty: ignore[unsupported-operator]
-        ax.scatter(
-            scatter_res.y_true[func],
-            scatter_res.y_pred[func],
-            s=18,
-            alpha=0.7,
-            label="Functional",
-        )
-        ax.scatter(
-            scatter_res.y_true[struct],
-            scatter_res.y_pred[struct],
-            s=22,
-            alpha=0.85,
-            label="Structural",
-        )
+    for result in results_fro:
+        with figure(
+            outfile.with_stem(f"{outfile.stem}-scatter-{result.name.lower()}"),
+            figsize=(5.0, 4.5),
+            overwrite=overwrite,
+        ) as fig:
+            (ax,) = fig.axes
+            struct = result.is_structural
+            func = ~struct  # ty: ignore[unsupported-operator]
+            ax.scatter(
+                result.y_true[func],
+                result.y_pred[func],
+                s=18,
+                alpha=0.7,
+                label="Functional",
+            )
+            ax.scatter(
+                result.y_true[struct],
+                result.y_pred[struct],
+                s=22,
+                alpha=0.85,
+                label="Structural",
+            )
 
-        lo = min(np.min(scatter_res.y_true), np.min(scatter_res.y_pred))
-        hi = max(np.max(scatter_res.y_true), np.max(scatter_res.y_pred))
-        pad = 0.04 * (hi - lo)
-        ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], "k--", lw=1.2)
-        ax.set_xlim(lo - pad, hi + pad)
-        ax.set_ylim(lo - pad, hi + pad)
-        ax.set_xlabel(r"True $\|\mathbf{A}\|_F$")
-        ax.set_ylabel(r"Predicted $\|\mathbf{A}\|_F$")
-        ax.set_title(rf"{scatter_res.name} ($R^2 = {scatter_res.r2_mean:.3f}$)")
-        ax.legend(fontsize="small")
+            lo = min(np.min(result.y_true), np.min(result.y_pred))
+            hi = max(np.max(result.y_true), np.max(result.y_pred))
+            pad = 0.04 * (hi - lo)
+
+            ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], "k--", lw=1.2)
+            ax.set_xlim(lo - pad, hi + pad)
+            ax.set_ylim(lo - pad, hi + pad)
+            ax.set_xlabel(r"True $\|\mathbf{A}\|_F$")
+            ax.set_ylabel(r"Predicted $\|\mathbf{A}\|_F$")
+            ax.legend()
 
 
 # }}}
@@ -242,13 +255,11 @@ def main(
         return 1
 
     ds_scale = load_feature_datasets(scale_file, binary=True)
-    y_scale = np.concatenate(ds_scale.x, axis=0)
+    y_scale, labels_scale, _ = flatten_feature_datasets(ds_scale)
     y_fro = y_scale[:, 0]
     y_rho = y_scale[:, 1]
-    is_structural = np.repeat(
-        [name == "Structural" for name in ds_scale.class_names],
-        [xi.shape[0] for xi in ds_scale.x],
-    )
+    class_names = np.asarray(ds_scale.class_names)
+    is_structural = class_names[labels_scale] == "Structural"
 
     results_fro: list[RegressionResult] = []
     results_rho: list[RegressionResult] = []
@@ -269,14 +280,14 @@ def main(
             )
             return 1
 
-        x_all = np.concatenate(ds.x, axis=0)
-        groups_all = np.concatenate(ds.groups, axis=0)
+        x_all, _, groups_all = flatten_feature_datasets(ds)
+        subjects = make_subject_index(groups_all)
         name = ds.label
 
         res_fro = run_ridge_cv(
             x_all,
             y_fro,
-            groups_all,
+            subjects,
             is_structural,
             name=name,
             target_name="||A||_F",
@@ -287,7 +298,7 @@ def main(
         res_rho = run_ridge_cv(
             x_all,
             y_rho,
-            groups_all,
+            subjects,
             is_structural,
             name=name,
             target_name="rho(A)",
@@ -317,7 +328,6 @@ def main(
         outfile,
         results_fro,
         results_rho,
-        scatter_index=-1,
         overwrite=overwrite,
     )
     return 0

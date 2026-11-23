@@ -222,4 +222,13 @@ figure456:
     {{ PYTHON }} experiments/nn-autoencoder-dmd.py --force infer \
         data/Emotion_LR_Task-ae-dmd-m45-r64-n32-c16c0f32c730.pkl
 
+[doc("Generate plots for Figure 8")]
+figure8:
+    {{ PYTHON }} experiments/visualize-scale-regression.py --force \
+        --scale-file data/dataset-features-scale.npz \
+        data/dataset-features-geometry.npz \
+        data/dataset-features-fourier.npz \
+        data/dataset-features-dmd.npz \
+        data/dataset-features-ae-dmd.npz
+
 # }}}

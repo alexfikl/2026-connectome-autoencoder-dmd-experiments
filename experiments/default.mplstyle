@@ -33,7 +33,7 @@ ytick.major.width: 1.5
 ytick.minor.size: 4.0
 
 # legend
-legend.fontsize: 20
+legend.fontsize: 16
 legend.frameon: True
 legend.fancybox: False
 legend.facecolor: white
