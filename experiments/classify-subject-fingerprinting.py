@@ -130,15 +130,28 @@ class IdentificationResults(NamedTuple):
 
 
 def compute_leave_one_task_out(
-    x: Array3D[np.floating[Any]], metric: SimilarityMetric
+    x: Array3D[np.floating[Any]],
+    metric: SimilarityMetric,
+    *,
+    zscore: bool = True,
 ) -> IdentificationResults:
     """Identify subjects from a held-out task using all other tasks."""
-    ntasks, nsubjects, _ = x.shape
+    from sklearn.preprocessing import StandardScaler
+
+    ntasks, nsubjects, nfeatures = x.shape
     ranks = np.zeros((ntasks, nsubjects), dtype=int)
 
     for t in range(ntasks):
-        reference = np.delete(x, t, axis=0).mean(axis=0)
-        ranks[t] = _ranks(similarity(x[t], reference, metric))
+        ref_scans = np.delete(x, t, axis=0)
+        test_scans = x[t]
+        if zscore:
+            scaler = StandardScaler()
+            ref_flat = scaler.fit_transform(np.reshape(ref_scans, (-1, nfeatures)))
+            test_scans = scaler.transform(test_scans)
+            ref_scans = np.reshape(ref_flat, (ntasks - 1, nsubjects, nfeatures))
+
+        reference = ref_scans.mean(axis=0)
+        ranks[t] = _ranks(similarity(test_scans, reference, metric))
 
     flat = np.ravel(ranks)
     rank_curve = np.array([np.mean(flat < k) for k in range(1, nsubjects + 1)])
@@ -147,9 +160,14 @@ def compute_leave_one_task_out(
 
 
 def compute_identifiability_matrix(
-    x: Array3D[np.floating[Any]], metric: SimilarityMetric
+    x: Array3D[np.floating[Any]],
+    metric: SimilarityMetric,
+    *,
+    zscore: bool = True,
 ) -> Array2D[np.floating[Any]]:
     """Rank-1 identification using one reference task against one test task."""
+    from sklearn.preprocessing import StandardScaler
+
     ntasks = x.shape[0]
     identifiability = np.full((ntasks, ntasks), np.nan)
 
@@ -158,7 +176,15 @@ def compute_identifiability_matrix(
             if i == j:
                 continue
 
-            identifiability[i, j] = np.mean(_ranks(similarity(x[j], x[i], metric)) == 0)
+            ref_scans, test_scans = x[i], x[j]
+            if zscore:
+                scaler = StandardScaler()
+                ref_scans = scaler.fit_transform(ref_scans)
+                test_scans = scaler.transform(test_scans)
+
+            identifiability[i, j] = np.mean(
+                _ranks(similarity(test_scans, ref_scans, metric)) == 0
+            )
 
     return identifiability
 
@@ -205,16 +231,28 @@ def compute_split_half_reliability(
     x: Array3D[np.floating[Any]],
     metric: SimilarityMetric,
     *,
+    zscore: bool = True,
     random_state: int = 42,
 ) -> tuple[Array1D[np.floating[Any]], Array1D[np.floating[Any]]]:
     """Per-subject self vs. mean-other similarity across two task halves."""
-    ntasks, nsubjects, _ = x.shape
+    from sklearn.preprocessing import StandardScaler
+
+    ntasks, nsubjects, nfeatures = x.shape
     rng = np.random.default_rng(random_state)
     idx = rng.permutation(ntasks)
     half = max(1, ntasks // 2)
 
-    first = x[idx[:half]].mean(axis=0)
-    second = x[idx[half:]].mean(axis=0)
+    first_scans = x[idx[:half]]
+    second_scans = x[idx[half:]]
+    if zscore:
+        scaler = StandardScaler()
+        first_flat = scaler.fit_transform(np.reshape(first_scans, (-1, nfeatures)))
+        second_flat = scaler.transform(np.reshape(second_scans, (-1, nfeatures)))
+        first_scans = np.reshape(first_flat, first_scans.shape)
+        second_scans = np.reshape(second_flat, second_scans.shape)
+
+    first = first_scans.mean(axis=0)
+    second = second_scans.mean(axis=0)
     sim = similarity(first, second, metric)
 
     self = np.diag(sim).copy()
@@ -223,26 +261,58 @@ def compute_split_half_reliability(
     return self, others
 
 
+class PermutationNull(NamedTuple):
+    rank1: Array1D[np.floating[Any]]
+    rank5: Array1D[np.floating[Any]]
+
+
+def bootstrap_rank_ci(
+    ranks: Array2D[np.integer[Any]],
+    *,
+    n_bootstrap: int = 1000,
+    seed: int = 42,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Compute subject-level 95% bootstrap CIs for rank-1 and rank-5 accuracy."""
+    nsubjects = ranks.shape[1]
+    rng = np.random.default_rng(seed)
+
+    boot_r1 = np.empty(n_bootstrap, dtype=np.float64)
+    boot_r5 = np.empty(n_bootstrap, dtype=np.float64)
+    for b in range(n_bootstrap):
+        sampled = rng.integers(0, nsubjects, size=nsubjects)
+        sampled_ranks = ranks[:, sampled]
+        boot_r1[b] = np.mean(sampled_ranks == 0)
+        boot_r5[b] = np.mean(sampled_ranks < 5)  # ty: ignore[unsupported-operator]
+
+    r1_lo, r1_hi = np.percentile(boot_r1, [2.5, 97.5])
+    r5_lo, r5_hi = np.percentile(boot_r5, [2.5, 97.5])
+    return (float(r1_lo), float(r1_hi)), (float(r5_lo), float(r5_hi))
+
+
 def compute_permutation_null(
     x: Array3D[np.floating[Any]],
     metric: SimilarityMetric,
     *,
+    zscore: bool = True,
     nperm: int = 200,
     random_state: int = 42,
-) -> Array1D[np.floating[Any]]:
-    """Null rank-1 identification accuracy with shuffled subject labels."""
+) -> PermutationNull:
+    """Null rank-1 and rank-5 identification accuracy with shuffled subject labels."""
     rng = np.random.default_rng(random_state)
     ntasks, nsubjects, _ = x.shape
-    null = np.empty(nperm)
+    null_r1 = np.empty(nperm, dtype=np.float64)
+    null_r5 = np.empty(nperm, dtype=np.float64)
 
     for p in range(nperm):
         permuted = np.copy(x)
         for t in range(ntasks):
             permuted[t] = permuted[t][rng.permutation(nsubjects)]
 
-        null[p] = compute_leave_one_task_out(permuted, metric).rank1
+        res = compute_leave_one_task_out(permuted, metric, zscore=zscore)
+        null_r1[p] = res.rank1
+        null_r5[p] = res.rank5
 
-    return null
+    return PermutationNull(rank1=null_r1, rank5=null_r5)
 
 
 # }}}
@@ -447,6 +517,7 @@ def main(
     outfile: pathlib.Path | None = None,
     metric: SimilarityMetric = "correlation",
     method: ClassificationMethod = "lda",
+    zscore: bool = True,
     nperm: int = 200,
     random_state: int = 42,
     overwrite: bool = False,
@@ -497,11 +568,18 @@ def main(
             basename = outfile.with_stem(f"{filename.stem}-{outfile.stem}")
 
         # 1. leave-one-task-out identification
-        results = compute_leave_one_task_out(x, metric)
+        results = compute_leave_one_task_out(x, metric, zscore=zscore)
+        (r1_lo, r1_hi), (r5_lo, r5_hi) = bootstrap_rank_ci(
+            results.ranks, seed=random_state
+        )
         log.info(
-            "    Rank-1: %.3f | rank-5: %.3f | mean rank: %.2f (chance %.4f)",
+            "    Rank-1: %.3f (95%% CI [%.3f, %.3f]) | rank-5: %.3f (95%% CI [%.3f, %.3f]) | mean rank: %.2f (chance %.4f)",
             results.rank1,
+            r1_lo,
+            r1_hi,
             results.rank5,
+            r5_lo,
+            r5_hi,
             results.mean_rank,
             chance,
         )
@@ -510,7 +588,7 @@ def main(
         )
 
         # 2. identifiability matrix
-        identifiability = compute_identifiability_matrix(x, metric)
+        identifiability = compute_identifiability_matrix(x, metric, zscore=zscore)
         plot_identifiability(
             basename, identifiability, ds.class_names, overwrite=overwrite
         )
@@ -521,32 +599,46 @@ def main(
 
         # 4. split-half reliability
         self_similarity, other_similarity = compute_split_half_reliability(
-            x, metric, random_state=random_state
+            x, metric, zscore=zscore, random_state=random_state
         )
+        margin = self_similarity - other_similarity
         log.info(
-            "    Split-half similarity: self %.3f vs others %.3f",
+            "    Split-half similarity: self %.3f vs others %.3f (margin %.3f +/- %.3f)",
             np.mean(self_similarity),
             np.mean(other_similarity),
+            np.mean(margin),
+            np.std(margin),
         )
         plot_reliability(
             basename, self_similarity, other_similarity, overwrite=overwrite
         )
 
         # 5. permutation null
-        null = compute_permutation_null(
-            x, metric, nperm=nperm, random_state=random_state
-        )
-        log.info(
-            "    Permutation null: %.3f +/- %.3f (observed %.3f)",
-            np.mean(null),
-            np.std(null),
-            results.rank1,
-        )
-        plot_permutation_null(basename, null, results.rank1, overwrite=overwrite)
+        if nperm > 0:
+            null = compute_permutation_null(
+                x, metric, zscore=zscore, nperm=nperm, random_state=random_state
+            )
+            p_r1 = float((np.sum(null.rank1 >= results.rank1) + 1) / (nperm + 1))
+            p_r5 = float((np.sum(null.rank5 >= results.rank5) + 1) / (nperm + 1))
+            null_std = float(np.std(null.rank1))
+            log.info(
+                "    Permutation null R1: %.3f +/- %.3f (p=%.4g) | R5: %.3f +/- %.3f (p=%.4g)",
+                np.mean(null.rank1),
+                null_std,
+                p_r1,
+                np.mean(null.rank5),
+                np.std(null.rank5),
+                p_r5,
+            )
+            plot_permutation_null(
+                basename, null.rank1, results.rank1, overwrite=overwrite
+            )
+        else:
+            null_std = 0.0
 
         summary_labels.append(clean_label(filename.stem))
         summary_rank1.append(results.rank1)
-        summary_null_std.append(float(np.std(null)))
+        summary_null_std.append(null_std)
         summary_cv.append(cv_accuracy)
 
     if len(summary_labels) > 1:
@@ -605,6 +697,12 @@ if __name__ == "__main__":
         help="Classifier used for leave-one-task-out classification",
     )
     parser.add_argument(
+        "--no-zscore",
+        action="store_false",
+        dest="zscore",
+        help="Disable z-scoring each feature on the reference set",
+    )
+    parser.add_argument(
         "--nperm",
         type=int,
         default=200,
@@ -638,6 +736,7 @@ if __name__ == "__main__":
             outfile=args.outfile,
             metric=args.metric,
             method=args.method,
+            zscore=args.zscore,
             nperm=args.nperm,
             random_state=args.seed,
             overwrite=args.force,
