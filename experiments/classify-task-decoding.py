@@ -255,7 +255,7 @@ def evaluate_dataset(
     unique_subjects = np.unique(groups)
 
     log.info(
-        "Evaluating '%s' (%s, %s, z=%s): %d samples (%d subjects), %d features (%s).",
+        "Evaluating '%s' (%s, %s, z=%s): %d samples (%d subjects), %d features.",
         filename.stem,
         "binary" if binary else "multiclass",
         method.upper(),
@@ -263,7 +263,6 @@ def evaluate_dataset(
         x.shape[0],
         unique_subjects.size,
         x.shape[1],
-        ", ".join(ds.descrs),
     )
 
     oof_preds, fold_bacc, fold_f1 = run_cross_validation(
@@ -597,6 +596,7 @@ if __name__ == "__main__":
 
     if not args.quiet:
         log.setLevel(logging.INFO)
+    logging.getLogger("lib.torchlib").setLevel(logging.WARNING)
 
     with torch_default_device(args.device):
         # NOTE: use TF32 for matrix multiplication (should be faster, similar precision)
