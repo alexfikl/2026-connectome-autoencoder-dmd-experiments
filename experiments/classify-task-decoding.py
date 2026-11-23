@@ -10,7 +10,7 @@ from typing import Any, Literal, get_args
 import numpy as np
 import torch
 
-from commonlib import FeatureDataset, load_feature_datasets
+from commonlib import load_feature_datasets
 from nneuroutil.helpers import FuzzyChoiceAction
 from nneuroutil.interop.torch import available_device_names, torch_default_device
 from nneuroutil.typing import Array1D, Array2D
@@ -28,39 +28,6 @@ Example:
 """
 
 ClassificationMethod = Literal["lda", "svm", "mlp"]
-
-
-def filter_feature_groups(
-    ds: FeatureDataset,
-    *,
-    include_groups: tuple[str, ...] | None = None,
-    exclude_groups: tuple[str, ...] | None = None,
-) -> tuple[Array2D[np.floating[Any]], tuple[str, ...]]:
-    """Return stacked 2D feature matrix filtered by group descriptions."""
-    x_all = np.concatenate(ds.x, axis=0)
-    if not include_groups and not exclude_groups:
-        return x_all, ds.descrs
-
-    selected_idx: list[int] = []
-    selected_descrs: list[str] = []
-    for i, descr in enumerate(ds.descrs):
-        d_low = descr.lower()
-        if include_groups and not any(g.lower() in d_low for g in include_groups):
-            continue
-        if exclude_groups and any(g.lower() in d_low for g in exclude_groups):
-            continue
-
-        start, end = ds.starts[i], ds.starts[i + 1]
-        selected_idx.extend(range(start, end))
-        selected_descrs.append(descr)
-
-    if not selected_idx:
-        raise ValueError(
-            f"no feature groups matched include={include_groups}, "
-            f"exclude={exclude_groups} among {ds.descrs}"
-        )
-
-    return x_all[:, selected_idx], tuple(selected_descrs)
 
 
 def _fit_and_predict(
@@ -254,8 +221,6 @@ def main(
     method: ClassificationMethod = "svm",
     binary: bool = False,
     zscore_features: bool = True,
-    include_groups: tuple[str, ...] | None = None,
-    exclude_groups: tuple[str, ...] | None = None,
     n_splits: int = 5,
     n_repeats: int = 5,
     n_permutations: int = 0,
@@ -278,9 +243,7 @@ def main(
         log.error("Failed to load features from '%s': %s", filename, exc)
         return 1
 
-    x, selected_descrs = filter_feature_groups(
-        ds, include_groups=include_groups, exclude_groups=exclude_groups
-    )
+    x = np.concatenate(ds.x, axis=0)
     groups = np.concatenate(ds.groups, axis=0)
     y = np.concatenate([
         np.full(xi.shape[0], c, dtype=np.int64) for c, xi in enumerate(ds.x)
@@ -298,7 +261,7 @@ def main(
         x.shape[0],
         unique_subjects.size,
         x.shape[1],
-        ", ".join(selected_descrs),
+        ", ".join(ds.descrs),
     )
 
     oof_preds, fold_bacc, fold_f1 = _run_cv(
@@ -415,18 +378,6 @@ if __name__ == "__main__":
         help="Group classes by scan type (Functional vs. Structural)",
     )
     parser.add_argument(
-        "--include-groups",
-        action="append",
-        default=None,
-        help="Only keep feature groups matching these substrings",
-    )
-    parser.add_argument(
-        "--exclude-groups",
-        action="append",
-        default=None,
-        help="Drop feature groups matching these substrings",
-    )
-    parser.add_argument(
         "--n-splits",
         type=int,
         default=5,
@@ -490,12 +441,6 @@ if __name__ == "__main__":
                 method=args.method,
                 binary=args.binary,
                 zscore_features=args.zscore,
-                include_groups=(
-                    tuple(args.include_groups) if args.include_groups else None
-                ),
-                exclude_groups=(
-                    tuple(args.exclude_groups) if args.exclude_groups else None
-                ),
                 n_splits=args.n_splits,
                 n_repeats=args.n_repeats,
                 n_permutations=args.n_permutations,
