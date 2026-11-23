@@ -56,6 +56,7 @@ class FeatureDataset(NamedTuple):
 
 
 def make_matrix_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
+    """Return the lower triangular entries of the matrix."""
     n, m = mat.shape
     if n != m:
         raise ValueError(f"'mat' is not square: {mat.shape}")
@@ -76,6 +77,7 @@ def make_matrix_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
 
 
 def make_scale_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
+    """Return the Frobenius norm, spectral radius and entry range."""
     n, m = mat.shape
     if n != m:
         raise ValueError(f"'mat' is not square: {mat.shape}")
@@ -99,6 +101,7 @@ def make_scale_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
 
 
 def make_eig_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
+    """Return the eigenvalues of the symmetric matrix."""
     n, m = mat.shape
     if n != m:
         raise ValueError(f"'mat' is not square: {mat.shape}")
@@ -206,6 +209,7 @@ def _make_local_graph_features(
 
 
 def make_local_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
+    """Return per-node graph measures for abs, positive and negative weights."""
     amat = np.abs(mat)
     labels = _make_community_labels(amat)
 
@@ -463,6 +467,7 @@ def _make_global_graph_features(
 def make_global_graph_features(
     mat: Array2D[np.floating[Any]],
 ) -> FeatureDataset:
+    """Return global graph measures for abs, positive and negative weights."""
     fabs = _make_global_graph_features(np.abs(mat))
     fpos = _make_global_graph_features(np.maximum(mat, 0.0))
     fneg = _make_global_graph_features(np.maximum(-mat, 0.0))
@@ -497,6 +502,7 @@ def make_dmd_features(
     maxit: int = 32,
     full_matrix: bool = False,
 ) -> FeatureDataset:
+    """Return DMD eigenvalue magnitudes and mode strengths."""
     # NOTE: the DMD run is pretty slow, so we try to do it on the GPU
     try:  # ruff: ignore[too-many-statements-in-try-clause]
         import torch
@@ -617,7 +623,7 @@ def make_image_features(
     *,
     size: int = 32,
 ) -> FeatureDataset:
-    """Block-average a binary equi-M set image to a ``size x size`` image."""
+    """Return a block-average of the equi-M set image to a ``size x size`` image."""
     height, width = binary.shape
     if height % size != 0 or width % size != 0:
         raise ValueError(f"image size {height}x{width} is not divisible by {size}")
@@ -682,11 +688,7 @@ def make_fourier_features(
     eps: float = 5.0e-4,
     normalize: bool = True,
 ) -> FeatureDataset:
-    """Compute Fourier descriptors of the boundary contour.
-
-    The groups contain the real and imaginary parts of the low-order boundary
-    modes ``m_{-ncoeffs}, ..., m_{-1}, m_1, ..., m_{ncoeffs}``.
-    """
+    """Compute Fourier descriptors of the boundary contour."""
     import cv2  # ty: ignore[import-not-found]
 
     if ncoeffs < 1:
@@ -758,12 +760,7 @@ def make_geometry_features(
     binary: Array2D[np.integer[Any]],
     bbox: tuple[float, float, float, float],
 ) -> FeatureDataset:
-    """Compute geometric measures of the boundary contour.
-
-    The groups contain the real-axis chord, the bounding box, area and
-    perimeter, and orientation-invariant landmark measures from Radulescu
-    et al. (2025). No landmark-side assumptions are made.
-    """
+    """Compute geometric measures of the boundary contour."""
     import cv2  # ty: ignore[import-not-found]
 
     xmin, _, _, ymax = bbox
