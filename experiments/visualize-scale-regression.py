@@ -48,21 +48,6 @@ class RegressionResult(NamedTuple):
     is_structural: Array1D[np.bool]
 
 
-def _clean_family_name(path: pathlib.Path) -> str:
-    stem = path.stem.removeprefix("dataset-features-")
-    mapping = {
-        "geometry": "Geometry",
-        "dmd": "DMDc",
-        "ae-dmd": "AE-DMD",
-        "image": "Raw fractal",
-        "global": "Global graph",
-        "local": "Local graph",
-        "eig": "Eigenspectrum",
-        "matrix": "Raw matrix",
-    }
-    return mapping.get(stem, stem)
-
-
 def run_ridge_cv(
     x: Array2D[np.floating[Any]],
     y: Array1D[np.floating[Any]],
@@ -280,7 +265,7 @@ def main(
 
         x_all = np.concatenate(ds.x, axis=0)
         groups_all = np.concatenate(ds.groups, axis=0)
-        name = _clean_family_name(filename)
+        name = ds.label
 
         res_fro = run_ridge_cv(
             x_all,

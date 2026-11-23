@@ -400,6 +400,7 @@ def merge(
         scan_types=scan_types,
         starts=starts,
         descrs=descrs,
+        label="AE-DMD",
     )
     log.info("Saved merged features: '%s'.", outfile)
 

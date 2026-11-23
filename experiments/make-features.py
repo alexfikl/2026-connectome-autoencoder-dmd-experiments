@@ -27,6 +27,18 @@ Example:
     > {SCRIPT_PATH.name} -k matrices --outfile result.npz data.npz
 """
 
+FEATURE_LABELS = {
+    "local": "Local graph",
+    "global": "Global graph",
+    "matrix": "Raw matrix",
+    "dmd": "DMDc",
+    "eig": "Eigenspectrum",
+    "geometry": "Geometry",
+    "fourier": "Fourier",
+    "image": "Raw fractal",
+    "scale": "Matrix scale",
+}
+
 
 ScalarTypeT = TypeVar("ScalarTypeT", bound=np.generic, default=Any)
 Array1D = TypeAliasType(
@@ -1029,6 +1041,7 @@ def make_features(
         starts=features.starts,
         descrs=features.descrs,
         density=density,
+        label=FEATURE_LABELS[ftype],
     )
     log.info("Saving computed features: '%s'.", outfile)
 

@@ -100,6 +100,8 @@ class FeatureDataset(NamedTuple):
     """Group index (e.g. subject) for each row of :attr:`x`."""
     class_names: tuple[str, ...]
     """Class name for each entry of :attr:`x`."""
+    label: str
+    """Label of the feature family, e.g. ``DMDc``."""
     starts: Array1D[np.integer[Any]]
     """Feature group boundaries of length ``ngroups + 1``."""
     descrs: tuple[str, ...]
@@ -191,6 +193,11 @@ def load_feature_datasets(
         descrs = descrs[()]
     descrs = tuple(str(d) for d in descrs)
 
+    if "label" not in data:
+        raise ValueError(f"file does not contain 'label' dataset: '{filename}'")
+
+    label = str(data["label"])
+
     if xp is None:
         xp = array_api_compat.array_namespace(np.array([0]))
 
@@ -242,6 +249,7 @@ def load_feature_datasets(
         x=tuple(xp.asarray(xi, device=device) for xi in xs),
         groups=tuple(xp.asarray(group) for group in groups),
         class_names=tuple(class_names),
+        label=label,
         starts=xp.asarray(data["starts"], device=device),
         descrs=tuple(descrs),
     )
