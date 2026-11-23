@@ -72,9 +72,10 @@ def run_ridge_cv(
     alphas = np.logspace(-3, 5, 25)
 
     nsamples = x.shape[0]
-    oof_pred = np.empty((n_repeats, nsamples), dtype=np.float64)
-    fold_r2 = np.empty(n_splits * n_repeats, dtype=np.float64)
+    oof_pred = np.empty((n_repeats, nsamples), dtype=y.dtype)
+    fold_r2 = np.empty(n_splits * n_repeats, dtype=x.dtype)
 
+    # go through all the folds: fit + compute the R2 scores
     for fold_idx, (train_idx, test_idx) in enumerate(rkf.split(unique_subjects)):
         rep = fold_idx // n_splits
         train_mask = np.isin(groups, unique_subjects[train_idx])
@@ -89,27 +90,29 @@ def run_ridge_cv(
         pred = reg.predict(x_te_s)
 
         oof_pred[rep, test_mask] = pred
-        fold_r2[fold_idx] = float(r2_score(y[test_mask], pred))
+        fold_r2[fold_idx] = r2_score(y[test_mask], pred)
 
     y_pred_mean = np.mean(oof_pred, axis=0)
 
-    # Subject-level bootstrap 95% CI on out-of-fold R^2
+    # compute confidence intervals
     subj_rows = [np.flatnonzero(groups == s) for s in unique_subjects]
     rng = np.random.default_rng(seed)
-    boot_r2 = np.empty(n_bootstrap, dtype=np.float64)
+    boot_r2 = np.empty(n_bootstrap, dtype=x.dtype)
+
     for b in range(n_bootstrap):
         sampled = rng.integers(0, len(subj_rows), size=len(subj_rows))
         idx = np.concatenate([subj_rows[s] for s in sampled])
-        boot_r2[b] = float(r2_score(y[idx], y_pred_mean[idx]))
+        boot_r2[b] = r2_score(y[idx], y_pred_mean[idx])
+
     ci_lo, ci_hi = np.percentile(boot_r2, [2.5, 97.5])
 
     return RegressionResult(
         name=name,
         target_name=target_name,
-        r2_mean=float(np.mean(fold_r2)),
-        r2_ci_lo=float(ci_lo),
-        r2_ci_hi=float(ci_hi),
-        y_true=np.asarray(y, dtype=np.float64),
+        r2_mean=np.mean(fold_r2),
+        r2_ci_lo=ci_lo,
+        r2_ci_hi=ci_hi,
+        y_true=y,
         y_pred=y_pred_mean,
         is_structural=is_structural,
     )
@@ -129,7 +132,7 @@ def plot_scale_regression(
     scatter_index: int = -1,
     overwrite: bool = False,
 ) -> None:
-    """Plot 2-panel Stage 1 summary: (a) Ridge R^2 bars, (b) pred vs. true scatter."""
+    """Plot the Ridge R^2 bars and the predicted vs. true scatter."""
     names = [r.name for r in results_fro]
     x_pos = np.arange(len(names))
     width = 0.36
@@ -146,17 +149,13 @@ def plot_scale_regression(
         [max(0.0, r.r2_ci_hi - r.r2_mean) for r in results_rho],
     ])
 
-    scatter_res = results_fro[scatter_index]
-
     with figure(
-        outfile,
-        ncols=2,
-        figsize=(11, 4.5),
+        outfile.with_stem(f"{outfile.stem}-r2"),
+        figsize=(6.5, 4.5),
         overwrite=overwrite,
     ) as fig:
-        ax1, ax2 = fig.axes
-
-        ax1.bar(
+        (ax,) = fig.axes
+        ax.bar(
             x_pos - width / 2,
             fro_means,
             width,
@@ -164,7 +163,7 @@ def plot_scale_regression(
             capsize=3,
             label=r"$\|\mathbf{A}\|_F$",
         )
-        ax1.bar(
+        ax.bar(
             x_pos + width / 2,
             rho_means,
             width,
@@ -172,23 +171,30 @@ def plot_scale_regression(
             capsize=3,
             label=r"$\rho(\mathbf{A})$",
         )
-        ax1.set_xticks(x_pos)
-        ax1.set_xticklabels(names)
-        ax1.set_ylabel(r"Out-of-fold $R^2$")
-        ax1.set_ylim(min(0.0, float(np.min(fro_means)) - 0.05), 1.05)
-        ax1.set_title(r"(a) Global scale prediction ($R^2$)")
-        ax1.legend(fontsize="small")
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(names)
+        ax.set_ylabel(r"Out-of-fold $R^2$")
+        ax.set_ylim(min(0.0, np.min(fro_means) - 0.05), 1.05)
+        ax.set_title(r"Global scale prediction ($R^2$)")
+        ax.legend(fontsize="small")
 
+    scatter_res = results_fro[scatter_index]
+    with figure(
+        outfile.with_stem(f"{outfile.stem}-scatter"),
+        figsize=(5.0, 4.5),
+        overwrite=overwrite,
+    ) as fig:
+        (ax,) = fig.axes
         struct = scatter_res.is_structural
         func = ~struct  # ty: ignore[unsupported-operator]
-        ax2.scatter(
+        ax.scatter(
             scatter_res.y_true[func],
             scatter_res.y_pred[func],
             s=18,
             alpha=0.7,
             label="Functional",
         )
-        ax2.scatter(
+        ax.scatter(
             scatter_res.y_true[struct],
             scatter_res.y_pred[struct],
             s=22,
@@ -196,16 +202,16 @@ def plot_scale_regression(
             label="Structural",
         )
 
-        lo = float(min(np.min(scatter_res.y_true), np.min(scatter_res.y_pred)))
-        hi = float(max(np.max(scatter_res.y_true), np.max(scatter_res.y_pred)))
+        lo = min(np.min(scatter_res.y_true), np.min(scatter_res.y_pred))
+        hi = max(np.max(scatter_res.y_true), np.max(scatter_res.y_pred))
         pad = 0.04 * (hi - lo)
-        ax2.plot([lo - pad, hi + pad], [lo - pad, hi + pad], "k--", lw=1.2)
-        ax2.set_xlim(lo - pad, hi + pad)
-        ax2.set_ylim(lo - pad, hi + pad)
-        ax2.set_xlabel(r"True $\|\mathbf{A}\|_F$")
-        ax2.set_ylabel(r"Predicted $\|\mathbf{A}\|_F$")
-        ax2.set_title(rf"(b) {scatter_res.name} ($R^2 = {scatter_res.r2_mean:.3f}$)")
-        ax2.legend(fontsize="small")
+        ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], "k--", lw=1.2)
+        ax.set_xlim(lo - pad, hi + pad)
+        ax.set_ylim(lo - pad, hi + pad)
+        ax.set_xlabel(r"True $\|\mathbf{A}\|_F$")
+        ax.set_ylabel(r"Predicted $\|\mathbf{A}\|_F$")
+        ax.set_title(rf"{scatter_res.name} ($R^2 = {scatter_res.r2_mean:.3f}$)")
+        ax.legend(fontsize="small")
 
 
 # }}}
@@ -239,10 +245,10 @@ def main(
     y_scale = np.concatenate(ds_scale.x, axis=0)
     y_fro = y_scale[:, 0]
     y_rho = y_scale[:, 1]
-    is_structural = np.concatenate([
-        np.full(xi.shape[0], name == "Structural", dtype=bool)
-        for xi, name in zip(ds_scale.x, ds_scale.class_names, strict=True)
-    ])
+    is_structural = np.repeat(
+        [name == "Structural" for name in ds_scale.class_names],
+        [xi.shape[0] for xi in ds_scale.x],
+    )
 
     results_fro: list[RegressionResult] = []
     results_rho: list[RegressionResult] = []
@@ -305,7 +311,7 @@ def main(
         results_rho.append(res_rho)
 
     if outfile is None:
-        outfile = filenames[0].parent / "stage1-scale-regression.jpg"
+        outfile = filenames[0].parent / "dataset-features-scale-regression"
 
     plot_scale_regression(
         outfile,
@@ -345,7 +351,7 @@ if __name__ == "__main__":
         "--outfile",
         type=pathlib.Path,
         default=None,
-        help="Output figure path",
+        help="Prefix of the output figure paths",
     )
     parser.add_argument(
         "--n-splits",
