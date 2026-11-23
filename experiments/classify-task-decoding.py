@@ -345,7 +345,7 @@ def format_latex_table(
     lines = [
         r"\begin{tabular}{@{}lrrr@{}}",
         r"\toprule",
-        r"\textbf{Feature family} & \textbf{Dim.} & \textbf{LDA} & \textbf{MLP} \\",
+        r"\textbf{Feature family} & \textbf{Size} & \textbf{LDA} & \textbf{MLP} \\",
         r"\midrule",
     ]
     if rows:

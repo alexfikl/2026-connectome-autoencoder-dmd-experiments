@@ -208,7 +208,19 @@ ablation filename dataidx="0" *ARGS:
 [doc("Generate Table 6")]
 table6:
     {{ PYTHON }} experiments/classify-task-decoding.py \
-        summary --force --binary --device cuda \
+        summary --force --device cuda --binary \
+        data/dataset-features-*.npz
+
+[doc("Generate Table 7 (task decoding)")]
+table7a:
+    {{ PYTHON }} experiments/classify-task-decoding.py \
+        summary --force --device cuda --n-permutations 100 \
+        data/dataset-features-*.npz
+
+[doc("Generate Table 7 (subject fingerprinting)")]
+table7b:
+    {{ PYTHON }} experiments/classify-subject-fingerprinting.py \
+        summary --force --device cuda --n-permutations 100 \
         data/dataset-features-*.npz
 
 # }}}
