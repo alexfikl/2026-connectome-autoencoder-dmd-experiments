@@ -344,13 +344,21 @@ def _format_score(res: ClassificationResult, *, underline: bool = False) -> str:
     return f"\\underline{{{score}}}" if underline else score
 
 
+def _format_ci(res: ClassificationResult) -> str:
+    return f"$[{res.ci_lo:.3f}, {res.ci_hi:.3f}]$"
+
+
 def format_latex_table(
     rows: Sequence[tuple[ClassificationResult, ClassificationResult]],
 ) -> str:
     lines = [
-        r"\begin{tabular}{@{}lrrr@{}}",
+        r"\begin{tabular}{@{}lrrrrr@{}}",
         r"\toprule",
-        r"\textbf{Feature family} & \textbf{Size} & \textbf{LDA} & \textbf{MLP} \\",
+        (
+            r"\textbf{Feature family} & \textbf{Size}"
+            r" & \textbf{LDA} & \textbf{95\% CI}"
+            r" & \textbf{MLP} & \textbf{95\% CI} \\"
+        ),
         r"\midrule",
     ]
     if rows:
@@ -359,17 +367,21 @@ def format_latex_table(
         mlp_min = min(res_mlp.mean_bacc for _, res_mlp in rows)
 
         for res_lda, res_mlp in rows:
+            underline_lda = res_lda.mean_bacc == lda_min
+            underline_mlp = res_mlp.mean_bacc == mlp_min
+            lda_score = _format_score(res_lda, underline=underline_lda)
+            mlp_score = _format_score(res_mlp, underline=underline_mlp)
+
             lines.append(
-                f"{res_lda.label} & {res_lda.nfeatures:,} & "
-                f"{_format_score(res_lda, underline=res_lda.mean_bacc == lda_min)}"
-                f" & {_format_score(res_mlp, underline=res_mlp.mean_bacc == mlp_min)}"
+                f"{res_lda.label} & {res_lda.nfeatures:,} & {lda_score} & "
+                f"{_format_ci(res_lda)} & {mlp_score} & {_format_ci(res_mlp)}"
                 r" \\"
             )
 
         chance = 1.0 / rows[0][0].nclasses
         lines.extend([
             r"\midrule",
-            f"Chance & -- & ${chance:.3f}$ & ${chance:.3f}$ \\\\",
+            f"Chance & -- & ${chance:.3f}$ & -- & ${chance:.3f}$ & -- \\\\",
         ])
 
     lines.extend([
