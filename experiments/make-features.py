@@ -85,7 +85,7 @@ def make_scale_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     spectral_radius = np.max(np.abs(eigs))
     entry_range = np.max(mat) - np.min(mat)
 
-    features = np.array([fro, spectral_radius, entry_range], dtype=np.float64)
+    features = np.array([fro, spectral_radius, entry_range], dtype=mat.dtype)
     starts = np.array([0, 1, 2, 3])
     descrs = ("Frobenius Norm", "Spectral Radius", "Entry Range")
 
@@ -117,20 +117,6 @@ def make_eig_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
 
 
 # {{{ make_local_graph_features
-
-
-def _global_efficiency(distances: Array2D[np.floating[Any]]) -> float:
-    """Average global efficiency from a weighted distance matrix."""
-    n, _ = distances.shape
-    if n < 2:
-        return 0.0
-
-    d = distances[np.triu_indices(n, k=1)]
-    mask = np.isfinite(d) & (d > 0)
-    with np.errstate(divide="ignore"):
-        reciprocal = np.where(mask, 1.0 / d, 0.0)
-
-    return float(2.0 * np.sum(reciprocal) / (n * (n - 1)))
 
 
 def _make_community_labels(mat: Array2D[np.floating[Any]]) -> Array1D[np.integer[Any]]:
@@ -331,7 +317,8 @@ def _local_efficiency(
     eps: float = 1.0e-12,
     dense_threshold: float = 0.8,
 ) -> Array1D[np.floating[Any]]:
-    """Compute the per-node local efficiency of a weighted graph."""
+    # NOTE: this seems to be about 10x faster than networkx and igraph does not
+    # have a Local Efficiency implementation that we can use.
     import scipy.sparse as sp
 
     n, _ = mat.shape
@@ -384,17 +371,25 @@ def _local_efficiency(
     return efficiency
 
 
+def _global_efficiency(distances: Array2D[np.floating[Any]]) -> float:
+    """Average global efficiency from a weighted distance matrix."""
+    n, _ = distances.shape
+    if n < 2:
+        return 0.0
+
+    d = distances[np.triu_indices(n, k=1)]
+    mask = np.isfinite(d) & (d > 0)
+    with np.errstate(divide="ignore"):
+        reciprocal = np.where(mask, 1.0 / d, 0.0)
+
+    return float(2.0 * np.sum(reciprocal) / (n * (n - 1)))
+
+
 def _make_global_graph_features(
     mat: Array2D[np.floating[Any]],
     *,
     eps: float = 1.0e-12,
 ) -> FeatureDataset:
-    """Average the paper's graph measures over all nodes.
-
-    This follows the Brain Connectivity Toolbox definitions: weights are
-    interpreted as connection strengths and converted to lengths with
-    ``1 / w``.
-    """
     import igraph as ig
 
     ig.set_random_number_generator(random.Random(42))  # ruff: ignore[suspicious-non-cryptographic-random-usage]
@@ -428,11 +423,9 @@ def _make_global_graph_features(
 
     # Clustering Coefficient: average weighted clustering
     degree = np.count_nonzero(mat > eps, axis=1)
-    cbrt_weights = np.cbrt(mat)
-    cyc3 = np.einsum("ij,jk,ki->i", cbrt_weights, cbrt_weights, cbrt_weights)
-    wcc = np.zeros(mat.shape[0])
-    mask = (cyc3 != 0.0) & (degree >= 2)  # ruff: ignore[float-equality-comparison]
-    wcc[mask] = cyc3[mask] / (degree[mask] * (degree[mask] - 1))
+    wcc = np.nan_to_num(
+        okm.compute_weighted_clustering_coefficient_costantini(mat, variant=7, eps=eps)
+    )
     features.append(np.mean(wcc))
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Clustering Coefficient")
@@ -453,8 +446,9 @@ def _make_global_graph_features(
     descrs.append("Local Efficiency")
 
     # Transitivity: ratio of weighted triangles to triplets
-    denominator = np.sum(degree * (degree - 1))
-    transitivity = np.sum(cyc3) / denominator if denominator > 0 else 0.0
+    triplets = degree * (degree - 1)
+    denominator = np.sum(triplets)
+    transitivity = np.sum(wcc * triplets) / denominator if denominator > 0 else 0.0
     features.append(transitivity)
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Transitivity")
