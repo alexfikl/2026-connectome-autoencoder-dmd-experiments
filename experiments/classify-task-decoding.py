@@ -301,7 +301,7 @@ def evaluate_dataset(
                 method=method,
                 zscore_features=zscore_features,
                 n_splits=n_splits,
-                n_repeats=1,
+                n_repeats=n_repeats,
                 seed=seed + 1000 + p,
                 device=device,
             )

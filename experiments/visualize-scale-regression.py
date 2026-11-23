@@ -28,7 +28,7 @@ Example:
 
     > {SCRIPT_PATH.name} \\
         --scale-file data/dataset-features-scale.npz \\
-        data/dataset-features-geometry.npz \\
+        data/dataset-features-landmarks.npz \\
         data/dataset-features-dmd.npz \\
         data/dataset-features-ae-dmd.npz
 """

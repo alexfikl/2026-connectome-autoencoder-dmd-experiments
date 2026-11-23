@@ -152,7 +152,7 @@ features:
     @just make_features local data/*_LR_Task.npz data/Structural_LR.npz
     @just make_features global data/*_LR_Task.npz data/Structural_LR.npz
     @just make_features image data/task-*-fractal.npz data/structural-fractal.npz
-    @just make_features geometry data/task-*-fractal.npz data/structural-fractal.npz
+    @just make_features landmarks data/task-*-fractal.npz data/structural-fractal.npz
     @just make_features fourier data/task-*-fractal.npz data/structural-fractal.npz
     @just make_features dmd data/*_LR_Task.npz data/Structural_LR.npz
     @just make_ae_features data/ae-dmd
@@ -232,11 +232,11 @@ figure456:
     {{ PYTHON }} experiments/nn-autoencoder-dmd.py --force infer \
         data/Emotion_LR_Task-ae-dmd-m45-r64-n32-c16c0f32c730.pkl
 
-[doc("Generate plots for Figure 8")]
-figure8:
+[doc("Generate plots for Figure 7")]
+figure7:
     {{ PYTHON }} experiments/visualize-scale-regression.py --force \
         --scale-file data/dataset-features-scale.npz \
-        data/dataset-features-geometry.npz \
+        data/dataset-features-landmarks.npz \
         data/dataset-features-fourier.npz \
         data/dataset-features-dmd.npz \
         data/dataset-features-ae-dmd.npz

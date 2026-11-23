@@ -33,7 +33,7 @@ FEATURE_LABELS = {
     "matrix": "Raw matrix",
     "dmd": "DMDc",
     "eig": "Eigenspectrum",
-    "geometry": "Geometry",
+    "landmarks": "Landmarks",
     "fourier": "Fourier",
     "image": "Raw fractal",
     "scale": "Matrix scale",
@@ -652,7 +652,7 @@ def make_image_features(
 # }}}
 
 
-# {{{ _make_contour
+# {{{ make_fourier_features
 
 
 def _make_contour(
@@ -682,12 +682,6 @@ def _make_contour(
 
     perimeter_px = cv2.arcLength(c, closed=True)
     return c, dx, dy, perimeter_px
-
-
-# }}}
-
-
-# {{{ make_fourier_features
 
 
 def make_fourier_features(
@@ -764,10 +758,10 @@ def make_fourier_features(
 # }}}
 
 
-# {{{ make_geometry_features
+# {{{ make_landmarks_features
 
 
-def make_geometry_features(
+def make_landmarks_features(
     binary: Array2D[np.integer[Any]],
     bbox: tuple[float, float, float, float],
 ) -> FeatureDataset:
@@ -855,7 +849,7 @@ def make_features(
         "matrix",
         "dmd",
         "eig",
-        "geometry",
+        "landmarks",
         "fourier",
         "image",
         "scale",
@@ -878,7 +872,9 @@ def make_features(
 
     if key is None:
         key = (
-            "images_binary" if ftype in {"geometry", "fourier", "image"} else "matrices"
+            "images_binary"
+            if ftype in {"landmarks", "fourier", "image"}
+            else "matrices"
         )
 
     # {{{ load matrices
@@ -926,7 +922,7 @@ def make_features(
             except ValueError:
                 feps = -1.0
 
-        if ftype in {"geometry", "fourier", "image"}:
+        if ftype in {"landmarks", "fourier", "image"}:
             result = matrices
             bbox = data["images_bbox"]
         else:
@@ -992,8 +988,8 @@ def make_features(
                     features = make_global_graph_features(mat_i)
                 elif ftype == "dmd":
                     features = make_dmd_features(mat_i, bbox=(xmin, xmax, ymin, ymax))
-                elif ftype == "geometry":
-                    features = make_geometry_features(
+                elif ftype == "landmarks":
+                    features = make_landmarks_features(
                         mat_i,
                         (xmin, xmax, ymin, ymax),
                     )
@@ -1069,7 +1065,7 @@ if __name__ == "__main__":
             "matrix",
             "dmd",
             "eig",
-            "geometry",
+            "landmarks",
             "fourier",
             "image",
             "scale",
