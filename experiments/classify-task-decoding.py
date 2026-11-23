@@ -377,7 +377,7 @@ def format_latex_table(
 def main(
     filename: pathlib.Path,
     *,
-    method: ClassificationMethod = "svm",
+    method: ClassificationMethod = "lda",
     binary: bool = False,
     zscore_features: bool = True,
     n_splits: int = 5,
