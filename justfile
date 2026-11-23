@@ -217,4 +217,9 @@ figure2:
     @just figure2_run data/Emotion_LR_Task.npz --bbox '-0.03' '0.03' '-0.03' '0.03'
     @just figure2_run data/Structural_LR.npz --bbox '-0.8' '0.3' '-0.55' '0.55'
 
+[doc("Generate plots for Figure 4, 5, and 6")]
+figure456:
+    {{ PYTHON }} experiments/nn-autoencoder-dmd.py --force infer \
+        data/Emotion_LR_Task-ae-dmd-m45-r64-n32-c16c0f32c730.pkl
+
 # }}}
