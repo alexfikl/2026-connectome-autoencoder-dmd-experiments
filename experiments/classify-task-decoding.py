@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Any, Literal, get_args
+from collections.abc import Sequence
+from typing import Any, Literal, NamedTuple, get_args
 
 import numpy as np
 import torch
@@ -22,15 +23,29 @@ SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
 Classify tasks using features computed by make-features.py
 
-Example:
+Examples:
 
-    > {SCRIPT_PATH.name} --method lda dataset-features-matrix.npz
+    > {SCRIPT_PATH.name} run --method lda dataset-features-matrix.npz
+    > {SCRIPT_PATH.name} summary --binary data/dataset-features-*.npz
 """
 
 ClassificationMethod = Literal["lda", "svm", "mlp"]
 
 
-def _fit_and_predict(
+class ClassificationResult(NamedTuple):
+    label: str
+    nfeatures: int
+    nclasses: int
+    method: ClassificationMethod
+    mean_bacc: float
+    std_bacc: float
+    ci_lo: float
+    ci_hi: float
+    mean_f1: float
+    p_val: float | None
+
+
+def fit_and_predict(
     x_train_list: list[torch.Tensor],
     y_train_list: list[int],
     x_test: torch.Tensor,
@@ -63,12 +78,14 @@ def _fit_and_predict(
     raise ValueError(f"unknown method: {method!r}")
 
 
-def _subject_rows(groups: Array1D[np.integer[Any]]) -> list[Array1D[np.integer[Any]]]:
+def make_subject_rows(
+    groups: Array1D[np.integer[Any]],
+) -> list[Array1D[np.integer[Any]]]:
     """Return the row indices of each subject in ``groups``."""
     return [np.flatnonzero(groups == s) for s in np.unique(groups)]
 
 
-def _bootstrap_subject_ci(
+def bootstrap_subject_ci(
     y_true: Array1D[np.integer[Any]],
     oof_preds: Array2D[np.integer[Any]],
     groups: Array1D[np.integer[Any]],
@@ -79,7 +96,7 @@ def _bootstrap_subject_ci(
     """Compute 95% bootstrap CI over subjects for balanced accuracy."""
     from sklearn.metrics import balanced_accuracy_score
 
-    subj_rows = _subject_rows(groups)
+    subj_rows = make_subject_rows(groups)
     n_subjects = len(subj_rows)
     n_repeats = oof_preds.shape[0]
 
@@ -150,7 +167,7 @@ def plot_confusion(
 # }}}
 
 
-def _run_cv(
+def run_cross_validation(
     x: Array2D[np.floating[Any]],
     y: Array1D[np.integer[Any]],
     groups: Array1D[np.integer[Any]],
@@ -198,7 +215,7 @@ def _run_cv(
         y_train_list = list(range(nclasses))
         x_test_t = torch.from_numpy(x_te_np).to(device)
 
-        y_pred_t = _fit_and_predict(
+        y_pred_t = fit_and_predict(
             x_train_list,
             y_train_list,
             x_test_t,
@@ -214,30 +231,24 @@ def _run_cv(
     return oof_preds, fold_bacc, fold_f1
 
 
-def main(
+def evaluate_dataset(
     filename: pathlib.Path,
     *,
-    method: ClassificationMethod = "svm",
-    binary: bool = False,
-    zscore_features: bool = True,
-    n_splits: int = 5,
-    n_repeats: int = 5,
-    n_permutations: int = 0,
-    seed: int = 42,
-    outfile: pathlib.Path | None = None,
-    overwrite: bool = False,
-) -> int:
-    from sklearn.metrics import balanced_accuracy_score, confusion_matrix
-
-    device = torch.get_default_device()
-    log.info("Device: %s", device)
-
-    try:
-        ds = load_feature_datasets(filename, binary=binary)
-    except Exception as exc:
-        log.error("Failed to load features from '%s': %s", filename, exc)
-        return 1
-
+    method: ClassificationMethod,
+    binary: bool,
+    zscore_features: bool,
+    n_splits: int,
+    n_repeats: int,
+    n_permutations: int,
+    seed: int,
+    device: torch.device | str,
+) -> tuple[
+    ClassificationResult,
+    Array1D[np.integer[Any]],
+    Array2D[np.integer[Any]],
+    tuple[str, ...],
+]:
+    ds = load_feature_datasets(filename, binary=binary)
     x, y, groups = flatten_feature_datasets(ds)
     class_names = ds.class_names
     nclasses = len(class_names)
@@ -255,7 +266,7 @@ def main(
         ", ".join(ds.descrs),
     )
 
-    oof_preds, fold_bacc, fold_f1 = _run_cv(
+    oof_preds, fold_bacc, fold_f1 = run_cross_validation(
         x,
         y,
         groups,
@@ -271,18 +282,19 @@ def main(
     mean_bacc = np.mean(fold_bacc)
     std_bacc = np.std(fold_bacc)
     mean_f1 = np.mean(fold_f1)
-    ci_lo, ci_hi = _bootstrap_subject_ci(y, oof_preds, groups, seed=seed)
+    ci_lo, ci_hi = bootstrap_subject_ci(y, oof_preds, groups, seed=seed)
 
+    p_val: float | None = None
     perm_str = ""
     if n_permutations > 0:
         rng = np.random.default_rng(seed)
         null_baccs = np.empty(n_permutations, dtype=np.float64)
-        subj_rows = _subject_rows(groups)
+        subj_rows = make_subject_rows(groups)
         for p in range(n_permutations):
             y_perm = np.copy(y)
             for rows in subj_rows:
                 y_perm[rows] = rng.permutation(y_perm[rows])
-            _, p_bacc, _ = _run_cv(
+            _, p_bacc, _ = run_cross_validation(
                 x,
                 y_perm,
                 groups,
@@ -308,8 +320,91 @@ def main(
         perm_str,
     )
 
+    result = ClassificationResult(
+        label=ds.label,
+        nfeatures=x.shape[1],
+        nclasses=nclasses,
+        method=method,
+        mean_bacc=mean_bacc,
+        std_bacc=std_bacc,
+        ci_lo=ci_lo,
+        ci_hi=ci_hi,
+        mean_f1=mean_f1,
+        p_val=p_val,
+    )
+
+    return result, y, oof_preds, class_names
+
+
+def _format_score(res: ClassificationResult) -> str:
+    return f"${res.mean_bacc:.3f} \\pm {res.std_bacc:.3f}$"
+
+
+def format_latex_table(
+    rows: Sequence[tuple[ClassificationResult, ClassificationResult]],
+) -> str:
+    lines = [
+        r"\begin{tabular}{@{}lrrr@{}}",
+        r"\toprule",
+        r"\textbf{Feature family} & \textbf{Dim.} & \textbf{LDA} & \textbf{MLP} \\",
+        r"\midrule",
+    ]
+    for res_lda, res_mlp in rows:
+        lines.append(
+            f"{res_lda.label} & {res_lda.nfeatures:,} & "
+            f"{_format_score(res_lda)} & {_format_score(res_mlp)} \\\\"
+        )
+
+    if rows:
+        chance = 1.0 / rows[0][0].nclasses
+        lines.extend([
+            r"\midrule",
+            f"Chance & -- & ${chance:.3f}$ & ${chance:.3f}$ \\\\",
+        ])
+
+    lines.extend([
+        r"\bottomrule",
+        r"\end{tabular}",
+    ])
+    return "\n".join(lines)
+
+
+def main(
+    filename: pathlib.Path,
+    *,
+    method: ClassificationMethod = "svm",
+    binary: bool = False,
+    zscore_features: bool = True,
+    n_splits: int = 5,
+    n_repeats: int = 5,
+    n_permutations: int = 0,
+    seed: int = 42,
+    outfile: pathlib.Path | None = None,
+    overwrite: bool = False,
+) -> int:
+    from sklearn.metrics import balanced_accuracy_score, confusion_matrix
+
+    device = torch.get_default_device()
+    log.info("Device: %s", device)
+
+    try:
+        res, y, oof_preds, class_names = evaluate_dataset(
+            filename,
+            method=method,
+            binary=binary,
+            zscore_features=zscore_features,
+            n_splits=n_splits,
+            n_repeats=n_repeats,
+            n_permutations=n_permutations,
+            seed=seed,
+            device=device,
+        )
+    except Exception as exc:
+        log.error("Failed to evaluate '%s': %s", filename, exc)
+        return 1
+
     y_rep = np.tile(y, n_repeats)
-    cm = confusion_matrix(y_rep, np.ravel(oof_preds), labels=list(range(nclasses)))
+    cm = confusion_matrix(y_rep, np.ravel(oof_preds), labels=list(range(res.nclasses)))
     overall_bacc = balanced_accuracy_score(y_rep, np.ravel(oof_preds))
 
     suffix = "-binary" if binary else "-multiclass"
@@ -332,6 +427,66 @@ def main(
     return 0
 
 
+def summary(
+    filenames: Sequence[pathlib.Path],
+    *,
+    binary: bool = False,
+    zscore_features: bool = True,
+    n_splits: int = 5,
+    n_repeats: int = 5,
+    n_permutations: int = 0,
+    seed: int = 42,
+    outfile: pathlib.Path | None = None,
+    overwrite: bool = False,
+) -> int:
+    device = torch.get_default_device()
+    log.info("Device: %s", device)
+
+    rows: list[tuple[ClassificationResult, ClassificationResult]] = []
+    for filename in filenames:
+        try:
+            res_lda, _, _, _ = evaluate_dataset(
+                filename,
+                method="lda",
+                binary=binary,
+                zscore_features=zscore_features,
+                n_splits=n_splits,
+                n_repeats=n_repeats,
+                n_permutations=n_permutations,
+                seed=seed,
+                device=device,
+            )
+            res_mlp, _, _, _ = evaluate_dataset(
+                filename,
+                method="mlp",
+                binary=binary,
+                zscore_features=zscore_features,
+                n_splits=n_splits,
+                n_repeats=n_repeats,
+                n_permutations=n_permutations,
+                seed=seed,
+                device=device,
+            )
+        except Exception as exc:
+            log.error("Failed to evaluate '%s': %s", filename, exc)
+            return 1
+
+        rows.append((res_lda, res_mlp))
+
+    table = format_latex_table(rows)
+    if outfile is None:
+        print(table)
+    else:
+        if outfile.exists() and not overwrite:
+            log.error("Output file '%s' exists (use --force to overwrite).", outfile)
+            return 1
+
+        outfile.write_text(f"{table}\n", encoding="utf-8")
+        log.info("Wrote summary table to '%s'.", outfile)
+
+    return 0
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -341,77 +496,103 @@ if __name__ == "__main__":
     ):
         pass
 
-    parser = argparse.ArgumentParser(
-        formatter_class=HelpFormatter,
-        description=SCRIPT_LONG_HELP,
-    )
-    parser.add_argument("filename", type=pathlib.Path)
-    parser.add_argument(
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
         "--device",
         action=FuzzyChoiceAction,
         choices=sorted(available_device_names()),
         default="cpu",
         help="The default device used by the framework",
     )
-    parser.add_argument(
-        "--method",
-        choices=get_args(ClassificationMethod),
-        default="lda",
-        help="The method used to do the classification",
-    )
-    parser.add_argument(
+    common.add_argument(
         "--binary",
         action="store_true",
         help="Group classes by scan type (Functional vs. Structural)",
     )
-    parser.add_argument(
+    common.add_argument(
         "--n-splits",
         type=int,
         default=5,
         help="Number of subject-grouped CV folds",
     )
-    parser.add_argument(
+    common.add_argument(
         "--n-repeats",
         type=int,
         default=5,
         help="Number of repeated CV runs",
     )
-    parser.add_argument(
+    common.add_argument(
         "--n-permutations",
         type=int,
         default=0,
         help="Number of subject-level label permutations (0 to skip)",
     )
-    parser.add_argument(
+    common.add_argument(
         "--seed",
         type=int,
         default=42,
         help="Random seed for CV splits and permutations",
     )
-    parser.add_argument(
+    common.add_argument(
         "--no-zscore",
         action="store_false",
         dest="zscore",
         help="Disable z-scoring each feature to zero mean and unit variance",
     )
-    parser.add_argument(
+    common.add_argument(
+        "--force",
+        action="store_true",
+        help="Force overwrite of existing files",
+    )
+    common.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Only show error messages",
+    )
+
+    parser = argparse.ArgumentParser(
+        formatter_class=HelpFormatter,
+        description=SCRIPT_LONG_HELP,
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    run_parser = subparsers.add_parser(
+        "run",
+        parents=[common],
+        formatter_class=HelpFormatter,
+        help="Evaluate a single feature dataset and plot its confusion matrix",
+    )
+    run_parser.add_argument("filename", type=pathlib.Path)
+    run_parser.add_argument(
+        "--method",
+        choices=get_args(ClassificationMethod),
+        default="lda",
+        help="The method used to do the classification",
+    )
+    run_parser.add_argument(
         "-o",
         "--outfile",
         type=pathlib.Path,
         default=None,
         help="Basename for output files (named '{basename}-XX')",
     )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Force overwrite of existing files",
+
+    summary_parser = subparsers.add_parser(
+        "summary",
+        parents=[common],
+        formatter_class=HelpFormatter,
+        help="Evaluate multiple feature datasets (LDA and MLP) and emit a LaTeX table",
     )
-    parser.add_argument(
-        "-q",
-        "--quiet",
-        action="store_true",
-        help="Only show error messages",
+    summary_parser.add_argument("filenames", nargs="+", type=pathlib.Path)
+    summary_parser.add_argument(
+        "-o",
+        "--outfile",
+        type=pathlib.Path,
+        default=None,
+        help="Optional output .tex file (defaults to stdout)",
     )
+
     args = parser.parse_args()
 
     if not args.quiet:
@@ -421,17 +602,34 @@ if __name__ == "__main__":
         # NOTE: use TF32 for matrix multiplication (should be faster, similar precision)
         torch.set_float32_matmul_precision("high")
 
-        raise SystemExit(
-            main(
-                args.filename,
-                outfile=args.outfile,
-                method=args.method,
-                binary=args.binary,
-                zscore_features=args.zscore,
-                n_splits=args.n_splits,
-                n_repeats=args.n_repeats,
-                n_permutations=args.n_permutations,
-                seed=args.seed,
-                overwrite=args.force,
+        if args.command == "run":
+            raise SystemExit(
+                main(
+                    args.filename,
+                    outfile=args.outfile,
+                    method=args.method,
+                    binary=args.binary,
+                    zscore_features=args.zscore,
+                    n_splits=args.n_splits,
+                    n_repeats=args.n_repeats,
+                    n_permutations=args.n_permutations,
+                    seed=args.seed,
+                    overwrite=args.force,
+                )
             )
-        )
+        elif args.command == "summary":
+            raise SystemExit(
+                summary(
+                    args.filenames,
+                    binary=args.binary,
+                    zscore_features=args.zscore,
+                    n_splits=args.n_splits,
+                    n_repeats=args.n_repeats,
+                    n_permutations=args.n_permutations,
+                    seed=args.seed,
+                    outfile=args.outfile,
+                    overwrite=args.force,
+                )
+            )
+        else:
+            raise ValueError(f"unsupported command: {args.command}")

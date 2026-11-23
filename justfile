@@ -203,6 +203,16 @@ ablation filename dataidx="0" *ARGS:
 
 # }}}
 
+# {{{ tables
+
+[doc("Generate Table 6")]
+table6:
+    {{ PYTHON }} experiments/classify-task-decoding.py \
+        summary --force --binary \
+        data/dataset-features-*.npz
+
+# }}}
+
 # {{{ figures
 
 [private]
