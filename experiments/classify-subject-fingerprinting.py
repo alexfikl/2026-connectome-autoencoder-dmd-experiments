@@ -14,13 +14,13 @@ import torch
 from classifylib import (
     ClassificationMethod,
     ClassificationResult,
+    bootstrap_identification_ci,
     fit_and_predict,
     format_latex_table,
     save_summary,
-    subject_bootstrap_ci,
 )
 from commonlib import FeatureDataset, load_feature_datasets, select_feature_group
-from nneuroutil.typing import Array1D, Array2D, Array3D
+from nneuroutil.typing import Array2D, Array3D
 
 log = logging.getLogger("lib.classify_subject_fingerprinting")
 
@@ -48,22 +48,6 @@ def to_tensor(ds: FeatureDataset) -> Array3D[np.floating[Any]]:
         raise ValueError("expected all classes to have the same shape")
 
     return np.stack([np.asarray(x) for x in ds.x], axis=0)
-
-
-def bootstrap_subject_ci(
-    oof_preds: Array2D[np.integer[Any]],
-    *,
-    n_bootstrap: int = 1000,
-    seed: int = 42,
-) -> tuple[float, float]:
-    """Compute 95% bootstrap CI over subjects for identification accuracy."""
-    _ntasks, nsubjects = oof_preds.shape
-    correct = oof_preds == np.arange(nsubjects)[None, :]
-
-    def metric(sampled: Array1D[np.integer[Any]]) -> float:
-        return np.mean(np.take(correct, sampled, axis=1))
-
-    return subject_bootstrap_ci(metric, nsubjects, n_bootstrap=n_bootstrap, seed=seed)
 
 
 def run_cross_validation(
@@ -155,7 +139,7 @@ def evaluate_dataset(
 
     mean_bacc = float(np.mean(fold_bacc))
     std_bacc = float(np.std(fold_bacc))
-    ci_lo, ci_hi = bootstrap_subject_ci(oof_preds, seed=seed)
+    ci_lo, ci_hi = bootstrap_identification_ci(oof_preds, seed=seed)
 
     p_val: float | None = None
     perm_str = ""

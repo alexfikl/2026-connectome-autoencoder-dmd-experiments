@@ -14,11 +14,11 @@ import torch
 from classifylib import (
     ClassificationMethod,
     ClassificationResult,
+    bootstrap_balanced_accuracy_ci,
     fit_and_predict,
     format_latex_table,
     make_subject_rows,
     save_summary,
-    subject_bootstrap_ci,
 )
 from commonlib import (
     flatten_feature_datasets,
@@ -41,33 +41,6 @@ Examples:
     > {SCRIPT_PATH.name} run --method lda dataset-features-matrix.npz
     > {SCRIPT_PATH.name} summary --binary data/dataset-features-*.npz
 """
-
-
-def bootstrap_subject_ci(
-    y_true: Array1D[np.integer[Any]],
-    oof_preds: Array2D[np.integer[Any]],
-    groups: Array1D[np.integer[Any]],
-    *,
-    n_bootstrap: int = 1000,
-    seed: int = 42,
-) -> tuple[float, float]:
-    """Compute 95% bootstrap CI over subjects for balanced accuracy."""
-    from sklearn.metrics import balanced_accuracy_score
-
-    subj_rows = make_subject_rows(groups)
-    n_repeats = oof_preds.shape[0]
-
-    def metric(sampled: Array1D[np.integer[Any]]) -> float:
-        idx = np.concatenate([subj_rows[s] for s in sampled])
-        return float(
-            balanced_accuracy_score(
-                np.tile(y_true[idx], n_repeats), np.ravel(oof_preds[:, idx])
-            )
-        )
-
-    return subject_bootstrap_ci(
-        metric, len(subj_rows), n_bootstrap=n_bootstrap, seed=seed
-    )
 
 
 # {{{ plot_confusion
@@ -240,7 +213,7 @@ def evaluate_dataset(
     mean_bacc = np.mean(fold_bacc)
     std_bacc = np.std(fold_bacc)
     mean_f1 = np.mean(fold_f1)
-    ci_lo, ci_hi = bootstrap_subject_ci(y, oof_preds, groups, seed=seed)
+    ci_lo, ci_hi = bootstrap_balanced_accuracy_ci(y, oof_preds, groups, seed=seed)
 
     p_val: float | None = None
     perm_str = ""

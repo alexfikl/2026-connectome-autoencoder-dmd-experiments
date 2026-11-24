@@ -11,7 +11,7 @@ from typing import Any, Literal, NamedTuple
 import numpy as np
 import torch
 
-from nneuroutil.typing import Array1D
+from nneuroutil.typing import Array1D, Array2D
 
 log = logging.getLogger("lib.classifylib")
 
@@ -82,7 +82,7 @@ def make_subject_rows(
     return [np.flatnonzero(groups == s) for s in np.unique(groups)]
 
 
-def subject_bootstrap_ci(
+def _bootstrap_subject_ci(
     metric: Callable[[Array1D[np.integer[Any]]], float],
     n_subjects: int,
     *,
@@ -103,6 +103,49 @@ def subject_bootstrap_ci(
 
     lo, hi = np.percentile(vals, [2.5, 97.5])
     return lo, hi
+
+
+def bootstrap_balanced_accuracy_ci(
+    y_true: Array1D[np.integer[Any]],
+    oof_preds: Array2D[np.integer[Any]],
+    groups: Array1D[np.integer[Any]],
+    *,
+    n_bootstrap: int = 1000,
+    seed: int = 42,
+) -> tuple[float, float]:
+    """Compute 95% bootstrap CI over subjects for balanced accuracy."""
+    from sklearn.metrics import balanced_accuracy_score
+
+    subj_rows = make_subject_rows(groups)
+    n_repeats = oof_preds.shape[0]
+
+    def metric(sampled: Array1D[np.integer[Any]]) -> float:
+        idx = np.concatenate([subj_rows[s] for s in sampled])
+        return float(
+            balanced_accuracy_score(
+                np.tile(y_true[idx], n_repeats), np.ravel(oof_preds[:, idx])
+            )
+        )
+
+    return _bootstrap_subject_ci(
+        metric, len(subj_rows), n_bootstrap=n_bootstrap, seed=seed
+    )
+
+
+def bootstrap_identification_ci(
+    oof_preds: Array2D[np.integer[Any]],
+    *,
+    n_bootstrap: int = 1000,
+    seed: int = 42,
+) -> tuple[float, float]:
+    """Compute 95% bootstrap CI over subjects for identification accuracy."""
+    _ntasks, nsubjects = oof_preds.shape
+    correct = oof_preds == np.arange(nsubjects)[None, :]
+
+    def metric(sampled: Array1D[np.integer[Any]]) -> float:
+        return float(np.mean(np.take(correct, sampled, axis=1)))
+
+    return _bootstrap_subject_ci(metric, nsubjects, n_bootstrap=n_bootstrap, seed=seed)
 
 
 # {{{ table

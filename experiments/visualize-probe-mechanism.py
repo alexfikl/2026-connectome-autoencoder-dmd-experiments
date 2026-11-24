@@ -14,6 +14,10 @@ from typing import Any, Literal, get_args
 import numpy as np
 import torch
 
+from classifylib import (
+    bootstrap_balanced_accuracy_ci,
+    bootstrap_identification_ci,
+)
 from commonlib import (
     FeatureDataset,
     flatten_feature_datasets,
@@ -116,7 +120,7 @@ def _eval_task_block(
         seed=seed,
         device=device,
     )
-    ci_lo, ci_hi = task_mod.bootstrap_subject_ci(y, oof_preds, groups, seed=seed)
+    ci_lo, ci_hi = bootstrap_balanced_accuracy_ci(y, oof_preds, groups, seed=seed)
     return (
         float(np.mean(fold_bacc)),
         float(np.std(fold_bacc)),
@@ -141,7 +145,7 @@ def _eval_fp_block(
         seed=seed,
         device=device,
     )
-    ci_lo, ci_hi = fp_mod.bootstrap_subject_ci(oof_preds, seed=seed)
+    ci_lo, ci_hi = bootstrap_identification_ci(oof_preds, seed=seed)
     return (
         float(np.mean(fold_bacc)),
         float(np.std(fold_bacc)),
