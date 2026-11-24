@@ -8,7 +8,6 @@ import pathlib
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, NamedTuple
 
-import array_api_compat
 import numpy as np
 import torch
 
@@ -69,32 +68,11 @@ def _clean_class_name(name: str) -> str:
     return upper if (upper := name.upper()) == "WM" else name.title()
 
 
-def flatten_feature_datasets(
-    ds: FeatureDataset,
-) -> tuple[
-    Array2D[np.floating[Any]],
-    Array1D[np.integer[Any]],
-    Array1D[np.integer[Any]],
-]:
-    """Concatenate the per-class arrays into ``(x, labels, subject_ids)``."""
-    arrays = [np.asarray(xi) for xi in ds.x]
-    x = np.concatenate(arrays, axis=0)
-    labels = np.repeat(
-        np.arange(len(arrays), dtype=np.int64),
-        [array.shape[0] for array in arrays],
-    )
-    subject_ids = np.concatenate([np.asarray(s) for s in ds.subject_ids], axis=0)
-
-    return x, labels, subject_ids
-
-
 def load_feature_datasets(
     filename: pathlib.Path,
     *,
     binary: bool = False,
     datakey: str = "datasets",
-    device: Any = None,
-    xp: Any = None,
 ) -> FeatureDataset:
     """Load a feature file written by ``make-features.py``.
 
@@ -134,9 +112,6 @@ def load_feature_datasets(
         raise ValueError(f"file does not contain 'label' dataset: '{filename}'")
 
     label = str(data["label"])
-
-    if xp is None:
-        xp = array_api_compat.array_namespace(np.array([0]))
 
     classes: list[str] = []
     arrays: list[Array2D[np.floating[Any]]] = []
@@ -183,13 +158,31 @@ def load_feature_datasets(
         )
 
     return FeatureDataset(
-        x=tuple(xp.asarray(xi, device=device) for xi in xs),
-        subject_ids=tuple(xp.asarray(s) for s in subject_ids),
-        class_names=tuple(class_names),
         label=label,
-        starts=xp.asarray(data["starts"], device=device),
+        x=tuple(xs),
+        class_names=tuple(class_names),
+        starts=data["starts"],
         descrs=tuple(descrs),
+        subject_ids=tuple(subject_ids),
     )
+
+
+def flatten_feature_datasets(
+    ds: FeatureDataset,
+) -> tuple[
+    Array2D[np.floating[Any]],
+    Array1D[np.integer[Any]],
+    Array1D[np.integer[Any]],
+]:
+    """Concatenate the per-class arrays into ``(x, labels, subject_ids)``."""
+    x = np.concatenate(ds.x, axis=0)
+    labels = np.repeat(
+        np.arange(len(ds.x), dtype=np.int64),
+        [xi.shape[0] for xi in ds.x],
+    )
+    subject_ids = np.concatenate(ds.subject_ids, axis=0)
+
+    return x, labels, subject_ids
 
 
 def select_feature_group(
@@ -206,8 +199,8 @@ def select_feature_group(
     if not (0 <= index < ngroups):
         raise ValueError(f"feature group index {index!r} out of range [0, {ngroups})")
 
-    start = int(ds.starts[index])
-    end = int(ds.starts[index + 1])
+    start = ds.starts[index]
+    end = ds.starts[index + 1]
     descr = ds.descrs[index]
 
     return FeatureDataset(
@@ -390,7 +383,7 @@ def run_leave_one_condition_out_cv(
         y_pred = y_pred_t.detach().cpu().numpy()
 
         oof_preds[t] = y_pred
-        fold_bacc.append(float(balanced_accuracy_score(y_test, y_pred)))
+        fold_bacc.append(balanced_accuracy_score(y_test, y_pred))
 
     return oof_preds, fold_bacc
 
@@ -457,10 +450,8 @@ def bootstrap_balanced_accuracy_ci(
 
     def metric(sampled: Array1D[np.integer[Any]]) -> float:
         idx = np.concatenate([subj_rows[s] for s in sampled])
-        return float(
-            balanced_accuracy_score(
-                np.tile(y_true[idx], n_repeats), np.ravel(oof_preds[:, idx])
-            )
+        return balanced_accuracy_score(
+            np.tile(y_true[idx], n_repeats), np.ravel(oof_preds[:, idx])
         )
 
     return _bootstrap_subject_ci(
@@ -479,7 +470,7 @@ def bootstrap_identification_ci(
     correct = oof_preds == np.arange(nsubjects)[None, :]
 
     def metric(sampled: Array1D[np.integer[Any]]) -> float:
-        return float(np.mean(np.take(correct, sampled, axis=1)))
+        return np.mean(np.take(correct, sampled, axis=1))
 
     return _bootstrap_subject_ci(metric, nsubjects, n_bootstrap=n_bootstrap, seed=seed)
 
