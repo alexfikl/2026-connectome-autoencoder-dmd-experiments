@@ -258,13 +258,21 @@ figure7:
 
 [doc("Generate plots for Figure 8")]
 figure8:
-    # {{ PYTHON }} experiments/classify-task-decoding.py run \
-    #     --force --device cuda --method mlp \
-    #     data/dataset-features-ae-dmd.npz
+    {{ PYTHON }} experiments/classify-task-decoding.py run \
+        --force --device cuda --method mlp \
+        data/dataset-features-ae-dmd.npz
     {{ PYTHON }} experiments/visualize-classification.py \
         --force \
         --task data/classify-task-decoding-functional.npz \
         --fingerprint data/classify-subject-fingerprinting-functional.npz \
         --method mlp
+
+[doc("Generate plots for Figure 9")]
+figure9:
+    {{ PYTHON }} experiments/visualize-probe-mechanism.py \
+        --device cuda --force \
+        --cache data/stage3-probe-mechanism.npz \
+        data/dataset-features-ae-dmd.npz \
+        data/dataset-features-matrix.npz
 
 # }}}
