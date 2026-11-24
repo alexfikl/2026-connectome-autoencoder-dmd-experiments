@@ -272,7 +272,6 @@ def plot_task_accuracy(
 
     with figure(
         basename.with_stem(f"{basename.stem}-fingerprinting-{method}"),
-        figsize=(8, 5.5),
         overwrite=overwrite,
     ) as fig:
         ax = fig.gca()

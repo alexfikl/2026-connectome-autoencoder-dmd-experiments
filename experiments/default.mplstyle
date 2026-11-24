@@ -13,27 +13,27 @@ figure.constrained_layout.use: True
 savefig.format: jpg
 
 # axes
-axes.labelsize: 16
+axes.labelsize: 20
 axes.titlesize: 20
 axes.grid: True
 axes.grid.axis: both
 axes.grid.which: both
 
 # ticks
-xtick.labelsize: 16
+xtick.labelsize: 20
 xtick.direction: in
 xtick.major.size: 6.5
 xtick.major.width: 1.5
 xtick.minor.size: 4.0
 
-ytick.labelsize: 16
+ytick.labelsize: 20
 ytick.direction: in
 ytick.major.size: 6.5
 ytick.major.width: 1.5
 ytick.minor.size: 4.0
 
 # legend
-legend.fontsize: 16
+legend.fontsize: 20
 legend.frameon: True
 legend.fancybox: False
 legend.facecolor: white

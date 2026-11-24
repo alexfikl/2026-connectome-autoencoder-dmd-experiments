@@ -209,21 +209,21 @@ ablation filename dataidx="0" *ARGS:
 table6:
     {{ PYTHON }} experiments/classify-task-decoding.py summary \
         --force --device cuda --binary \
-        --outfile classify-task-decoding-binary.npz \
+        --outfile data/classify-task-decoding-binary.npz \
         data/dataset-features-*.npz
 
 [doc("Generate Table 7 (task decoding)")]
 table7a:
     {{ PYTHON }} experiments/classify-task-decoding.py summary \
         --force --device cuda \
-        --outfile classify-task-decoding-functional.npz \
+        --outfile data/classify-task-decoding-functional.npz \
         data/dataset-features-*.npz
 
 [doc("Generate Table 7 (subject fingerprinting)")]
 table7b:
     {{ PYTHON }} experiments/classify-subject-fingerprinting.py summary \
         --force --device cuda \
-        --outfile classify-subject-fingerprinting-functional.npz \
+        --outfile data/classify-subject-fingerprinting-functional.npz \
         data/dataset-features-*.npz
 
 # }}}
@@ -258,8 +258,13 @@ figure7:
 
 [doc("Generate plots for Figure 8")]
 figure8:
-    {{ PYTHON }} experiments/classify-task-decoding.py \
-        run --force --device cuda --method mlp \
-        data/dataset-features-ae-dmd.npz
+    # {{ PYTHON }} experiments/classify-task-decoding.py run \
+    #     --force --device cuda --method mlp \
+    #     data/dataset-features-ae-dmd.npz
+    {{ PYTHON }} experiments/visualize-classification.py \
+        --force \
+        --task data/classify-task-decoding-functional.npz \
+        --fingerprint data/classify-subject-fingerprinting-functional.npz \
+        --method mlp
 
 # }}}

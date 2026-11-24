@@ -255,6 +255,59 @@ def load_feature_datasets(
     )
 
 
+def select_feature_group(
+    ds: FeatureDataset,
+    group: int | str,
+) -> FeatureDataset:
+    """Return a view of *ds* restricted to a single feature group.
+
+    :arg group: 0-based group index (or integer string) or a case-insensitive
+        substring matching one entry of ``ds.descrs``.
+    """
+    if isinstance(group, str):
+        try:
+            idx = int(group)
+        except ValueError:
+            matches = [
+                i
+                for i, descr in enumerate(ds.descrs)
+                if group.lower() in descr.lower()
+            ]
+            if not matches:
+                raise ValueError(
+                    f"no feature group matching {group!r} in {ds.descrs}"
+                ) from None
+            if len(matches) > 1:
+                raise ValueError(
+                    f"ambiguous feature group {group!r}: matches "
+                    f"{[ds.descrs[i] for i in matches]}"
+                ) from None
+            idx = matches[0]
+    else:
+        idx = group
+
+    ngroups = len(ds.descrs)
+    if idx < 0:
+        idx += ngroups
+    if not (0 <= idx < ngroups):
+        raise ValueError(
+            f"feature group index {group!r} out of range [0, {ngroups})"
+        )
+
+    start = int(ds.starts[idx])
+    end = int(ds.starts[idx + 1])
+    descr = ds.descrs[idx]
+
+    return FeatureDataset(
+        x=tuple(xi[:, start:end] for xi in ds.x),
+        groups=ds.groups,
+        class_names=ds.class_names,
+        label=f"{ds.label} ({descr})",
+        starts=np.array([0, end - start], dtype=np.int64),
+        descrs=(descr,),
+    )
+
+
 def load_matrix_datasets(
     filename: pathlib.Path,
     *,

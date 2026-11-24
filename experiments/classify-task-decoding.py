@@ -140,7 +140,6 @@ def plot_confusion(
 
     with figure(
         basename.with_stem(f"{basename.stem}-confusion-{method}"),
-        figsize=(8, 7),
         overwrite=overwrite,
     ) as fig:
         ax = fig.gca()
@@ -149,8 +148,8 @@ def plot_confusion(
         im = ax.imshow(cm_pct, cmap="Blues", vmin=0.0, vmax=100.0)
         ax.set_xticks(range(nclasses))
         ax.set_yticks(range(nclasses))
-        ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize="medium")
-        ax.set_yticklabels(class_names, fontsize="medium")
+        ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize=16)
+        ax.set_yticklabels(class_names, fontsize=16)
         ax.set_xlabel("Predicted")
         ax.set_ylabel("True")
 
@@ -166,7 +165,7 @@ def plot_confusion(
                 ha="center",
                 va="center",
                 color=color,
-                fontsize="small",
+
             )
 
         fig.colorbar(im, cax=make_colorbar_axes(ax), label="Percentage (\\%)")

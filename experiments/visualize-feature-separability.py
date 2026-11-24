@@ -335,7 +335,6 @@ def plot_rdm(
 
     with figure(
         basename.with_stem(f"{basename.stem}-rdm"),
-        figsize=(8, 7),
         overwrite=overwrite,
     ) as fig:
         ax = fig.gca()
@@ -377,7 +376,6 @@ def plot_lda(
     """Plot a held-out LDA spectrum and, if possible, the Fisher map."""
     with figure(
         basename.with_stem(f"{basename.stem}-lda-{stem}-spectrum"),
-        figsize=(7, 5.5),
         overwrite=overwrite,
     ) as fig:
         ax = fig.gca()
@@ -395,7 +393,6 @@ def plot_lda(
 
     with figure(
         basename.with_stem(f"{basename.stem}-lda-{stem}-map"),
-        figsize=(8, 6),
         overwrite=overwrite,
     ) as fig:
         ax = fig.gca()
@@ -437,7 +434,6 @@ def plot_effect_size_dist(
 
     with figure(
         basename.with_stem(f"{basename.stem}-effect-sizes-hist"),
-        figsize=(7, 5.5),
         overwrite=overwrite,
     ) as fig:
         ax = fig.gca()
@@ -481,7 +477,6 @@ def plot_effect_size_dist(
 
     with figure(
         basename.with_stem(f"{basename.stem}-effect-sizes-ecdf"),
-        figsize=(7, 5.5),
         overwrite=overwrite,
     ) as fig:
         ax = fig.gca()
@@ -509,7 +504,6 @@ def plot_decoding_cv(
 
     with figure(
         basename.with_stem(f"{basename.stem}-decoding-cv-confusion"),
-        figsize=(8, 7),
         overwrite=overwrite,
     ) as fig:
         ax = fig.gca()
@@ -549,7 +543,6 @@ def plot_decoding_cv(
 
     with figure(
         basename.with_stem(f"{basename.stem}-decoding-cv-accuracy"),
-        figsize=(8, 6),
         overwrite=overwrite,
     ) as fig:
         ax = fig.gca()
@@ -590,7 +583,6 @@ def plot_task_vs_subject_ratio(
 
     with figure(
         basename.with_stem(f"{basename.stem}-task-vs-subject-ratio"),
-        figsize=(7, 5.5),
         overwrite=overwrite,
     ) as fig:
         ax = fig.gca()
@@ -619,7 +611,6 @@ def plot_task_vs_subject_ratio(
 
     with figure(
         basename.with_stem(f"{basename.stem}-task-vs-subject-scatter"),
-        figsize=(7, 5.5),
         overwrite=overwrite,
     ) as fig:
         ax = fig.gca()

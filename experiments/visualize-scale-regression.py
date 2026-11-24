@@ -164,7 +164,6 @@ def plot_scale_regression(
 
     with figure(
         outfile.with_stem(f"{outfile.stem}-r2"),
-        figsize=(6.5, 4.5),
         overwrite=overwrite,
     ) as fig:
         (ax,) = fig.axes
@@ -194,7 +193,6 @@ def plot_scale_regression(
     for result in results_fro:
         with figure(
             outfile.with_stem(f"{outfile.stem}-scatter-{result.name.lower()}"),
-            figsize=(5.0, 4.5),
             overwrite=overwrite,
         ) as fig:
             (ax,) = fig.axes
