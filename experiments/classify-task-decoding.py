@@ -107,7 +107,7 @@ def evaluate_dataset(
     n_permutations: int,
     seed: int,
     device: torch.device | str,
-    group: int | str | None = None,
+    group: int | None = None,
 ) -> tuple[
     ClassificationResult,
     Array1D[np.integer[Any]],
@@ -213,7 +213,7 @@ def main(
     n_repeats: int = 5,
     n_permutations: int = 0,
     seed: int = 42,
-    group: int | str | None = None,
+    group: int | None = None,
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
 ) -> int:
@@ -407,9 +407,9 @@ if __name__ == "__main__":
     )
     run_parser.add_argument(
         "--group",
-        type=str,
+        type=int,
         default=None,
-        help="Evaluate a single feature group (0-based index or description substring)",
+        help="Evaluate a single feature group by its 0-based index",
     )
     run_parser.add_argument(
         "-o",

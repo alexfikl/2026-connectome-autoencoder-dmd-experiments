@@ -20,6 +20,19 @@ log = logging.getLogger("lib.classifylib")
 # {{{ feature datasets
 
 
+SCAN_TYPE_LABELS = {"fmri": "Functional", "mri": "Structural"}
+
+TASK_LABELS = {
+    "emotion": "Emotion",
+    "gambling": "Gambling",
+    "language": "Language",
+    "relational": "Relational",
+    "rest": "Rest",
+    "social": "Social",
+    "wm": "WM",
+}
+
+
 class FeatureDataset(NamedTuple):
     x: tuple[Array2D[np.floating[Any]], ...]
     """One feature matrix of shape ``(nsamples, nfeatures)`` per class."""
@@ -36,24 +49,11 @@ class FeatureDataset(NamedTuple):
 
     def to_tensor(self) -> Array3D[np.floating[Any]]:
         """Stack matched-subject features to ``(ntasks, nsubjects, nfeatures)``."""
-        shapes = {np.asarray(x).shape for x in self.x}
+        shapes = {x.shape for x in self.x}
         if len(shapes) != 1:
             raise ValueError("expected all classes to have the same shape")
 
-        return np.stack([np.asarray(x) for x in self.x], axis=0)
-
-
-SCAN_TYPE_LABELS = {"fmri": "Functional", "mri": "Structural"}
-
-TASK_LABELS = {
-    "emotion": "Emotion",
-    "gambling": "Gambling",
-    "language": "Language",
-    "relational": "Relational",
-    "rest": "Rest",
-    "social": "Social",
-    "wm": "WM",
-}
+        return np.stack(self.x, axis=0)
 
 
 def _clean_class_name(name: str) -> str:
@@ -192,42 +192,21 @@ def load_feature_datasets(
 
 def select_feature_group(
     ds: FeatureDataset,
-    group: int | str,
+    index: int,
 ) -> FeatureDataset:
     """Return a view of *ds* restricted to a single feature group.
 
-    :arg group: 0-based group index (or integer string) or a case-insensitive
-        substring matching one entry of ``ds.descrs``.
+    :arg index: 0-based group index into ``ds.descrs``.
     """
-    if isinstance(group, str):
-        try:
-            idx = int(group)
-        except ValueError:
-            matches = [
-                i for i, descr in enumerate(ds.descrs) if group.lower() in descr.lower()
-            ]
-            if not matches:
-                raise ValueError(
-                    f"no feature group matching {group!r} in {ds.descrs}"
-                ) from None
-            if len(matches) > 1:
-                raise ValueError(
-                    f"ambiguous feature group {group!r}: matches "
-                    f"{[ds.descrs[i] for i in matches]}"
-                ) from None
-            idx = matches[0]
-    else:
-        idx = group
-
     ngroups = len(ds.descrs)
-    if idx < 0:
-        idx += ngroups
-    if not (0 <= idx < ngroups):
-        raise ValueError(f"feature group index {group!r} out of range [0, {ngroups})")
+    if index < 0:
+        index += ngroups
+    if not (0 <= index < ngroups):
+        raise ValueError(f"feature group index {index!r} out of range [0, {ngroups})")
 
-    start = int(ds.starts[idx])
-    end = int(ds.starts[idx + 1])
-    descr = ds.descrs[idx]
+    start = int(ds.starts[index])
+    end = int(ds.starts[index + 1])
+    descr = ds.descrs[index]
 
     return FeatureDataset(
         x=tuple(xi[:, start:end] for xi in ds.x),

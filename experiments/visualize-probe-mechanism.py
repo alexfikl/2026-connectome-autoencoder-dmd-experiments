@@ -235,7 +235,8 @@ def compute_node_correlations(
     mats: Array3D[np.floating[Any]],
 ) -> NodeCorrelations:
     """Compute per-connectome R^200 correlations between |z_N| and P(A) vs u_k."""
-    ds_mag = select_feature_group(ds_ae, "magnitude")
+    idx = ds_ae.descrs.index("Attractor node magnitudes")
+    ds_mag = select_feature_group(ds_ae, idx)
     mags, _, _ = flatten_feature_datasets(ds_mag)
     if mats.shape[0] != mags.shape[0] or mats.shape[1] != mags.shape[1]:
         raise ValueError(
