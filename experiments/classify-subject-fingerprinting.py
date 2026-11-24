@@ -91,7 +91,7 @@ def fit_and_predict(
             y_train_list,
             alpha=1.0,
             learning_rate_init=1.0e-2,
-            max_iter=200,
+            max_iter=400,
         )
         return clf.predict(x_test)
 
