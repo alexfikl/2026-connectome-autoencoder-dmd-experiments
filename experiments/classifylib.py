@@ -459,9 +459,13 @@ def bootstrap_balanced_accuracy_ci(
     subject_ids: Array1D[np.integer[Any]],
     *,
     n_bootstrap: int = 1000,
+    percentile: float = 95.0,
     seed: int = 42,
 ) -> tuple[float, float]:
-    """Compute 95% bootstrap CI over subjects for balanced accuracy."""
+    """Compute the bootstrap CI over subjects for balanced accuracy.
+
+    :arg percentile: two-sided confidence level in percent.
+    """
     from sklearn.metrics import balanced_accuracy_score
 
     subj_rows = make_subject_index(subject_ids).rows
@@ -476,7 +480,8 @@ def bootstrap_balanced_accuracy_ci(
             np.tile(y_true[idx], n_repeats), np.ravel(oof_preds[:, idx])
         )
 
-    lo, hi = np.percentile(vals, [2.5, 97.5])
+    tail = 0.5 * (100.0 - percentile)
+    lo, hi = np.percentile(vals, [tail, 100.0 - tail])
     return lo, hi
 
 
@@ -484,9 +489,13 @@ def bootstrap_identification_ci(
     oof_preds: Array2D[np.integer[Any]],
     *,
     n_bootstrap: int = 1000,
+    percentile: float = 95.0,
     seed: int = 42,
 ) -> tuple[float, float]:
-    """Compute 95% bootstrap CI over subjects for identification accuracy."""
+    """Compute the bootstrap CI over subjects for identification accuracy.
+
+    :arg percentile: two-sided confidence level in percent.
+    """
     _ntasks, nsubjects = oof_preds.shape
     correct = oof_preds == np.arange(nsubjects)[None, :]
     rng = np.random.default_rng(seed)
@@ -496,7 +505,8 @@ def bootstrap_identification_ci(
         sampled = rng.integers(0, nsubjects, size=nsubjects)
         vals[b] = np.mean(np.take(correct, sampled, axis=1))
 
-    lo, hi = np.percentile(vals, [2.5, 97.5])
+    tail = 0.5 * (100.0 - percentile)
+    lo, hi = np.percentile(vals, [tail, 100.0 - tail])
     return lo, hi
 
 
