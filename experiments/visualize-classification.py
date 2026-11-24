@@ -10,6 +10,7 @@ from typing import Any, Literal, NamedTuple, get_args
 import numpy as np
 
 import commonlib  # ruff: ignore[unused-import]
+from classifylib import load_summary
 from nneuroutil.typing import Array1D, Array2D
 from nneuroutil.visualization import figure
 
@@ -81,38 +82,40 @@ class ClassificationSummary(NamedTuple):
     fp_chance: float
 
 
-def load_summary(
+def load_classification_summary(
     task_npz: pathlib.Path,
     fp_npz: pathlib.Path,
     *,
     method: ClassificationMethod = "mlp",
 ) -> ClassificationSummary:
-    """Load matched task-decoding and fingerprinting summaries from ``.npz`` files."""
-    with np.load(task_npz, allow_pickle=False) as dt:
-        task_labels = [str(x) for x in dt["labels"]]
-        task_chance = float(dt["chance"])
-        task_mean = np.asarray(dt[f"{method}_mean"], dtype=np.float64)
-        task_lo = np.asarray(dt[f"{method}_ci_lo"], dtype=np.float64)
-        task_hi = np.asarray(dt[f"{method}_ci_hi"], dtype=np.float64)
+    """Load and match task-decoding and fingerprinting summaries."""
+    task_rows = load_summary(task_npz)
+    fp_rows = load_summary(fp_npz)
 
-    with np.load(fp_npz, allow_pickle=False) as df:
-        fp_labels = [str(x) for x in df["labels"]]
-        fp_chance = float(df["chance"])
-        fp_mean_all = np.asarray(df[f"{method}_mean"], dtype=np.float64)
-        fp_lo_all = np.asarray(df[f"{method}_ci_lo"], dtype=np.float64)
-        fp_hi_all = np.asarray(df[f"{method}_ci_hi"], dtype=np.float64)
+    task_methods = tuple(res.method for res in task_rows[0])
+    fp_methods = tuple(res.method for res in fp_rows[0])
+    if method not in task_methods or method not in fp_methods:
+        raise ValueError(f"method {method!r} is not present in the summary files")
 
-    fp_index = {lbl: idx for idx, lbl in enumerate(fp_labels)}
-    missing = [lbl for lbl in task_labels if lbl not in fp_index]
+    task = [row[task_methods.index(method)] for row in task_rows]
+    fp = [row[fp_methods.index(method)] for row in fp_rows]
+
+    task_labels = [res.label for res in task]
+    fp_index = {res.label: res for res in fp}
+    missing = [label for label in task_labels if label not in fp_index]
     if missing:
         raise ValueError(f"Labels missing from '{fp_npz}': {missing}")
 
-    order = [fp_index[lbl] for lbl in task_labels]
-    fp_mean = fp_mean_all[order]
-    fp_lo = fp_lo_all[order]
-    fp_hi = fp_hi_all[order]
+    fp = [fp_index[label] for label in task_labels]
 
-    shorts = tuple(_short_label(lbl) for lbl in task_labels)
+    task_mean = np.array([res.mean_bacc for res in task])
+    task_lo = np.array([res.ci_lo for res in task])
+    task_hi = np.array([res.ci_hi for res in task])
+    fp_mean = np.array([res.mean_bacc for res in fp])
+    fp_lo = np.array([res.ci_lo for res in fp])
+    fp_hi = np.array([res.ci_hi for res in fp])
+
+    shorts = tuple(_short_label(label) for label in task_labels)
     groups = tuple(_family_group(s) for s in shorts)
 
     task_err = np.maximum(
@@ -129,10 +132,10 @@ def load_summary(
         groups=groups,
         task_mean=task_mean,
         task_err=task_err,
-        task_chance=task_chance,
+        task_chance=task[0].chance,
         fp_mean=fp_mean,
         fp_err=fp_err,
-        fp_chance=fp_chance,
+        fp_chance=fp[0].chance,
     )
 
 
@@ -213,7 +216,7 @@ def main(
     overwrite: bool = False,
 ) -> int:
     try:
-        data = load_summary(task_npz, fp_npz, method=method)
+        data = load_classification_summary(task_npz, fp_npz, method=method)
     except Exception as exc:
         log.error("Failed to load summary files: %s", exc)
         return 1

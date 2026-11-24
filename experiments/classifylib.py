@@ -613,7 +613,7 @@ def run_ridge_cv(
 # }}}
 
 
-# {{{ table
+# {{{ format_latex_table
 
 
 def _format_score(res: ClassificationResult, *, underline: bool = False) -> str:
@@ -677,28 +677,80 @@ def format_latex_table(
 # }}}
 
 
-# {{{ summary
+# {{{ save_summary + load_summary
 
 
 def save_summary(
     outfile: pathlib.Path,
-    rows: Sequence[tuple[ClassificationResult, ClassificationResult]],
+    rows: Sequence[tuple[ClassificationResult, ...]],
 ) -> None:
-    """Save summary arrays consumed by ``visualize-classification.py``."""
+    """Save classification results to a ``.npz`` file.
+
+    Every row holds one result per method, in the same method order.
+    """
+    if rows:
+        methods = tuple(res.method for res in rows[0])
+        for i, row in enumerate(rows):
+            row_methods = tuple(res.method for res in row)
+            if row_methods != methods:
+                raise ValueError(
+                    f"row {i} has methods {row_methods}, expected {methods}"
+                )
+
+            label = row[0].label
+            nfeatures = row[0].nfeatures
+            nclasses = row[0].nclasses
+            if any(
+                (res.label, res.nfeatures, res.nclasses) != (label, nfeatures, nclasses)
+                for res in row
+            ):
+                raise ValueError(f"row {i} has inconsistent result metadata")
+    else:
+        methods = []
+
     np.savez(
         outfile,
-        labels=np.array([r[0].label for r in rows]),
-        nfeatures=np.array([r[0].nfeatures for r in rows], dtype=np.int64),
-        chance=np.float64(rows[0][0].chance),
-        lda_mean=np.array([r[0].mean_bacc for r in rows], dtype=np.float64),
-        lda_std=np.array([r[0].std_bacc for r in rows], dtype=np.float64),
-        lda_ci_lo=np.array([r[0].ci_lo for r in rows], dtype=np.float64),
-        lda_ci_hi=np.array([r[0].ci_hi for r in rows], dtype=np.float64),
-        mlp_mean=np.array([r[1].mean_bacc for r in rows], dtype=np.float64),
-        mlp_std=np.array([r[1].std_bacc for r in rows], dtype=np.float64),
-        mlp_ci_lo=np.array([r[1].ci_lo for r in rows], dtype=np.float64),
-        mlp_ci_hi=np.array([r[1].ci_hi for r in rows], dtype=np.float64),
+        labels=np.array([row[0].label for row in rows]),
+        nfeatures=np.array([row[0].nfeatures for row in rows], dtype=np.int64),
+        nclasses=np.array([row[0].nclasses for row in rows], dtype=np.int64),
+        methods=np.array(methods),
+        mean_bacc=np.array([[res.mean_bacc for res in row] for row in rows]),
+        std_bacc=np.array([[res.std_bacc for res in row] for row in rows]),
+        ci_lo=np.array([[res.ci_lo for res in row] for row in rows]),
+        ci_hi=np.array([[res.ci_hi for res in row] for row in rows]),
     )
+
+
+def load_summary(
+    filename: pathlib.Path,
+) -> list[tuple[ClassificationResult, ...]]:
+    """Load classification results written by :func:`save_summary`."""
+    with np.load(filename, allow_pickle=False) as data:
+        labels = [str(label) for label in data["labels"]]
+        nfeatures = data["nfeatures"]
+        nclasses = data["nclasses"]
+        methods = [str(method) for method in data["methods"]]
+        mean_bacc = data["mean_bacc"]
+        std_bacc = data["std_bacc"]
+        ci_lo = data["ci_lo"]
+        ci_hi = data["ci_hi"]
+
+    return [
+        tuple(
+            ClassificationResult(
+                label=labels[i],
+                nfeatures=int(nfeatures[i]),
+                nclasses=int(nclasses[i]),
+                method=cast(ClassificationMethod, method),
+                mean_bacc=float(mean_bacc[i, j]),
+                std_bacc=float(std_bacc[i, j]),
+                ci_lo=float(ci_lo[i, j]),
+                ci_hi=float(ci_hi[i, j]),
+            )
+            for j, method in enumerate(methods)
+        )
+        for i in range(len(labels))
+    ]
 
 
 # }}}
