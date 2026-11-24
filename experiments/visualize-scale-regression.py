@@ -182,14 +182,14 @@ def main(
             )
             return 1
 
-        x_all, _, groups_all = flatten_feature_datasets(ds)
-        subjects = make_subject_index(groups_all)
+        x_all, _, subject_ids = flatten_feature_datasets(ds)
+        subject_index = make_subject_index(subject_ids)
         name = ds.label
 
         res_fro = run_ridge_cv(
             x_all,
             y_fro,
-            subjects,
+            subject_index,
             is_structural,
             name=name,
             target_name="||A||_F",
@@ -200,7 +200,7 @@ def main(
         res_rho = run_ridge_cv(
             x_all,
             y_rho,
-            subjects,
+            subject_index,
             is_structural,
             name=name,
             target_name="rho(A)",

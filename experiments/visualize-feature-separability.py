@@ -79,15 +79,15 @@ class LdaResults(NamedTuple):
     """Balanced accuracy on held-out test scans."""
 
 
-def _split_groups(
-    groups: Array1D[np.integer[Any]],
+def _split_subjects(
+    subject_ids: Array1D[np.integer[Any]],
     *,
     random_state: int = 42,
 ) -> tuple[Array1D[np.integer[Any]], Array1D[np.integer[Any]]]:
     from sklearn.model_selection import GroupShuffleSplit
 
     split = GroupShuffleSplit(n_splits=1, test_size=0.3, random_state=random_state)
-    train_idx, test_idx = next(split.split(groups, groups=groups))
+    train_idx, test_idx = next(split.split(subject_ids, groups=subject_ids))
 
     return train_idx, test_idx
 
@@ -95,7 +95,7 @@ def _split_groups(
 def compute_pca_lda(
     x: Array2D[np.floating[Any]],
     labels: Array1D[np.integer[Any]],
-    groups: Array1D[np.integer[Any]],
+    subject_ids: Array1D[np.integer[Any]],
     *,
     pca_max_components: int = 50,
     zscore: bool = True,
@@ -109,7 +109,7 @@ def compute_pca_lda(
     from sklearn.preprocessing import StandardScaler
 
     nfeatures = x.shape[1]
-    train_idx, test_idx = _split_groups(groups, random_state=random_state)
+    train_idx, test_idx = _split_subjects(subject_ids, random_state=random_state)
 
     x_train = x[train_idx]
     y_train = labels[train_idx]
@@ -152,7 +152,7 @@ def compute_pca_lda(
 def compute_gsvd_lda(
     x: Array2D[np.floating[Any]],
     labels: Array1D[np.integer[Any]],
-    groups: Array1D[np.integer[Any]],
+    subject_ids: Array1D[np.integer[Any]],
     *,
     zscore: bool = True,
     random_state: int = 42,
@@ -161,7 +161,7 @@ def compute_gsvd_lda(
     from sklearn.metrics import balanced_accuracy_score
     from sklearn.preprocessing import StandardScaler
 
-    train_idx, test_idx = _split_groups(groups, random_state=random_state)
+    train_idx, test_idx = _split_subjects(subject_ids, random_state=random_state)
 
     x_train = x[train_idx]
     y_train = labels[train_idx]
@@ -211,7 +211,7 @@ class DecodingResults(NamedTuple):
 def compute_cross_validated_decoding(
     x: Array2D[np.floating[Any]],
     labels: Array1D[np.integer[Any]],
-    groups: Array1D[np.integer[Any]],
+    subject_ids: Array1D[np.integer[Any]],
     *,
     cv_folds: int = 5,
     zscore: bool = True,
@@ -232,7 +232,7 @@ def compute_cross_validated_decoding(
     cv = StratifiedGroupKFold(
         n_splits=cv_folds, shuffle=True, random_state=random_state
     )
-    preds = cross_val_predict(clf, x, labels, cv=cv, groups=groups)
+    preds = cross_val_predict(clf, x, labels, cv=cv, groups=subject_ids)
 
     cm = confusion_matrix(labels, preds, normalize="true")
     per_class = np.diag(cm)
@@ -261,20 +261,22 @@ class VarianceDecomposition(NamedTuple):
 def compute_task_subject_variance(
     x: Array2D[np.floating[Any]],
     labels: Array1D[np.integer[Any]],
-    groups: Array1D[np.integer[Any]],
+    subject_ids: Array1D[np.integer[Any]],
 ) -> VarianceDecomposition | None:
     """Decompose feature variance into class vs. subject components."""
     classes, class_counts = np.unique(labels, return_counts=True)
-    unique_groups, subject_counts = np.unique(groups, return_counts=True)
+    unique_subjects, subject_counts = np.unique(subject_ids, return_counts=True)
     nclasses = classes.size
-    nsubjects = unique_groups.size
+    nsubjects = unique_subjects.size
     if nsubjects < 2 or nclasses < 2:
         return None
 
     nfeatures = x.shape[1]
     grand_mean = np.mean(x, axis=0)
     class_means = np.stack([np.mean(x[labels == c], axis=0) for c in classes])
-    subject_means = np.stack([np.mean(x[groups == g], axis=0) for g in unique_groups])
+    subject_means = np.stack([
+        np.mean(x[subject_ids == s], axis=0) for s in unique_subjects
+    ])
 
     ss_task = np.sum(class_counts[:, None] * (class_means - grand_mean) ** 2, axis=0)
     ss_subject = np.sum(
@@ -665,7 +667,7 @@ def main(
 
         try:
             ds = load_feature_datasets(filename, binary=binary)
-            x, labels, groups = flatten_feature_datasets(ds)
+            x, labels, subject_ids = flatten_feature_datasets(ds)
         except Exception as exc:
             log.error("Failed to load features from '%s': %s", filename, exc)
             ret = 1
@@ -695,7 +697,7 @@ def main(
         if binary:
             log.info("Skipping task vs subject variance for the unbalanced design.")
         else:
-            var_decomp = compute_task_subject_variance(x, labels, groups)
+            var_decomp = compute_task_subject_variance(x, labels, subject_ids)
 
         # 1. RDM
         log.info("Computing Representational Dissimilarity Matrix...")
@@ -704,7 +706,7 @@ def main(
 
         # 2. Held-out PCA+LDA
         log.info("Computing held-out PCA+LDA projection...")
-        lda = compute_pca_lda(x, labels, groups, zscore=zscore)
+        lda = compute_pca_lda(x, labels, subject_ids, zscore=zscore)
         log.info("Held-out PCA+LDA balanced accuracy: %.2f%%", lda.test_accuracy * 100)
         plot_lda(
             basename,
@@ -717,7 +719,7 @@ def main(
 
         # 2b. Held-out G-SVD LDA
         log.info("Computing held-out G-SVD LDA projection...")
-        gsvd_lda = compute_gsvd_lda(x, labels, groups, zscore=zscore)
+        gsvd_lda = compute_gsvd_lda(x, labels, subject_ids, zscore=zscore)
         log.info(
             "Held-out G-SVD LDA balanced accuracy: %.2f%%",
             gsvd_lda.test_accuracy * 100,
@@ -742,7 +744,7 @@ def main(
         decoding = compute_cross_validated_decoding(
             x,
             labels,
-            groups,
+            subject_ids,
             cv_folds=cv_folds,
             zscore=zscore,
         )

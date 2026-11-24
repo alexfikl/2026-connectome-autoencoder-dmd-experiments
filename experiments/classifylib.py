@@ -34,18 +34,20 @@ TASK_LABELS = {
 
 
 class FeatureDataset(NamedTuple):
-    x: tuple[Array2D[np.floating[Any]], ...]
-    """One feature matrix of shape ``(nsamples, nfeatures)`` per class."""
-    groups: tuple[Array1D[np.integer[Any]], ...]
-    """Group index (e.g. subject) for each row of :attr:`x`."""
-    class_names: tuple[str, ...]
-    """Class name for each entry of :attr:`x`."""
     label: str
     """Label of the feature family, e.g. ``DMDc``."""
+
+    x: tuple[Array2D[np.floating[Any]], ...]
+    """One feature matrix of shape ``(nsamples, nfeatures)`` per class."""
+    class_names: tuple[str, ...]
+    """Class name for each entry of :attr:`x`."""
+
     starts: Array1D[np.integer[Any]]
     """Feature group boundaries of length ``ngroups + 1``."""
     descrs: tuple[str, ...]
-    """Description of each feature group."""
+    """Description of each feature group of length ``ngroups``."""
+    subject_ids: tuple[Array1D[np.integer[Any]], ...]
+    """Subject id for each row of :attr:`x`."""
 
     def to_tensor(self) -> Array3D[np.floating[Any]]:
         """Stack matched-subject features to ``(ntasks, nsubjects, nfeatures)``."""
@@ -74,16 +76,16 @@ def flatten_feature_datasets(
     Array1D[np.integer[Any]],
     Array1D[np.integer[Any]],
 ]:
-    """Concatenate the per-class arrays into ``(x, labels, groups)``."""
+    """Concatenate the per-class arrays into ``(x, labels, subject_ids)``."""
     arrays = [np.asarray(xi) for xi in ds.x]
     x = np.concatenate(arrays, axis=0)
     labels = np.repeat(
         np.arange(len(arrays), dtype=np.int64),
         [array.shape[0] for array in arrays],
     )
-    groups = np.concatenate([np.asarray(g) for g in ds.groups], axis=0)
+    subject_ids = np.concatenate([np.asarray(s) for s in ds.subject_ids], axis=0)
 
-    return x, labels, groups
+    return x, labels, subject_ids
 
 
 def load_feature_datasets(
@@ -156,25 +158,25 @@ def load_feature_datasets(
         scan_types = scan_types[()]
     scan_types = tuple(str(scan_types[name]) for name in classes)
 
-    group_types = sorted(set(scan_types))
-    if group_types != ["fmri", "mri"]:
-        raise ValueError(f"invalid groups: {group_types}")
+    unique_scan_types = sorted(set(scan_types))
+    if unique_scan_types != ["fmri", "mri"]:
+        raise ValueError(f"invalid scan types: {unique_scan_types}")
 
     if binary:
         selections = [
-            [i for i, name in enumerate(scan_types) if name == group]
-            for group in group_types
+            [i for i, name in enumerate(scan_types) if name == scan_type]
+            for scan_type in unique_scan_types
         ]
-        class_names = [SCAN_TYPE_LABELS[group] for group in group_types]
+        class_names = [SCAN_TYPE_LABELS[scan_type] for scan_type in unique_scan_types]
     else:
         selections = [[i] for i, name in enumerate(scan_types) if name == "fmri"]
         class_names = [_clean_class_name(classes[indices[0]]) for indices in selections]
 
     xs: list[Array2D[np.floating[Any]]] = []
-    groups: list[Array1D[np.integer[Any]]] = []
+    subject_ids: list[Array1D[np.integer[Any]]] = []
     for indices in selections:
         xs.append(np.concatenate([arrays[i] for i in indices], axis=0))
-        groups.append(
+        subject_ids.append(
             np.concatenate([
                 np.arange(arrays[i].shape[0], dtype=np.int64) for i in indices
             ])
@@ -182,7 +184,7 @@ def load_feature_datasets(
 
     return FeatureDataset(
         x=tuple(xp.asarray(xi, device=device) for xi in xs),
-        groups=tuple(xp.asarray(group) for group in groups),
+        subject_ids=tuple(xp.asarray(s) for s in subject_ids),
         class_names=tuple(class_names),
         label=label,
         starts=xp.asarray(data["starts"], device=device),
@@ -210,7 +212,7 @@ def select_feature_group(
 
     return FeatureDataset(
         x=tuple(xi[:, start:end] for xi in ds.x),
-        groups=ds.groups,
+        subject_ids=ds.subject_ids,
         class_names=ds.class_names,
         label=f"{ds.label} ({descr})",
         starts=np.array([0, end - start], dtype=np.int64),
@@ -284,7 +286,7 @@ def fit_and_predict(
 def run_subject_grouped_cv(
     x: Array2D[np.floating[Any]],
     y: Array1D[np.integer[Any]],
-    groups: Array1D[np.integer[Any]],
+    subject_ids: Array1D[np.integer[Any]],
     *,
     nclasses: int,
     method: ClassificationMethod,
@@ -299,7 +301,7 @@ def run_subject_grouped_cv(
     from sklearn.model_selection import RepeatedKFold
     from sklearn.preprocessing import StandardScaler
 
-    unique_subjects = np.unique(groups)
+    unique_subjects = np.unique(subject_ids)
     rkf = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=seed)
 
     nsamples = x.shape[0]
@@ -309,8 +311,8 @@ def run_subject_grouped_cv(
 
     for fold_idx, (train_idx, test_idx) in enumerate(rkf.split(unique_subjects)):
         rep = fold_idx // n_splits
-        train_mask = np.isin(groups, unique_subjects[train_idx])
-        test_mask = np.isin(groups, unique_subjects[test_idx])
+        train_mask = np.isin(subject_ids, unique_subjects[train_idx])
+        test_mask = np.isin(subject_ids, unique_subjects[test_idx])
 
         x_tr_np = x[train_mask]
         y_tr_np = y[train_mask]
@@ -399,9 +401,9 @@ class SubjectIndex(NamedTuple):
     rows: list[Array1D[np.integer[Any]]]
 
 
-def make_subject_index(groups: Array1D[np.integer[Any]]) -> SubjectIndex:
+def make_subject_index(subject_ids: Array1D[np.integer[Any]]) -> SubjectIndex:
     """Map each sample to its subject and collect the rows of each subject."""
-    unique, idx = np.unique(groups, return_inverse=True)
+    unique, idx = np.unique(subject_ids, return_inverse=True)
     return SubjectIndex(
         unique=unique,
         idx=idx,
@@ -410,10 +412,10 @@ def make_subject_index(groups: Array1D[np.integer[Any]]) -> SubjectIndex:
 
 
 def make_subject_rows(
-    groups: Array1D[np.integer[Any]],
+    subject_ids: Array1D[np.integer[Any]],
 ) -> list[Array1D[np.integer[Any]]]:
-    """Return the row indices of each subject in ``groups``."""
-    return make_subject_index(groups).rows
+    """Return the row indices of each subject in ``subject_ids``."""
+    return make_subject_index(subject_ids).rows
 
 
 def _bootstrap_subject_ci(
@@ -442,7 +444,7 @@ def _bootstrap_subject_ci(
 def bootstrap_balanced_accuracy_ci(
     y_true: Array1D[np.integer[Any]],
     oof_preds: Array2D[np.integer[Any]],
-    groups: Array1D[np.integer[Any]],
+    subject_ids: Array1D[np.integer[Any]],
     *,
     n_bootstrap: int = 1000,
     seed: int = 42,
@@ -450,7 +452,7 @@ def bootstrap_balanced_accuracy_ci(
     """Compute 95% bootstrap CI over subjects for balanced accuracy."""
     from sklearn.metrics import balanced_accuracy_score
 
-    subj_rows = make_subject_rows(groups)
+    subj_rows = make_subject_rows(subject_ids)
     n_repeats = oof_preds.shape[0]
 
     def metric(sampled: Array1D[np.integer[Any]]) -> float:
@@ -499,7 +501,7 @@ class RegressionResult(NamedTuple):
 def run_ridge_cv(
     x: Array2D[np.floating[Any]],
     y: Array1D[np.floating[Any]],
-    subjects: SubjectIndex,
+    subject_index: SubjectIndex,
     is_structural: Array1D[np.bool],
     *,
     name: str,
@@ -523,10 +525,10 @@ def run_ridge_cv(
     fold_r2 = np.empty(n_splits * n_repeats, dtype=x.dtype)
 
     # go through all the folds: fit + compute the R2 scores
-    for fold_idx, (train_idx, test_idx) in enumerate(rkf.split(subjects.unique)):
+    for fold_idx, (train_idx, test_idx) in enumerate(rkf.split(subject_index.unique)):
         rep = fold_idx // n_splits
-        train_mask = np.isin(subjects.idx, train_idx)
-        test_mask = np.isin(subjects.idx, test_idx)
+        train_mask = np.isin(subject_index.idx, train_idx)
+        test_mask = np.isin(subject_index.idx, test_idx)
 
         scaler = StandardScaler()
         x_tr_s = scaler.fit_transform(x[train_mask])
@@ -546,8 +548,8 @@ def run_ridge_cv(
     boot_r2 = np.empty(n_bootstrap, dtype=x.dtype)
 
     for b in range(n_bootstrap):
-        sampled = rng.integers(0, len(subjects.rows), size=len(subjects.rows))
-        idx = np.concatenate([subjects.rows[s] for s in sampled])
+        sampled = rng.integers(0, len(subject_index.rows), size=len(subject_index.rows))
+        idx = np.concatenate([subject_index.rows[s] for s in sampled])
         boot_r2[b] = r2_score(y[idx], y_pred_mean[idx])
 
     ci_lo, ci_hi = np.percentile(boot_r2, [2.5, 97.5])

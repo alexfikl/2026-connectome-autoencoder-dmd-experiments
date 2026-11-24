@@ -106,11 +106,11 @@ def _eval_task_block(
     seed: int,
     device: torch.device | str,
 ) -> tuple[float, float, float, float]:
-    x, y, groups = flatten_feature_datasets(ds)
+    x, y, subject_ids = flatten_feature_datasets(ds)
     oof_preds, fold_bacc, _ = run_subject_grouped_cv(
         x,
         y,
-        groups,
+        subject_ids,
         nclasses=len(ds.class_names),
         method=method,
         zscore_features=True,
@@ -119,7 +119,7 @@ def _eval_task_block(
         seed=seed,
         device=device,
     )
-    ci_lo, ci_hi = bootstrap_balanced_accuracy_ci(y, oof_preds, groups, seed=seed)
+    ci_lo, ci_hi = bootstrap_balanced_accuracy_ci(y, oof_preds, subject_ids, seed=seed)
     return (
         float(np.mean(fold_bacc)),
         float(np.std(fold_bacc)),
@@ -300,9 +300,10 @@ def compute_degree_moment_r2(
         "1^T A 1": np.sum(d, axis=1),
     }
 
-    _, _, groups = flatten_feature_datasets(ds_ae)
-    subjects = make_subject_index(groups)
-    is_struct = np.zeros(groups.size, dtype=np.bool_)  # ty: ignore[missing-attribute]
+    _, _, subject_ids = flatten_feature_datasets(ds_ae)
+    subject_index = make_subject_index(subject_ids)
+    nsamples = subject_ids.size  # ty: ignore[missing-attribute]
+    is_struct = np.zeros(nsamples, dtype=np.bool_)
 
     blocks = _block_selections(ds_ae)
 
@@ -314,7 +315,7 @@ def compute_degree_moment_r2(
             res = run_ridge_cv(
                 x,
                 y,
-                subjects,
+                subject_index,
                 is_struct,
                 name=bname,
                 target_name=tname,

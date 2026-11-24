@@ -117,10 +117,10 @@ def evaluate_dataset(
     ds = load_feature_datasets(filename, binary=binary)
     if group is not None:
         ds = select_feature_group(ds, group)
-    x, y, groups = flatten_feature_datasets(ds)
+    x, y, subject_ids = flatten_feature_datasets(ds)
     class_names = ds.class_names
     nclasses = len(class_names)
-    unique_subjects = np.unique(groups)
+    unique_subjects = np.unique(subject_ids)
 
     log.info(
         "Evaluating '%s' (%s, %s, z=%s): %d samples (%d subjects), %d features.",
@@ -136,7 +136,7 @@ def evaluate_dataset(
     oof_preds, fold_bacc, fold_f1 = run_subject_grouped_cv(
         x,
         y,
-        groups,
+        subject_ids,
         nclasses=nclasses,
         method=method,
         zscore_features=zscore_features,
@@ -149,14 +149,14 @@ def evaluate_dataset(
     mean_bacc = np.mean(fold_bacc)
     std_bacc = np.std(fold_bacc)
     mean_f1 = np.mean(fold_f1)
-    ci_lo, ci_hi = bootstrap_balanced_accuracy_ci(y, oof_preds, groups, seed=seed)
+    ci_lo, ci_hi = bootstrap_balanced_accuracy_ci(y, oof_preds, subject_ids, seed=seed)
 
     p_val: float | None = None
     perm_str = ""
     if n_permutations > 0:
         rng = np.random.default_rng(seed)
         null_baccs = np.empty(n_permutations, dtype=np.float64)
-        subj_rows = make_subject_rows(groups)
+        subj_rows = make_subject_rows(subject_ids)
         for p in range(n_permutations):
             y_perm = np.copy(y)
             for rows in subj_rows:
@@ -164,7 +164,7 @@ def evaluate_dataset(
             _, p_bacc, _ = run_subject_grouped_cv(
                 x,
                 y_perm,
-                groups,
+                subject_ids,
                 nclasses=nclasses,
                 method=method,
                 zscore_features=zscore_features,
