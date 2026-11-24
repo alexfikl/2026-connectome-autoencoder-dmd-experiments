@@ -10,7 +10,8 @@ from typing import Any, Literal, get_args
 
 import numpy as np
 
-from commonlib import flatten_feature_datasets, load_feature_datasets
+import commonlib  # ruff: ignore[unused-import]
+from classifylib import flatten_feature_datasets, load_feature_datasets
 from nneuroutil.typing import Array1D, Array2D
 from nneuroutil.visualization import figure
 

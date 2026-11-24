@@ -10,7 +10,8 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from commonlib import flatten_feature_datasets, load_feature_datasets
+import commonlib  # ruff: ignore[unused-import]
+from classifylib import flatten_feature_datasets, load_feature_datasets
 from nneuroutil.classifier import (
     AnovaScores,
     classify_linear_discriminant_analysis,

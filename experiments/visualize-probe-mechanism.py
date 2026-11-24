@@ -13,19 +13,17 @@ from typing import Any, Literal, get_args
 import numpy as np
 import torch
 
+import commonlib  # ruff: ignore[unused-import]
 from classifylib import (
+    FeatureDataset,
     bootstrap_balanced_accuracy_ci,
     bootstrap_identification_ci,
+    flatten_feature_datasets,
+    load_feature_datasets,
     make_subject_index,
     run_leave_one_condition_out_cv,
     run_ridge_cv,
     run_subject_grouped_cv,
-    to_tensor,
-)
-from commonlib import (
-    FeatureDataset,
-    flatten_feature_datasets,
-    load_feature_datasets,
     select_feature_group,
 )
 from nneuroutil.helpers import FuzzyChoiceAction
@@ -137,7 +135,7 @@ def _eval_fp_block(
     seed: int,
     device: torch.device | str,
 ) -> tuple[float, float, float, float]:
-    x = to_tensor(ds)
+    x = ds.to_tensor()
     oof_preds, fold_bacc = run_leave_one_condition_out_cv(
         x,
         method=method,

@@ -6,17 +6,241 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple
 
+import array_api_compat
 import numpy as np
 import torch
 
 from nneuroutil.typing import Array1D, Array2D, Array3D
 
-if TYPE_CHECKING:
-    from commonlib import FeatureDataset
-
 log = logging.getLogger("lib.classifylib")
+
+
+# {{{ feature datasets
+
+
+class FeatureDataset(NamedTuple):
+    x: tuple[Array2D[np.floating[Any]], ...]
+    """One feature matrix of shape ``(nsamples, nfeatures)`` per class."""
+    groups: tuple[Array1D[np.integer[Any]], ...]
+    """Group index (e.g. subject) for each row of :attr:`x`."""
+    class_names: tuple[str, ...]
+    """Class name for each entry of :attr:`x`."""
+    label: str
+    """Label of the feature family, e.g. ``DMDc``."""
+    starts: Array1D[np.integer[Any]]
+    """Feature group boundaries of length ``ngroups + 1``."""
+    descrs: tuple[str, ...]
+    """Description of each feature group."""
+
+    def to_tensor(self) -> Array3D[np.floating[Any]]:
+        """Stack matched-subject features to ``(ntasks, nsubjects, nfeatures)``."""
+        shapes = {np.asarray(x).shape for x in self.x}
+        if len(shapes) != 1:
+            raise ValueError("expected all classes to have the same shape")
+
+        return np.stack([np.asarray(x) for x in self.x], axis=0)
+
+
+SCAN_TYPE_LABELS = {"fmri": "Functional", "mri": "Structural"}
+
+TASK_LABELS = {
+    "emotion": "Emotion",
+    "gambling": "Gambling",
+    "language": "Language",
+    "relational": "Relational",
+    "rest": "Rest",
+    "social": "Social",
+    "wm": "WM",
+}
+
+
+def _clean_class_name(name: str) -> str:
+    """Reduce a raw class key such as ``task-emotion-fractal`` to a label."""
+    if "_" in name:
+        name, _ = name.split("_", maxsplit=1)
+    else:
+        parts = name.split("-")
+        name = parts[0] if len(parts) == 2 else parts[1]
+
+    return upper if (upper := name.upper()) == "WM" else name.title()
+
+
+def flatten_feature_datasets(
+    ds: FeatureDataset,
+) -> tuple[
+    Array2D[np.floating[Any]],
+    Array1D[np.integer[Any]],
+    Array1D[np.integer[Any]],
+]:
+    """Concatenate the per-class arrays into ``(x, labels, groups)``."""
+    arrays = [np.asarray(xi) for xi in ds.x]
+    x = np.concatenate(arrays, axis=0)
+    labels = np.repeat(
+        np.arange(len(arrays), dtype=np.int64),
+        [array.shape[0] for array in arrays],
+    )
+    groups = np.concatenate([np.asarray(g) for g in ds.groups], axis=0)
+
+    return x, labels, groups
+
+
+def load_feature_datasets(
+    filename: pathlib.Path,
+    *,
+    binary: bool = False,
+    datakey: str = "datasets",
+    device: Any = None,
+    xp: Any = None,
+) -> FeatureDataset:
+    """Load a feature file written by ``make-features.py``.
+
+    With ``binary=False`` only the functional classes are returned, one array
+    per task. With ``binary=True`` classes are grouped by scan type and
+    concatenated, e.g. all functional scans and the structural scans.
+
+    :arg datakey: name of the variable holding the class dictionary.
+    """
+    if not filename.exists():
+        raise FileNotFoundError(f"file does not exist: '{filename}'")
+
+    try:
+        data = np.load(filename, allow_pickle=True)
+    except Exception:
+        raise RuntimeError(f"failed to load data from file: '{filename}'") from None
+
+    if datakey not in data:
+        raise ValueError(f"file does not contain '{datakey}' dataset: '{filename}'")
+
+    datasets = data[datakey]
+    if datasets.ndim == 0:
+        datasets = datasets[()]
+
+    if not isinstance(datasets, dict):
+        raise ValueError(f"expected a dictionary in '{datakey}': '{filename}'")
+
+    if len(datasets) <= 1:
+        raise ValueError(f"dataset does not have sufficient classes: {len(datasets)}")
+
+    descrs = data["descrs"]
+    if descrs.ndim == 0:
+        descrs = descrs[()]
+    descrs = tuple(str(d) for d in descrs)
+
+    if "label" not in data:
+        raise ValueError(f"file does not contain 'label' dataset: '{filename}'")
+
+    label = str(data["label"])
+
+    if xp is None:
+        xp = array_api_compat.array_namespace(np.array([0]))
+
+    classes: list[str] = []
+    arrays: list[Array2D[np.floating[Any]]] = []
+    for name, x in datasets.items():
+        if x.ndim != 2:
+            raise ValueError(f"expected a 2d array for class '{name}': {x.shape}")
+
+        if arrays and x.shape[1] != arrays[-1].shape[1]:
+            raise ValueError(f"class '{name}' has inconsistent feature size: {x.shape}")
+
+        if not np.all(np.isfinite(x)):
+            raise ValueError(f"class '{name}' contains NaN or inf values")
+
+        classes.append(name)
+        arrays.append(x)
+
+    scan_types = data["scan_types"]
+    if scan_types.ndim == 0:
+        scan_types = scan_types[()]
+    scan_types = tuple(str(scan_types[name]) for name in classes)
+
+    group_types = sorted(set(scan_types))
+    if group_types != ["fmri", "mri"]:
+        raise ValueError(f"invalid groups: {group_types}")
+
+    if binary:
+        selections = [
+            [i for i, name in enumerate(scan_types) if name == group]
+            for group in group_types
+        ]
+        class_names = [SCAN_TYPE_LABELS[group] for group in group_types]
+    else:
+        selections = [[i] for i, name in enumerate(scan_types) if name == "fmri"]
+        class_names = [_clean_class_name(classes[indices[0]]) for indices in selections]
+
+    xs: list[Array2D[np.floating[Any]]] = []
+    groups: list[Array1D[np.integer[Any]]] = []
+    for indices in selections:
+        xs.append(np.concatenate([arrays[i] for i in indices], axis=0))
+        groups.append(
+            np.concatenate([
+                np.arange(arrays[i].shape[0], dtype=np.int64) for i in indices
+            ])
+        )
+
+    return FeatureDataset(
+        x=tuple(xp.asarray(xi, device=device) for xi in xs),
+        groups=tuple(xp.asarray(group) for group in groups),
+        class_names=tuple(class_names),
+        label=label,
+        starts=xp.asarray(data["starts"], device=device),
+        descrs=tuple(descrs),
+    )
+
+
+def select_feature_group(
+    ds: FeatureDataset,
+    group: int | str,
+) -> FeatureDataset:
+    """Return a view of *ds* restricted to a single feature group.
+
+    :arg group: 0-based group index (or integer string) or a case-insensitive
+        substring matching one entry of ``ds.descrs``.
+    """
+    if isinstance(group, str):
+        try:
+            idx = int(group)
+        except ValueError:
+            matches = [
+                i for i, descr in enumerate(ds.descrs) if group.lower() in descr.lower()
+            ]
+            if not matches:
+                raise ValueError(
+                    f"no feature group matching {group!r} in {ds.descrs}"
+                ) from None
+            if len(matches) > 1:
+                raise ValueError(
+                    f"ambiguous feature group {group!r}: matches "
+                    f"{[ds.descrs[i] for i in matches]}"
+                ) from None
+            idx = matches[0]
+    else:
+        idx = group
+
+    ngroups = len(ds.descrs)
+    if idx < 0:
+        idx += ngroups
+    if not (0 <= idx < ngroups):
+        raise ValueError(f"feature group index {group!r} out of range [0, {ngroups})")
+
+    start = int(ds.starts[idx])
+    end = int(ds.starts[idx + 1])
+    descr = ds.descrs[idx]
+
+    return FeatureDataset(
+        x=tuple(xi[:, start:end] for xi in ds.x),
+        groups=ds.groups,
+        class_names=ds.class_names,
+        label=f"{ds.label} ({descr})",
+        starts=np.array([0, end - start], dtype=np.int64),
+        descrs=(descr,),
+    )
+
+
+# }}}
+
 
 ClassificationMethod = Literal["lda", "svm", "mlp"]
 
@@ -76,15 +300,6 @@ def fit_and_predict(
         return clf.predict(x_test)
 
     raise ValueError(f"unknown method: {method!r}")
-
-
-def to_tensor(ds: FeatureDataset) -> Array3D[np.floating[Any]]:
-    """Stack matched-subject features to ``(ntasks, nsubjects, nfeatures)``."""
-    shapes = {np.asarray(x).shape for x in ds.x}
-    if len(shapes) != 1:
-        raise ValueError("expected all classes to have the same shape")
-
-    return np.stack([np.asarray(x) for x in ds.x], axis=0)
 
 
 def run_subject_grouped_cv(

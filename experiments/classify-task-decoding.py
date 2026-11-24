@@ -11,18 +11,17 @@ from typing import Any, get_args
 import numpy as np
 import torch
 
+import commonlib  # ruff: ignore[unused-import]
 from classifylib import (
     ClassificationMethod,
     ClassificationResult,
     bootstrap_balanced_accuracy_ci,
+    flatten_feature_datasets,
     format_latex_table,
+    load_feature_datasets,
     make_subject_rows,
     run_subject_grouped_cv,
     save_summary,
-)
-from commonlib import (
-    flatten_feature_datasets,
-    load_feature_datasets,
     select_feature_group,
 )
 from nneuroutil.helpers import FuzzyChoiceAction

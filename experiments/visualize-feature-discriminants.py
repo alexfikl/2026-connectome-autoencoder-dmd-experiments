@@ -10,7 +10,8 @@ from typing import Any, Literal, NamedTuple
 
 import numpy as np
 
-from commonlib import FeatureDataset, flatten_feature_datasets, load_feature_datasets
+import commonlib  # ruff: ignore[unused-import]
+from classifylib import FeatureDataset, flatten_feature_datasets, load_feature_datasets
 from nneuroutil.typing import Array1D, Array2D
 from nneuroutil.visualization import figure, make_colorbar_axes
 

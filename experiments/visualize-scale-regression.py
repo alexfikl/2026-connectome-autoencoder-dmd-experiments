@@ -9,8 +9,14 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from classifylib import RegressionResult, make_subject_index, run_ridge_cv
-from commonlib import flatten_feature_datasets, load_feature_datasets
+import commonlib  # ruff: ignore[unused-import]
+from classifylib import (
+    RegressionResult,
+    flatten_feature_datasets,
+    load_feature_datasets,
+    make_subject_index,
+    run_ridge_cv,
+)
 from nneuroutil.visualization import figure
 
 log = logging.getLogger("lib.visualize_scale_regression")

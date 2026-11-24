@@ -11,16 +11,17 @@ from typing import get_args
 import numpy as np
 import torch
 
+import commonlib  # ruff: ignore[unused-import]
 from classifylib import (
     ClassificationMethod,
     ClassificationResult,
     bootstrap_identification_ci,
     format_latex_table,
+    load_feature_datasets,
     run_leave_one_condition_out_cv,
     save_summary,
-    to_tensor,
+    select_feature_group,
 )
-from commonlib import load_feature_datasets, select_feature_group
 
 log = logging.getLogger("lib.classify_subject_fingerprinting")
 
@@ -58,7 +59,7 @@ def evaluate_dataset(
     ds = load_feature_datasets(filename)
     if group is not None:
         ds = select_feature_group(ds, group)
-    x = to_tensor(ds)
+    x = ds.to_tensor()
     ntasks, nsubjects, nfeatures = x.shape
 
     log.info(
