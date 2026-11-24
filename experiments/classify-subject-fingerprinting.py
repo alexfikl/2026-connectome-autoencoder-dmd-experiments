@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections.abc import Sequence
-from typing import get_args
+from typing import Any, get_args
 
 import numpy as np
 import torch
@@ -22,6 +22,7 @@ from classifylib import (
     save_summary,
     select_feature_group,
 )
+from nneuroutil.typing import Array1D
 
 log = logging.getLogger("lib.classify_subject_fingerprinting")
 
@@ -52,7 +53,7 @@ def evaluate_dataset(
     group: int | None = None,
 ) -> tuple[
     ClassificationResult,
-    list[float],
+    Array1D[np.floating[Any]],
     tuple[str, ...],
 ]:
     ds = load_feature_datasets(filename)
@@ -109,7 +110,7 @@ def evaluate_dataset(
 
 def plot_task_accuracy(
     basename: pathlib.Path,
-    fold_bacc: Sequence[float],
+    fold_bacc: Array1D[np.floating[Any]],
     class_names: tuple[str, ...],
     *,
     method: str,

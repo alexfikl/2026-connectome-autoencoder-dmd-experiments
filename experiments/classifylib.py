@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections.abc import Callable, Sequence
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple, cast
 
 import numpy as np
 import torch
@@ -14,9 +14,6 @@ import torch
 from nneuroutil.typing import Array1D, Array2D, Array3D
 
 log = logging.getLogger("lib.classifylib")
-
-
-# {{{ feature datasets
 
 
 SCAN_TYPE_LABELS = {"fmri": "Functional", "mri": "Structural"}
@@ -30,6 +27,11 @@ TASK_LABELS = {
     "social": "Social",
     "wm": "WM",
 }
+
+ClassificationMethod = Literal["lda", "svm", "mlp"]
+
+
+# {{{ load_feature_datasets
 
 
 class FeatureDataset(NamedTuple):
@@ -167,6 +169,12 @@ def load_feature_datasets(
     )
 
 
+# }}}
+
+
+# {{{ flatten_feature_datasets
+
+
 def flatten_feature_datasets(
     ds: FeatureDataset,
 ) -> tuple[
@@ -183,6 +191,12 @@ def flatten_feature_datasets(
     subject_ids = np.concatenate(ds.subject_ids, axis=0)
 
     return x, labels, subject_ids
+
+
+# }}}
+
+
+# {{{ select_feature_group
 
 
 def select_feature_group(
@@ -216,7 +230,7 @@ def select_feature_group(
 # }}}
 
 
-ClassificationMethod = Literal["lda", "svm", "mlp"]
+# {{{ fit_and_predict
 
 
 class ClassificationResult(NamedTuple):
@@ -247,42 +261,62 @@ class ClassificationResult(NamedTuple):
 
 
 def fit_and_predict(
-    x_train_list: list[torch.Tensor],
-    y_train_list: list[int],
-    x_test: torch.Tensor,
+    x_train: list[Array2D[np.floating[Any]]],
+    y_train: list[int],
+    x_test: Array2D[np.floating[Any]],
     method: ClassificationMethod,
     *,
-    seed: int,
-) -> torch.Tensor:
-    """Fit classifier on training tensors and return predicted labels."""
+    seed: int | None = None,
+    device: torch.device | str | None = None,
+) -> Array1D[np.integer[Any]]:
+    """Fit classifier on arrays and return predicted labels."""
+    x_train = [torch.from_numpy(xi).to(device) for xi in x_train]
+    x_test = torch.from_numpy(x_test).to(device)
+
+    if seed is not None:
+        torch.manual_seed(seed)
+
     if method == "lda":
         from nneuroutil.classifier import classify_linear_discriminant_analysis
 
-        clf = classify_linear_discriminant_analysis(x_train_list, y_train_list)
-        return clf.predict(x_test, metric="l2")  # ty: ignore[invalid-explicit-return]
-
-    if method == "svm":
+        clf = classify_linear_discriminant_analysis(x_train, y_train)
+        result = clf.predict(x_test, metric="l2")
+    elif method == "svm":
         from nneuroutil.classifier import classify_support_vector_machine
 
-        clf = classify_support_vector_machine(x_train_list, y_train_list)
-        return clf.predict(x_test)  # ty: ignore[invalid-explicit-return]
-
-    if method == "mlp":
+        clf = classify_support_vector_machine(x_train, y_train)
+        result = clf.predict(x_test)
+    elif method == "mlp":
         from torchlib import classify_multilayer_perceptron
 
         # NOTE: the features are stored as float64, but the MLP is significantly
         # faster in single precision and the resulting accuracy is unchanged
-        torch.manual_seed(seed)
         clf = classify_multilayer_perceptron(
-            [xi.float() for xi in x_train_list],
-            y_train_list,
+            [xi.float() for xi in x_train],  # ty: ignore[missing-attribute]
+            y_train,
             alpha=1.0,
             learning_rate_init=1.0e-2,
             max_iter=400,
         )
-        return clf.predict(x_test)
+        result = clf.predict(x_test)
+    else:
+        raise ValueError(f"unknown method: {method!r}")
 
-    raise ValueError(f"unknown method: {method!r}")
+    result = result.detach().cpu().numpy()  # ty: ignore[missing-union-attribute]
+    return cast(Array1D[np.integer[Any]], result)
+
+
+# }}}
+
+
+# {{{ run_subject_grouped_cv
+
+
+class GroupedCVResult(NamedTuple):
+    oof_preds: Array2D[np.integer[Any]]
+    """Out-of-fold predictions of shape ``(n_repeats, nsamples)``."""
+    fold_bacc: Array1D[np.floating[Any]]
+    """Balanced accuracy of each fold, of length ``n_splits * n_repeats``."""
 
 
 def run_subject_grouped_cv(
@@ -295,9 +329,9 @@ def run_subject_grouped_cv(
     zscore_features: bool,
     n_splits: int,
     n_repeats: int,
-    seed: int,
-    device: torch.device | str,
-) -> tuple[Array2D[np.integer[Any]], list[float]]:
+    seed: int | None = None,
+    device: torch.device | str | None = None,
+) -> GroupedCVResult:
     """Run repeated subject-grouped K-fold CV on ``(nsamples, nfeatures)``."""
     from sklearn.metrics import balanced_accuracy_score
     from sklearn.model_selection import RepeatedKFold
@@ -307,43 +341,44 @@ def run_subject_grouped_cv(
     rkf = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=seed)
 
     nsamples = x.shape[0]
+    nfolds = n_splits * n_repeats
     oof_preds = np.empty((n_repeats, nsamples), dtype=np.int64)
-    fold_bacc: list[float] = []
+    fold_bacc = np.empty(nfolds, dtype=np.float64)
 
     for fold_idx, (train_idx, test_idx) in enumerate(rkf.split(unique_subjects)):
         rep = fold_idx // n_splits
         train_mask = np.isin(subject_ids, unique_subjects[train_idx])
         test_mask = np.isin(subject_ids, unique_subjects[test_idx])
 
-        x_tr_np = x[train_mask]
-        y_tr_np = y[train_mask]
-        x_te_np = x[test_mask]
-        y_te_np = y[test_mask]
+        x_train = x[train_mask]
+        y_train = y[train_mask]
+        x_test = x[test_mask]
+        y_test = y[test_mask]
 
         if zscore_features:
             scaler = StandardScaler()
-            x_tr_np = scaler.fit_transform(x_tr_np)
-            x_te_np = scaler.transform(x_te_np)
+            x_train = scaler.fit_transform(x_train)
+            x_test = scaler.transform(x_test)
 
-        x_train_list = [
-            torch.from_numpy(x_tr_np[y_tr_np == c]).to(device) for c in range(nclasses)
-        ]
-        y_train_list = list(range(nclasses))
-        x_test_t = torch.from_numpy(x_te_np).to(device)
-
-        y_pred_t = fit_and_predict(
-            x_train_list,
-            y_train_list,
-            x_test_t,
+        y_pred = fit_and_predict(
+            [x_train[y_train == c] for c in range(nclasses)],
+            list(range(nclasses)),
+            x_test,
             method,
-            seed=seed + fold_idx,
+            seed=(seed + fold_idx) if seed is not None else seed,
+            device=device,
         )
-        y_pred = y_pred_t.detach().cpu().numpy()
 
         oof_preds[rep, test_mask] = y_pred
-        fold_bacc.append(balanced_accuracy_score(y_te_np, y_pred))
+        fold_bacc[fold_idx] = balanced_accuracy_score(y_test, y_pred)
 
-    return oof_preds, fold_bacc
+    return GroupedCVResult(oof_preds=oof_preds, fold_bacc=fold_bacc)
+
+
+# }}}
+
+
+# {{{ run_leave_one_condition_out_cv
 
 
 def run_leave_one_condition_out_cv(
@@ -353,7 +388,7 @@ def run_leave_one_condition_out_cv(
     zscore_features: bool,
     seed: int,
     device: torch.device | str,
-) -> tuple[Array2D[np.integer[Any]], list[float]]:
+) -> GroupedCVResult:
     """Run leave-one-condition-out CV on ``(ntasks, nsubjects, nfeatures)``."""
     from sklearn.metrics import balanced_accuracy_score
     from sklearn.preprocessing import StandardScaler
@@ -363,7 +398,7 @@ def run_leave_one_condition_out_cv(
     y_test = np.arange(nsubjects, dtype=np.int64)
 
     oof_preds = np.empty((ntasks, nsubjects), dtype=np.int64)
-    fold_bacc: list[float] = []
+    fold_bacc = np.empty(ntasks, dtype=np.float64)
 
     for t in range(ntasks):
         x_tr_np = np.delete(x, t, axis=0)
@@ -375,24 +410,27 @@ def run_leave_one_condition_out_cv(
             x_te_np = scaler.transform(x_te_np)
             x_tr_np = np.reshape(tr_flat, (ntasks - 1, nsubjects, nfeatures))
 
-        x_train_list = [
-            torch.from_numpy(x_tr_np[:, s, :]).to(device) for s in range(nsubjects)
-        ]
-        x_test_t = torch.from_numpy(x_te_np).to(device)
+        x_train_list = [x_tr_np[:, s, :] for s in range(nsubjects)]
 
-        y_pred_t = fit_and_predict(
+        y_pred = fit_and_predict(
             x_train_list,
             y_train_list,
-            x_test_t,
+            x_te_np,
             method,
             seed=seed + t,
+            device=device,
         )
-        y_pred = y_pred_t.detach().cpu().numpy()
 
         oof_preds[t] = y_pred
-        fold_bacc.append(balanced_accuracy_score(y_test, y_pred))
+        fold_bacc[t] = balanced_accuracy_score(y_test, y_pred)
 
-    return oof_preds, fold_bacc
+    return GroupedCVResult(oof_preds=oof_preds, fold_bacc=fold_bacc)
+
+
+# }}}
+
+
+# {{{ make_subject_index
 
 
 class SubjectIndex(NamedTuple):
@@ -416,6 +454,12 @@ def make_subject_rows(
 ) -> list[Array1D[np.integer[Any]]]:
     """Return the row indices of each subject in ``subject_ids``."""
     return make_subject_index(subject_ids).rows
+
+
+# }}}
+
+
+# {{{ bootstrap_subject_ci
 
 
 def _bootstrap_subject_ci(
@@ -480,6 +524,9 @@ def bootstrap_identification_ci(
         return np.mean(np.take(correct, sampled, axis=1))
 
     return _bootstrap_subject_ci(metric, nsubjects, n_bootstrap=n_bootstrap, seed=seed)
+
+
+# }}}
 
 
 # {{{ regression
