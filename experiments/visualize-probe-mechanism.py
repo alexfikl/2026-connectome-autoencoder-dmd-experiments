@@ -400,15 +400,34 @@ def log_summary(
         *_med_iqr(corrs.r_orth_max),
     )
 
-    by_block: dict[str, list[DegreeMomentR2]] = {}
+    size_by_block = {b.name: b.nfeatures for b in blocks}
+    targets = ["||A1||_2", "std(A1)", "1^T A 1"]
+    by_block: dict[str, dict[str, DegreeMomentR2]] = {}
     for entry in r2:
-        by_block.setdefault(entry.block, []).append(entry)
+        by_block.setdefault(entry.block, {})[entry.target] = entry
+
+    r2_lines = [
+        r"\begin{tabular}{@{}lrrrr@{}}",
+        r"\toprule",
+        (
+            r"\textbf{AE-DMD block} & \textbf{Size}"
+            r" & \textbf{$\norm{\matr{A}\vect{1}}_2$}"
+            r" & \textbf{$\mathrm{std}(\matr{A}\vect{1})$}"
+            r" & \textbf{$\vect{1}^\top \matr{A} \vect{1}$} \\"
+        ),
+        r"\midrule",
+    ]
     for bname, entries in by_block.items():
-        row = ", ".join(
-            f"{e.target}={e.r2_mean:.3f} [{e.r2_ci_lo:.3f}, {e.r2_ci_hi:.3f}]"
-            for e in entries
+        vals = " & ".join(f"${entries[t].r2_mean:.3f}$" for t in targets)
+        cis = " & ".join(
+            f"$[{entries[t].r2_ci_lo:.3f}, {entries[t].r2_ci_hi:.3f}]$" for t in targets
         )
-        log.info("Degree-moment Ridge R^2 (%s): %s", bname, row)
+        r2_lines.append(f"{bname} & {size_by_block[bname]} & {vals} \\\\")
+        r2_lines.append(f" & & {cis} \\\\")
+        if bname != list(by_block)[-1]:
+            r2_lines.append(r"\addlinespace[2pt]")
+    r2_lines.extend([r"\bottomrule", r"\end{tabular}"])
+    log.info("Degree-moment Ridge R^2 table:\n%s", "\n".join(r2_lines))
 
 
 def plot_mechanism(

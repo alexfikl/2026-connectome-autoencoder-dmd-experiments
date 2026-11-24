@@ -270,7 +270,7 @@ figure8:
 [doc("Generate plots for Figure 9")]
 figure9:
     {{ PYTHON }} experiments/visualize-probe-mechanism.py \
-        --device cuda --force \
+        --device cuda --force --method mlp \
         --cache data/stage3-probe-mechanism.npz \
         data/dataset-features-ae-dmd.npz \
         data/dataset-features-matrix.npz
