@@ -107,7 +107,7 @@ def _eval_task_block(
     device: torch.device | str,
 ) -> tuple[float, float, float, float]:
     x, y, subject_ids = flatten_feature_datasets(ds)
-    oof_preds, fold_bacc, _ = run_subject_grouped_cv(
+    oof_preds, fold_bacc = run_subject_grouped_cv(
         x,
         y,
         subject_ids,

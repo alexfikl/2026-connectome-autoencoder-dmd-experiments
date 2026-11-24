@@ -133,7 +133,7 @@ def evaluate_dataset(
         x.shape[1],
     )
 
-    oof_preds, fold_bacc, fold_f1 = run_subject_grouped_cv(
+    oof_preds, fold_bacc = run_subject_grouped_cv(
         x,
         y,
         subject_ids,
@@ -148,7 +148,6 @@ def evaluate_dataset(
 
     mean_bacc = np.mean(fold_bacc)
     std_bacc = np.std(fold_bacc)
-    mean_f1 = np.mean(fold_f1)
     ci_lo, ci_hi = bootstrap_balanced_accuracy_ci(y, oof_preds, subject_ids, seed=seed)
 
     p_val: float | None = None
@@ -161,7 +160,7 @@ def evaluate_dataset(
             y_perm = np.copy(y)
             for rows in subj_rows:
                 y_perm[rows] = rng.permutation(y_perm[rows])
-            _, p_bacc, _ = run_subject_grouped_cv(
+            _, p_bacc = run_subject_grouped_cv(
                 x,
                 y_perm,
                 subject_ids,
@@ -178,12 +177,11 @@ def evaluate_dataset(
         perm_str = f" | perm p={p_val:.4g} (null={np.mean(null_baccs):.4f})"
 
     log.info(
-        "Bal. Acc.: %.4f +/- %.4f (95%% CI [%.4f, %.4f]) | Macro-F1: %.4f%s",
+        "Bal. Acc.: %.4f +/- %.4f (95%% CI [%.4f, %.4f])%s",
         mean_bacc,
         std_bacc,
         ci_lo,
         ci_hi,
-        mean_f1,
         perm_str,
     )
 
@@ -196,7 +194,6 @@ def evaluate_dataset(
         std_bacc=std_bacc,
         ci_lo=ci_lo,
         ci_hi=ci_hi,
-        mean_f1=mean_f1,
         p_val=p_val,
     )
 

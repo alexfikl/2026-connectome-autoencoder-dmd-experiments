@@ -204,12 +204,12 @@ def select_feature_group(
     descr = ds.descrs[index]
 
     return FeatureDataset(
-        x=tuple(xi[:, start:end] for xi in ds.x),
-        subject_ids=ds.subject_ids,
-        class_names=ds.class_names,
         label=f"{ds.label} ({descr})",
-        starts=np.array([0, end - start], dtype=np.int64),
+        x=tuple(xi[:, start:end] for xi in ds.x),
+        class_names=ds.class_names,
+        starts=np.array([0, end - start], dtype=ds.starts.dtype),
         descrs=(descr,),
+        subject_ids=ds.subject_ids,
     )
 
 
@@ -220,17 +220,29 @@ ClassificationMethod = Literal["lda", "svm", "mlp"]
 
 
 class ClassificationResult(NamedTuple):
+    """Outcome of one repeated cross-validated classification run."""
+
     label: str
+    """Feature family label, e.g. ``DMDc``."""
     nfeatures: int
-    # NOTE: number of classes (or subjects, for fingerprinting)
+    """Number of features seen by the classifier."""
     nclasses: int
+    """Number of classes (i.e. tasks or subjects)."""
     method: ClassificationMethod
+    """Classifier that produced the predictions."""
+
     mean_bacc: float
+    """Mean balanced accuracy over the CV folds."""
     std_bacc: float
+    """Standard deviation of balanced accuracy over the CV folds."""
+
     ci_lo: float
+    """Lower bound of the bootstrap confidence interval for balanced accuracy."""
     ci_hi: float
+    """Upper bound of the bootstrap confidence interval for balanced accuracy."""
+
     p_val: float | None = None
-    mean_f1: float | None = None
+    """Permutation test p-value, or ``None`` when not computed."""
 
     @property
     def chance(self) -> float:
@@ -288,9 +300,9 @@ def run_subject_grouped_cv(
     n_repeats: int,
     seed: int,
     device: torch.device | str,
-) -> tuple[Array2D[np.integer[Any]], list[float], list[float]]:
+) -> tuple[Array2D[np.integer[Any]], list[float]]:
     """Run repeated subject-grouped K-fold CV on ``(nsamples, nfeatures)``."""
-    from sklearn.metrics import balanced_accuracy_score, f1_score
+    from sklearn.metrics import balanced_accuracy_score
     from sklearn.model_selection import RepeatedKFold
     from sklearn.preprocessing import StandardScaler
 
@@ -300,7 +312,6 @@ def run_subject_grouped_cv(
     nsamples = x.shape[0]
     oof_preds = np.empty((n_repeats, nsamples), dtype=np.int64)
     fold_bacc: list[float] = []
-    fold_f1: list[float] = []
 
     for fold_idx, (train_idx, test_idx) in enumerate(rkf.split(unique_subjects)):
         rep = fold_idx // n_splits
@@ -334,9 +345,8 @@ def run_subject_grouped_cv(
 
         oof_preds[rep, test_mask] = y_pred
         fold_bacc.append(balanced_accuracy_score(y_te_np, y_pred))
-        fold_f1.append(f1_score(y_te_np, y_pred, average="macro"))
 
-    return oof_preds, fold_bacc, fold_f1
+    return oof_preds, fold_bacc
 
 
 def run_leave_one_condition_out_cv(
