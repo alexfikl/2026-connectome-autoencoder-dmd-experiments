@@ -43,13 +43,16 @@ Examples:
 """
 
 
+# {{{ evaluate_dataset
+
+
 def evaluate_dataset(
     filename: pathlib.Path,
     *,
-    method: ClassificationMethod,
-    zscore_features: bool,
-    seed: int,
-    device: torch.device | str,
+    method: ClassificationMethod = "mlp",
+    zscore_features: bool = True,
+    seed: int = 42,
+    device: torch.device | str | None = None,
     group: int | None = None,
 ) -> tuple[
     ClassificationResult,
@@ -59,6 +62,7 @@ def evaluate_dataset(
     ds = load_feature_datasets(filename)
     if group is not None:
         ds = select_feature_group(ds, group)
+
     x = ds.to_tensor()
     ntasks, nsubjects, nfeatures = x.shape
 
@@ -80,8 +84,8 @@ def evaluate_dataset(
         device=device,
     )
 
-    mean_bacc = float(np.mean(fold_bacc))
-    std_bacc = float(np.std(fold_bacc))
+    mean_bacc = np.mean(fold_bacc)
+    std_bacc = np.std(fold_bacc)
     ci_lo, ci_hi = bootstrap_identification_ci(oof_preds, seed=seed)
 
     log.info(
@@ -102,7 +106,11 @@ def evaluate_dataset(
         ci_lo=ci_lo,
         ci_hi=ci_hi,
     )
+
     return result, fold_bacc, ds.class_names
+
+
+# }}}
 
 
 # {{{ plots
@@ -113,8 +121,8 @@ def plot_task_accuracy(
     fold_bacc: Array1D[np.floating[Any]],
     class_names: tuple[str, ...],
     *,
-    method: str,
     nsubjects: int,
+    method: ClassificationMethod = "mlp",
     overwrite: bool = False,
 ) -> None:
     """Plot leave-one-condition-out fingerprinting accuracy per held-out task."""
@@ -157,10 +165,13 @@ def plot_task_accuracy(
 # }}}
 
 
+# {{{ main
+
+
 def main(
     filename: pathlib.Path,
     *,
-    method: ClassificationMethod = "lda",
+    method: ClassificationMethod = "mlp",
     zscore_features: bool = True,
     seed: int = 42,
     group: int | None = None,
@@ -171,7 +182,7 @@ def main(
     log.info("Device: %s", device)
 
     try:
-        res, fold_bacc, class_names = evaluate_dataset(
+        result, fold_bacc, class_names = evaluate_dataset(
             filename,
             method=method,
             zscore_features=zscore_features,
@@ -193,8 +204,8 @@ def main(
         basename,
         fold_bacc,
         class_names,
+        nsubjects=result.nclasses,
         method=method,
-        nsubjects=res.nclasses,
         overwrite=overwrite,
     )
 
@@ -207,33 +218,26 @@ def summary(
     zscore_features: bool = True,
     seed: int = 42,
     outfile: pathlib.Path | None = None,
+    methods: tuple[ClassificationMethod, ...] = ("lda", "mlp"),
     overwrite: bool = False,
 ) -> int:
     device = torch.get_default_device()
     log.info("Device: %s", device)
 
-    rows: list[tuple[ClassificationResult, ClassificationResult]] = []
+    rows: list[tuple[ClassificationResult, ...]] = []
     for filename in filenames:
-        try:
-            res_lda, _, _ = evaluate_dataset(
+        results = []
+        for method in methods:
+            result, _, _ = evaluate_dataset(
                 filename,
-                method="lda",
+                method=method,
                 zscore_features=zscore_features,
                 seed=seed,
                 device=device,
             )
-            res_mlp, _, _ = evaluate_dataset(
-                filename,
-                method="mlp",
-                zscore_features=zscore_features,
-                seed=seed,
-                device=device,
-            )
-        except Exception as exc:
-            log.error("Failed to evaluate '%s': %s", filename, exc)
-            return 1
+            results.append(result)
 
-        rows.append((res_lda, res_mlp))
+        rows.append(tuple(results))
 
     print(format_latex_table(rows))
 
@@ -246,6 +250,9 @@ def summary(
         log.info("Wrote summary arrays to '%s'.", outfile)
 
     return 0
+
+
+# }}}
 
 
 if __name__ == "__main__":
@@ -308,7 +315,7 @@ if __name__ == "__main__":
     run_parser.add_argument(
         "--method",
         choices=get_args(ClassificationMethod),
-        default="lda",
+        default="mlp",
         help="The method used to do the classification",
     )
     run_parser.add_argument(
@@ -329,7 +336,7 @@ if __name__ == "__main__":
         "summary",
         parents=[common],
         formatter_class=HelpFormatter,
-        help="Evaluate multiple feature datasets (LDA and MLP) and emit a LaTeX table",
+        help="Evaluate multiple feature datasets and emit a LaTeX table",
     )
     summary_parser.add_argument("filenames", nargs="+", type=pathlib.Path)
     summary_parser.add_argument(

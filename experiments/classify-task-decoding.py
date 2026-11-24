@@ -95,16 +95,19 @@ def plot_confusion(
 # }}}
 
 
+# {{{ evaluate_dataset
+
+
 def evaluate_dataset(
     filename: pathlib.Path,
     *,
-    method: ClassificationMethod,
-    binary: bool,
-    zscore_features: bool,
-    n_splits: int,
-    n_repeats: int,
-    seed: int,
-    device: torch.device | str,
+    method: ClassificationMethod = "mlp",
+    binary: bool = False,
+    zscore_features: bool = True,
+    n_splits: int = 5,
+    n_repeats: int = 5,
+    seed: int = 42,
+    device: torch.device | str | None = None,
     group: int | None = None,
 ) -> tuple[
     ClassificationResult,
@@ -115,6 +118,7 @@ def evaluate_dataset(
     ds = load_feature_datasets(filename, binary=binary)
     if group is not None:
         ds = select_feature_group(ds, group)
+
     x, y, subject_ids = flatten_feature_datasets(ds)
     class_names = ds.class_names
     nclasses = len(class_names)
@@ -170,10 +174,16 @@ def evaluate_dataset(
     return result, y, oof_preds, class_names
 
 
+# }}}
+
+
+# {{{ main
+
+
 def main(
     filename: pathlib.Path,
     *,
-    method: ClassificationMethod = "lda",
+    method: ClassificationMethod = "mlp",
     binary: bool = False,
     zscore_features: bool = True,
     n_splits: int = 5,
@@ -237,17 +247,19 @@ def summary(
     n_repeats: int = 5,
     seed: int = 42,
     outfile: pathlib.Path | None = None,
+    methods: tuple[ClassificationMethod, ...] = ("lda", "mlp"),
     overwrite: bool = False,
 ) -> int:
     device = torch.get_default_device()
     log.info("Device: %s", device)
 
-    rows: list[tuple[ClassificationResult, ClassificationResult]] = []
+    rows: list[tuple[ClassificationResult, ...]] = []
     for filename in filenames:
-        try:
-            res_lda, _, _, _ = evaluate_dataset(
+        results = []
+        for method in methods:
+            result, _, _, _ = evaluate_dataset(
                 filename,
-                method="lda",
+                method=method,
                 binary=binary,
                 zscore_features=zscore_features,
                 n_splits=n_splits,
@@ -255,21 +267,9 @@ def summary(
                 seed=seed,
                 device=device,
             )
-            res_mlp, _, _, _ = evaluate_dataset(
-                filename,
-                method="mlp",
-                binary=binary,
-                zscore_features=zscore_features,
-                n_splits=n_splits,
-                n_repeats=n_repeats,
-                seed=seed,
-                device=device,
-            )
-        except Exception as exc:
-            log.error("Failed to evaluate '%s': %s", filename, exc)
-            return 1
+            results.append(result)
 
-        rows.append((res_lda, res_mlp))
+        rows.append(tuple(results))
 
     print(format_latex_table(rows))
 
@@ -282,6 +282,9 @@ def summary(
         log.info("Wrote summary arrays to '%s'.", outfile)
 
     return 0
+
+
+# }}}
 
 
 if __name__ == "__main__":
@@ -358,7 +361,7 @@ if __name__ == "__main__":
     run_parser.add_argument(
         "--method",
         choices=get_args(ClassificationMethod),
-        default="lda",
+        default="mlp",
         help="The method used to do the classification",
     )
     run_parser.add_argument(
@@ -379,7 +382,7 @@ if __name__ == "__main__":
         "summary",
         parents=[common],
         formatter_class=HelpFormatter,
-        help="Evaluate multiple feature datasets (LDA and MLP) and emit a LaTeX table",
+        help="Evaluate multiple feature datasets and emit a LaTeX table",
     )
     summary_parser.add_argument("filenames", nargs="+", type=pathlib.Path)
     summary_parser.add_argument(
