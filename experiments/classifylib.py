@@ -517,14 +517,26 @@ def bootstrap_identification_ci(
 
 
 class RegressionResult(NamedTuple):
+    """Outcome of one repeated cross-validated Ridge regression run."""
+
     name: str
+    """Feature family or feature block label."""
     target_name: str
+    """Name of the regression target, e.g. ``||A||_F``."""
+
     r2_mean: float
+    """Mean :math:`R^2` over the CV folds."""
     r2_ci_lo: float
+    """Lower bound of the bootstrap confidence interval for :math:`R^2`."""
     r2_ci_hi: float
+    """Upper bound of the bootstrap confidence interval for :math:`R^2`."""
+
     y_true: Array1D[np.floating[Any]]
+    """Target value for each sample."""
     y_pred: Array1D[np.floating[Any]]
+    """Mean out-of-fold prediction for each sample."""
     is_structural: Array1D[np.bool]
+    """Whether each sample is a structural matrix."""
 
 
 def run_ridge_cv(
@@ -538,6 +550,7 @@ def run_ridge_cv(
     n_splits: int = 5,
     n_repeats: int = 5,
     n_bootstrap: int = 1000,
+    percentile: float = 95.0,
     seed: int = 42,
 ) -> RegressionResult:
     """Run repeated subject-grouped K-fold Ridge regression."""
@@ -560,15 +573,16 @@ def run_ridge_cv(
         test_mask = np.isin(subject_index.idx, test_idx)
 
         scaler = StandardScaler()
-        x_tr_s = scaler.fit_transform(x[train_mask])
-        x_te_s = scaler.transform(x[test_mask])
+        x_train = scaler.fit_transform(x[train_mask])
+        x_test = scaler.transform(x[test_mask])
+        y_train = y[train_mask]
 
         reg = RidgeCV(alphas=alphas, cv=min(5, train_idx.size))
-        reg.fit(x_tr_s, y[train_mask])
-        pred = reg.predict(x_te_s)
+        reg.fit(x_train, y_train)
+        pred = reg.predict(x_test)
 
         oof_pred[rep, test_mask] = pred
-        fold_r2[fold_idx] = r2_score(y[test_mask], pred)
+        fold_r2[fold_idx] = r2_score(y_train, pred)
 
     y_pred_mean = np.mean(oof_pred, axis=0)
 
@@ -581,7 +595,8 @@ def run_ridge_cv(
         idx = np.concatenate([subject_index.rows[s] for s in sampled])
         boot_r2[b] = r2_score(y[idx], y_pred_mean[idx])
 
-    ci_lo, ci_hi = np.percentile(boot_r2, [2.5, 97.5])
+    tail = 0.5 * (100 - percentile)
+    ci_lo, ci_hi = np.percentile(boot_r2, [tail, 100 - tail])
 
     return RegressionResult(
         name=name,
@@ -611,40 +626,46 @@ def _format_ci(res: ClassificationResult) -> str:
 
 
 def format_latex_table(
-    rows: Sequence[tuple[ClassificationResult, ClassificationResult]],
+    rows: Sequence[tuple[ClassificationResult, ...]],
 ) -> str:
+    """Format one feature family per row, with one column group per method."""
+    if not rows or not rows[0]:
+        raise ValueError("cannot format an empty table")
+
+    # determine the methods that were used
+    methods = tuple(res.method for res in rows[0])
+    nmethods = len(methods)
+    for i, row in enumerate(rows):
+        row_methods = tuple(res.method for res in row)
+        if row_methods != methods:
+            raise ValueError(f"row {i} has methods {row_methods}, expected {methods}")
+
+    # creat header based on methods
+    header = [r"\textbf{Feature family}", r"\textbf{Size}"]
+    for method in methods:
+        header.extend([rf"\textbf{{{method.upper()}}}", r"\textbf{95\% CI}"])
+
     lines = [
-        r"\begin{tabular}{@{}lrrrrr@{}}",
+        r"\begin{tabular}{@{}lr" + "rr" * nmethods + "@{}}",
         r"\toprule",
-        (
-            r"\textbf{Feature family} & \textbf{Size}"
-            r" & \textbf{LDA} & \textbf{95\% CI}"
-            r" & \textbf{MLP} & \textbf{95\% CI} \\"
-        ),
+        " & ".join(header) + r" \\",
         r"\midrule",
     ]
-    if rows:
-        # NOTE: underline the lowest score in each method column
-        lda_min = min(res_lda.mean_bacc for res_lda, _ in rows)
-        mlp_min = min(res_mlp.mean_bacc for _, res_mlp in rows)
 
-        for res_lda, res_mlp in rows:
-            underline_lda = res_lda.mean_bacc == lda_min
-            underline_mlp = res_mlp.mean_bacc == mlp_min
-            lda_score = _format_score(res_lda, underline=underline_lda)
-            mlp_score = _format_score(res_mlp, underline=underline_mlp)
+    # NOTE: underline the lowest score in each method column
+    mins = [min(row[j].mean_bacc for row in rows) for j in range(nmethods)]
+    for row in rows:
+        parts = [row[0].label, f"{row[0].nfeatures:,}"]
+        for j, result in enumerate(row):
+            parts.append(_format_score(result, underline=result.mean_bacc == mins[j]))
+            parts.append(_format_ci(result))
+        lines.append(" & ".join(parts) + r" \\")
 
-            lines.append(
-                f"{res_lda.label} & {res_lda.nfeatures:,} & {lda_score} & "
-                f"{_format_ci(res_lda)} & {mlp_score} & {_format_ci(res_mlp)}"
-                r" \\"
-            )
-
-        chance = rows[0][0].chance
-        lines.extend([
-            r"\midrule",
-            f"Chance & -- & ${chance:.3f}$ & -- & ${chance:.3f}$ & -- \\\\",
-        ])
+    chance = rows[0][0].chance
+    chance_parts = ["Chance", "--"]
+    for _ in range(nmethods):
+        chance_parts.extend([f"${chance:.3f}$", "--"])
+    lines.extend([r"\midrule", " & ".join(chance_parts) + r" \\"])
 
     lines.extend([
         r"\bottomrule",
