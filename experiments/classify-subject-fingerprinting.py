@@ -6,16 +6,21 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections.abc import Sequence
-from typing import Any, Literal, NamedTuple, get_args
+from typing import Any, get_args
 
 import numpy as np
 import torch
 
+from classifylib import (
+    ClassificationMethod,
+    ClassificationResult,
+    fit_and_predict,
+    format_latex_table,
+    save_summary,
+    subject_bootstrap_ci,
+)
 from commonlib import FeatureDataset, load_feature_datasets, select_feature_group
-from nneuroutil.helpers import FuzzyChoiceAction
-from nneuroutil.interop.torch import available_device_names, torch_default_device
-from nneuroutil.typing import Array2D, Array3D
-from nneuroutil.visualization import figure
+from nneuroutil.typing import Array1D, Array2D, Array3D
 
 log = logging.getLogger("lib.classify_subject_fingerprinting")
 
@@ -35,20 +40,6 @@ Examples:
     > {SCRIPT_PATH.name} summary --device cuda data/dataset-features-*.npz
 """
 
-ClassificationMethod = Literal["lda", "svm", "mlp"]
-
-
-class ClassificationResult(NamedTuple):
-    label: str
-    nfeatures: int
-    nsubjects: int
-    method: ClassificationMethod
-    mean_bacc: float
-    std_bacc: float
-    ci_lo: float
-    ci_hi: float
-    p_val: float | None
-
 
 def to_tensor(ds: FeatureDataset) -> Array3D[np.floating[Any]]:
     """Stack matched-subject features to ``(ntasks, nsubjects, nfeatures)``."""
@@ -59,45 +50,6 @@ def to_tensor(ds: FeatureDataset) -> Array3D[np.floating[Any]]:
     return np.stack([np.asarray(x) for x in ds.x], axis=0)
 
 
-def fit_and_predict(
-    x_train_list: list[torch.Tensor],
-    y_train_list: list[int],
-    x_test: torch.Tensor,
-    method: ClassificationMethod,
-    *,
-    seed: int,
-) -> torch.Tensor:
-    """Fit classifier on training tensors and return predicted subject labels."""
-    if method == "lda":
-        from nneuroutil.classifier import classify_linear_discriminant_analysis
-
-        clf = classify_linear_discriminant_analysis(x_train_list, y_train_list)
-        return clf.predict(x_test, metric="l2")  # ty: ignore[invalid-explicit-return]
-
-    if method == "svm":
-        from nneuroutil.classifier import classify_support_vector_machine
-
-        clf = classify_support_vector_machine(x_train_list, y_train_list)
-        return clf.predict(x_test)  # ty: ignore[invalid-explicit-return]
-
-    if method == "mlp":
-        from torchlib import classify_multilayer_perceptron
-
-        # NOTE: the features are stored as float64, but the MLP is significantly
-        # faster in single precision and the resulting accuracy is unchanged
-        torch.manual_seed(seed)
-        clf = classify_multilayer_perceptron(
-            [xi.float() for xi in x_train_list],
-            y_train_list,
-            alpha=1.0,
-            learning_rate_init=1.0e-2,
-            max_iter=400,
-        )
-        return clf.predict(x_test)
-
-    raise ValueError(f"unknown method: {method!r}")
-
-
 def bootstrap_subject_ci(
     oof_preds: Array2D[np.integer[Any]],
     *,
@@ -106,17 +58,12 @@ def bootstrap_subject_ci(
 ) -> tuple[float, float]:
     """Compute 95% bootstrap CI over subjects for identification accuracy."""
     _ntasks, nsubjects = oof_preds.shape
-    targets = np.arange(nsubjects)[None, :]
-    correct = oof_preds == targets
+    correct = oof_preds == np.arange(nsubjects)[None, :]
 
-    rng = np.random.default_rng(seed)
-    vals = np.empty(n_bootstrap, dtype=np.float64)
-    for b in range(n_bootstrap):
-        sampled = rng.integers(0, nsubjects, size=nsubjects)
-        vals[b] = np.mean(correct[:, sampled])  # ty: ignore[not-subscriptable]
+    def metric(sampled: Array1D[np.integer[Any]]) -> float:
+        return np.mean(np.take(correct, sampled, axis=1))
 
-    lo, hi = np.percentile(vals, [2.5, 97.5])
-    return float(lo), float(hi)
+    return subject_bootstrap_ci(metric, nsubjects, n_bootstrap=n_bootstrap, seed=seed)
 
 
 def run_cross_validation(
@@ -244,7 +191,7 @@ def evaluate_dataset(
     result = ClassificationResult(
         label=ds.label,
         nfeatures=nfeatures,
-        nsubjects=nsubjects,
+        nclasses=nsubjects,
         method=method,
         mean_bacc=mean_bacc,
         std_bacc=std_bacc,
@@ -273,6 +220,8 @@ def plot_task_accuracy(
     chance = 1.0 / nsubjects
     mean_bacc = float(np.mean(fold_bacc))
 
+    from nneuroutil.visualization import figure
+
     with figure(
         basename.with_stem(f"{basename.stem}-fingerprinting-{method}"),
         overwrite=overwrite,
@@ -300,63 +249,6 @@ def plot_task_accuracy(
         ax.set_ylim((0.0, 1.05))
         ax.set_title(rf"Subject fingerprinting ({method.upper()})")
         ax.legend(fontsize="small")
-
-
-# }}}
-
-
-# {{{ table
-
-
-def _format_score(res: ClassificationResult, *, underline: bool = False) -> str:
-    score = f"${res.mean_bacc:.3f} \\pm {res.std_bacc:.3f}$"
-    return f"\\underline{{{score}}}" if underline else score
-
-
-def _format_ci(res: ClassificationResult) -> str:
-    return f"$[{res.ci_lo:.3f}, {res.ci_hi:.3f}]$"
-
-
-def format_latex_table(
-    rows: Sequence[tuple[ClassificationResult, ClassificationResult]],
-) -> str:
-    lines = [
-        r"\begin{tabular}{@{}lrrrrr@{}}",
-        r"\toprule",
-        (
-            r"\textbf{Feature family} & \textbf{Size}"
-            r" & \textbf{LDA} & \textbf{95\% CI}"
-            r" & \textbf{MLP} & \textbf{95\% CI} \\"
-        ),
-        r"\midrule",
-    ]
-    if rows:
-        lda_min = min(res_lda.mean_bacc for res_lda, _ in rows)
-        mlp_min = min(res_mlp.mean_bacc for _, res_mlp in rows)
-
-        for res_lda, res_mlp in rows:
-            underline_lda = res_lda.mean_bacc == lda_min
-            underline_mlp = res_mlp.mean_bacc == mlp_min
-            lda_score = _format_score(res_lda, underline=underline_lda)
-            mlp_score = _format_score(res_mlp, underline=underline_mlp)
-
-            lines.append(
-                f"{res_lda.label} & {res_lda.nfeatures:,} & {lda_score} & "
-                f"{_format_ci(res_lda)} & {mlp_score} & {_format_ci(res_mlp)}"
-                r" \\"
-            )
-
-        chance = 1.0 / rows[0][0].nsubjects
-        lines.extend([
-            r"\midrule",
-            f"Chance & -- & ${chance:.3f}$ & -- & ${chance:.3f}$ & -- \\\\",
-        ])
-
-    lines.extend([
-        r"\bottomrule",
-        r"\end{tabular}",
-    ])
-    return "\n".join(lines)
 
 
 # }}}
@@ -401,7 +293,7 @@ def main(
         fold_bacc,
         class_names,
         method=method,
-        nsubjects=res.nsubjects,
+        nsubjects=res.nclasses,
         overwrite=overwrite,
     )
 
@@ -452,20 +344,7 @@ def summary(
             log.error("Output file '%s' exists (use --force to overwrite).", outfile)
             return 1
 
-        np.savez(
-            outfile,
-            labels=np.array([r[0].label for r in rows]),
-            nfeatures=np.array([r[0].nfeatures for r in rows], dtype=np.int64),
-            chance=np.float64(1.0 / rows[0][0].nsubjects),
-            lda_mean=np.array([r[0].mean_bacc for r in rows], dtype=np.float64),
-            lda_std=np.array([r[0].std_bacc for r in rows], dtype=np.float64),
-            lda_ci_lo=np.array([r[0].ci_lo for r in rows], dtype=np.float64),
-            lda_ci_hi=np.array([r[0].ci_hi for r in rows], dtype=np.float64),
-            mlp_mean=np.array([r[1].mean_bacc for r in rows], dtype=np.float64),
-            mlp_std=np.array([r[1].std_bacc for r in rows], dtype=np.float64),
-            mlp_ci_lo=np.array([r[1].ci_lo for r in rows], dtype=np.float64),
-            mlp_ci_hi=np.array([r[1].ci_hi for r in rows], dtype=np.float64),
-        )
+        save_summary(outfile, rows)
         log.info("Wrote summary arrays to '%s'.", outfile)
 
     return 0
@@ -473,6 +352,9 @@ def summary(
 
 if __name__ == "__main__":
     import argparse
+
+    from nneuroutil.helpers import FuzzyChoiceAction
+    from nneuroutil.interop.torch import available_device_names, torch_default_device
 
     class HelpFormatter(
         argparse.ArgumentDefaultsHelpFormatter,

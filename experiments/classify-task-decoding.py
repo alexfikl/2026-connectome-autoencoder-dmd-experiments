@@ -6,11 +6,20 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections.abc import Sequence
-from typing import Any, Literal, NamedTuple, get_args
+from typing import Any, get_args
 
 import numpy as np
 import torch
 
+from classifylib import (
+    ClassificationMethod,
+    ClassificationResult,
+    fit_and_predict,
+    format_latex_table,
+    make_subject_rows,
+    save_summary,
+    subject_bootstrap_ci,
+)
 from commonlib import (
     flatten_feature_datasets,
     load_feature_datasets,
@@ -33,67 +42,6 @@ Examples:
     > {SCRIPT_PATH.name} summary --binary data/dataset-features-*.npz
 """
 
-ClassificationMethod = Literal["lda", "svm", "mlp"]
-
-
-class ClassificationResult(NamedTuple):
-    label: str
-    nfeatures: int
-    nclasses: int
-    method: ClassificationMethod
-    mean_bacc: float
-    std_bacc: float
-    ci_lo: float
-    ci_hi: float
-    mean_f1: float
-    p_val: float | None
-
-
-def fit_and_predict(
-    x_train_list: list[torch.Tensor],
-    y_train_list: list[int],
-    x_test: torch.Tensor,
-    method: ClassificationMethod,
-    *,
-    seed: int,
-) -> torch.Tensor:
-    """Fit classifier on training tensors and return predicted labels."""
-    if method == "lda":
-        from nneuroutil.classifier import classify_linear_discriminant_analysis
-
-        clf = classify_linear_discriminant_analysis(x_train_list, y_train_list)
-        return clf.predict(x_test, metric="l2")  # ty: ignore[invalid-explicit-return]
-
-    if method == "svm":
-        from nneuroutil.classifier import classify_support_vector_machine
-
-        clf = classify_support_vector_machine(x_train_list, y_train_list)
-        return clf.predict(x_test)  # ty: ignore[invalid-explicit-return]
-
-    if method == "mlp":
-        from torchlib import classify_multilayer_perceptron
-
-        # NOTE: the features are stored as float64, but the MLP is significantly
-        # faster in single precision and the resulting accuracy is unchanged
-        torch.manual_seed(seed)
-        clf = classify_multilayer_perceptron(
-            [xi.float() for xi in x_train_list],
-            y_train_list,
-            alpha=1.0,
-            learning_rate_init=1.0e-2,
-            max_iter=400,
-        )
-        return clf.predict(x_test)
-
-    raise ValueError(f"unknown method: {method!r}")
-
-
-def make_subject_rows(
-    groups: Array1D[np.integer[Any]],
-) -> list[Array1D[np.integer[Any]]]:
-    """Return the row indices of each subject in ``groups``."""
-    return [np.flatnonzero(groups == s) for s in np.unique(groups)]
-
 
 def bootstrap_subject_ci(
     y_true: Array1D[np.integer[Any]],
@@ -107,20 +55,19 @@ def bootstrap_subject_ci(
     from sklearn.metrics import balanced_accuracy_score
 
     subj_rows = make_subject_rows(groups)
-    n_subjects = len(subj_rows)
     n_repeats = oof_preds.shape[0]
 
-    rng = np.random.default_rng(seed)
-    vals = np.empty(n_bootstrap, dtype=np.float64)
-    for b in range(n_bootstrap):
-        sampled = rng.integers(0, n_subjects, size=n_subjects)
+    def metric(sampled: Array1D[np.integer[Any]]) -> float:
         idx = np.concatenate([subj_rows[s] for s in sampled])
-        vals[b] = balanced_accuracy_score(
-            np.tile(y_true[idx], n_repeats), np.ravel(oof_preds[:, idx])
+        return float(
+            balanced_accuracy_score(
+                np.tile(y_true[idx], n_repeats), np.ravel(oof_preds[:, idx])
+            )
         )
 
-    lo, hi = np.percentile(vals, [2.5, 97.5])
-    return lo, hi
+    return subject_bootstrap_ci(
+        metric, len(subj_rows), n_bootstrap=n_bootstrap, seed=seed
+    )
 
 
 # {{{ plot_confusion
@@ -347,58 +294,6 @@ def evaluate_dataset(
     return result, y, oof_preds, class_names
 
 
-def _format_score(res: ClassificationResult, *, underline: bool = False) -> str:
-    score = f"${res.mean_bacc:.3f} \\pm {res.std_bacc:.3f}$"
-    return f"\\underline{{{score}}}" if underline else score
-
-
-def _format_ci(res: ClassificationResult) -> str:
-    return f"$[{res.ci_lo:.3f}, {res.ci_hi:.3f}]$"
-
-
-def format_latex_table(
-    rows: Sequence[tuple[ClassificationResult, ClassificationResult]],
-) -> str:
-    lines = [
-        r"\begin{tabular}{@{}lrrrrr@{}}",
-        r"\toprule",
-        (
-            r"\textbf{Feature family} & \textbf{Size}"
-            r" & \textbf{LDA} & \textbf{95\% CI}"
-            r" & \textbf{MLP} & \textbf{95\% CI} \\"
-        ),
-        r"\midrule",
-    ]
-    if rows:
-        # NOTE: underline the lowest score in each method column
-        lda_min = min(res_lda.mean_bacc for res_lda, _ in rows)
-        mlp_min = min(res_mlp.mean_bacc for _, res_mlp in rows)
-
-        for res_lda, res_mlp in rows:
-            underline_lda = res_lda.mean_bacc == lda_min
-            underline_mlp = res_mlp.mean_bacc == mlp_min
-            lda_score = _format_score(res_lda, underline=underline_lda)
-            mlp_score = _format_score(res_mlp, underline=underline_mlp)
-
-            lines.append(
-                f"{res_lda.label} & {res_lda.nfeatures:,} & {lda_score} & "
-                f"{_format_ci(res_lda)} & {mlp_score} & {_format_ci(res_mlp)}"
-                r" \\"
-            )
-
-        chance = 1.0 / rows[0][0].nclasses
-        lines.extend([
-            r"\midrule",
-            f"Chance & -- & ${chance:.3f}$ & -- & ${chance:.3f}$ & -- \\\\",
-        ])
-
-    lines.extend([
-        r"\bottomrule",
-        r"\end{tabular}",
-    ])
-    return "\n".join(lines)
-
-
 def main(
     filename: pathlib.Path,
     *,
@@ -512,20 +407,7 @@ def summary(
             log.error("Output file '%s' exists (use --force to overwrite).", outfile)
             return 1
 
-        np.savez(
-            outfile,
-            labels=np.array([r[0].label for r in rows]),
-            nfeatures=np.array([r[0].nfeatures for r in rows], dtype=np.int64),
-            chance=np.float64(1.0 / rows[0][0].nclasses),
-            lda_mean=np.array([r[0].mean_bacc for r in rows], dtype=np.float64),
-            lda_std=np.array([r[0].std_bacc for r in rows], dtype=np.float64),
-            lda_ci_lo=np.array([r[0].ci_lo for r in rows], dtype=np.float64),
-            lda_ci_hi=np.array([r[0].ci_hi for r in rows], dtype=np.float64),
-            mlp_mean=np.array([r[1].mean_bacc for r in rows], dtype=np.float64),
-            mlp_std=np.array([r[1].std_bacc for r in rows], dtype=np.float64),
-            mlp_ci_lo=np.array([r[1].ci_lo for r in rows], dtype=np.float64),
-            mlp_ci_hi=np.array([r[1].ci_hi for r in rows], dtype=np.float64),
-        )
+        save_summary(outfile, rows)
         log.info("Wrote summary arrays to '%s'.", outfile)
 
     return 0
