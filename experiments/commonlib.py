@@ -269,9 +269,7 @@ def select_feature_group(
             idx = int(group)
         except ValueError:
             matches = [
-                i
-                for i, descr in enumerate(ds.descrs)
-                if group.lower() in descr.lower()
+                i for i, descr in enumerate(ds.descrs) if group.lower() in descr.lower()
             ]
             if not matches:
                 raise ValueError(
@@ -290,9 +288,7 @@ def select_feature_group(
     if idx < 0:
         idx += ngroups
     if not (0 <= idx < ngroups):
-        raise ValueError(
-            f"feature group index {group!r} out of range [0, {ngroups})"
-        )
+        raise ValueError(f"feature group index {group!r} out of range [0, {ngroups})")
 
     start = int(ds.starts[idx])
     end = int(ds.starts[idx + 1])

@@ -11,7 +11,7 @@ from typing import Any, Literal, NamedTuple, get_args
 import numpy as np
 import torch
 
-from commonlib import FeatureDataset, load_feature_datasets
+from commonlib import FeatureDataset, load_feature_datasets, select_feature_group
 from nneuroutil.helpers import FuzzyChoiceAction
 from nneuroutil.interop.torch import available_device_names, torch_default_device
 from nneuroutil.typing import Array2D, Array3D
@@ -176,12 +176,15 @@ def evaluate_dataset(
     n_permutations: int,
     seed: int,
     device: torch.device | str,
+    group: int | str | None = None,
 ) -> tuple[
     ClassificationResult,
     list[float],
     tuple[str, ...],
 ]:
     ds = load_feature_datasets(filename)
+    if group is not None:
+        ds = select_feature_group(ds, group)
     x = to_tensor(ds)
     ntasks, nsubjects, nfeatures = x.shape
 
@@ -366,6 +369,7 @@ def main(
     zscore_features: bool = True,
     n_permutations: int = 0,
     seed: int = 42,
+    group: int | str | None = None,
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
 ) -> int:
@@ -380,6 +384,7 @@ def main(
             n_permutations=n_permutations,
             seed=seed,
             device=device,
+            group=group,
         )
     except Exception as exc:
         log.error("Failed to evaluate '%s': %s", filename, exc)
@@ -533,6 +538,12 @@ if __name__ == "__main__":
         help="The method used to do the classification",
     )
     run_parser.add_argument(
+        "--group",
+        type=str,
+        default=None,
+        help="Evaluate a single feature group (0-based index or description substring)",
+    )
+    run_parser.add_argument(
         "-o",
         "--outfile",
         type=pathlib.Path,
@@ -573,6 +584,7 @@ if __name__ == "__main__":
                     zscore_features=args.zscore,
                     n_permutations=args.n_permutations,
                     seed=args.seed,
+                    group=args.group,
                     overwrite=args.force,
                 )
             )

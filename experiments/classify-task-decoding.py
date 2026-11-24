@@ -11,7 +11,11 @@ from typing import Any, Literal, NamedTuple, get_args
 import numpy as np
 import torch
 
-from commonlib import flatten_feature_datasets, load_feature_datasets
+from commonlib import (
+    flatten_feature_datasets,
+    load_feature_datasets,
+    select_feature_group,
+)
 from nneuroutil.helpers import FuzzyChoiceAction
 from nneuroutil.interop.torch import available_device_names, torch_default_device
 from nneuroutil.typing import Array1D, Array2D
@@ -165,7 +169,6 @@ def plot_confusion(
                 ha="center",
                 va="center",
                 color=color,
-
             )
 
         fig.colorbar(im, cax=make_colorbar_axes(ax), label="Percentage (\\%)")
@@ -248,6 +251,7 @@ def evaluate_dataset(
     n_permutations: int,
     seed: int,
     device: torch.device | str,
+    group: int | str | None = None,
 ) -> tuple[
     ClassificationResult,
     Array1D[np.integer[Any]],
@@ -255,6 +259,8 @@ def evaluate_dataset(
     tuple[str, ...],
 ]:
     ds = load_feature_datasets(filename, binary=binary)
+    if group is not None:
+        ds = select_feature_group(ds, group)
     x, y, groups = flatten_feature_datasets(ds)
     class_names = ds.class_names
     nclasses = len(class_names)
@@ -403,6 +409,7 @@ def main(
     n_repeats: int = 5,
     n_permutations: int = 0,
     seed: int = 42,
+    group: int | str | None = None,
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
 ) -> int:
@@ -422,6 +429,7 @@ def main(
             n_permutations=n_permutations,
             seed=seed,
             device=device,
+            group=group,
         )
     except Exception as exc:
         log.error("Failed to evaluate '%s': %s", filename, exc)
@@ -607,6 +615,12 @@ if __name__ == "__main__":
         help="The method used to do the classification",
     )
     run_parser.add_argument(
+        "--group",
+        type=str,
+        default=None,
+        help="Evaluate a single feature group (0-based index or description substring)",
+    )
+    run_parser.add_argument(
         "-o",
         "--outfile",
         type=pathlib.Path,
@@ -651,6 +665,7 @@ if __name__ == "__main__":
                     n_repeats=args.n_repeats,
                     n_permutations=args.n_permutations,
                     seed=args.seed,
+                    group=args.group,
                     overwrite=args.force,
                 )
             )
