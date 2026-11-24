@@ -663,13 +663,14 @@ def run_ridge_cv(
         x_train = scaler.fit_transform(x[train_mask])
         x_test = scaler.transform(x[test_mask])
         y_train = y[train_mask]
+        y_test = y[test_mask]
 
         reg = RidgeCV(alphas=alphas, cv=min(5, train_idx.size))
         reg.fit(x_train, y_train)
         pred = reg.predict(x_test)
 
         oof_pred[rep, test_mask] = pred
-        fold_r2[fold_idx] = r2_score(y_train, pred)
+        fold_r2[fold_idx] = r2_score(y_test, pred)
 
     y_pred_mean = np.mean(oof_pred, axis=0)
 

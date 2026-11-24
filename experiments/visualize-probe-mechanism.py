@@ -17,6 +17,7 @@ from classifylib import (
     ClassificationMethod,
     ClassificationResult,
     FeatureDataset,
+    RegressionResult,
     classify_fingerprinting,
     classify_task_decoding,
     flatten_feature_datasets,
@@ -63,7 +64,7 @@ BLOCK_SHORT_NAMES: dict[str, str] = {
 DEGREE_TARGETS: dict[str, str] = {
     "||A1||_2": r"$\norm{\matr{A}\vect{1}}_2$",
     "std(A1)": r"$\mathrm{std}(\matr{A}\vect{1})$",
-    "1^T A 1": r"$\vect{1}^\top \matr{A} \vect{1}$",
+    "1^T A 1": r"$\vect{1}^T \matr{A} \vect{1}$",
 }
 
 
@@ -265,14 +266,6 @@ def compute_node_correlations(
 # {{{ compute_degree_moment_r2
 
 
-class DegreeMomentR2(NamedTuple):
-    block: str
-    target: str
-    r2_mean: float
-    r2_ci_lo: float
-    r2_ci_hi: float
-
-
 def compute_degree_moment_r2(
     ds_ae: FeatureDataset,
     mats: Array3D[np.floating[Any]],
@@ -280,7 +273,7 @@ def compute_degree_moment_r2(
     n_splits: int = 5,
     n_repeats: int = 5,
     seed: int = 42,
-) -> list[DegreeMomentR2]:
+) -> list[RegressionResult]:
     """Predict functional scalar moments of A1 from Family I blocks via RidgeCV."""
     d = np.sum(mats, axis=2)
     targets = {
@@ -292,7 +285,7 @@ def compute_degree_moment_r2(
     _, _, subject_ids = flatten_feature_datasets(ds_ae)
     subject_index = make_subject_index(subject_ids)
 
-    results: list[DegreeMomentR2] = []
+    results: list[RegressionResult] = []
     for bname, sub in iter_blocks(ds_ae):
         x, _, _ = flatten_feature_datasets(sub)
         for tname in DEGREE_TARGETS:
@@ -306,15 +299,7 @@ def compute_degree_moment_r2(
                 n_repeats=n_repeats,
                 seed=seed,
             )
-            results.append(
-                DegreeMomentR2(
-                    block=bname,
-                    target=tname,
-                    r2_mean=float(res.r2_mean),
-                    r2_ci_lo=float(res.r2_ci_lo),
-                    r2_ci_hi=float(res.r2_ci_hi),
-                )
-            )
+            results.append(res)
 
     return results
 
@@ -332,6 +317,7 @@ def _select_result(
     for res in results:
         if res.method == method:
             return res
+
     raise ValueError(f"method {method!r} was not evaluated")
 
 
@@ -350,7 +336,7 @@ def _med_iqr(arr: Array1D[np.floating[Any]]) -> tuple[float, float, float]:
 def log_summary(
     blocks: Sequence[BlockScores],
     corrs: NodeCorrelations,
-    r2: Sequence[DegreeMomentR2],
+    r2: Sequence[RegressionResult],
     *,
     method: ClassificationMethod = "mlp",
 ) -> None:
@@ -376,8 +362,8 @@ def log_summary(
 
     log.info(
         "Functional R^200 Pearson r with |z_N| (median [IQR]): "
-        "v_3,2=%.3f [%.3f, %.3f], |v_3,3|=%.3f [%.3f, %.3f], "
-        "v_3,4=%.3f [%.3f, %.3f], orth med=%.3f [%.3f, %.3f], "
+        "|v_3,2|=%.3f [%.3f, %.3f], |v_3,3|=%.3f [%.3f, %.3f], "
+        "|v_3,4|=%.3f [%.3f, %.3f], orth med=%.3f [%.3f, %.3f], "
         "orth max=%.3f [%.3f, %.3f]",
         *_med_iqr(corrs.r_v32),
         *_med_iqr(corrs.r_v33),
@@ -387,9 +373,9 @@ def log_summary(
     )
 
     size_by_block = {b.name: b.nfeatures for b in blocks}
-    by_block: dict[str, dict[str, DegreeMomentR2]] = {}
+    by_block: dict[str, dict[str, RegressionResult]] = {}
     for entry in r2:
-        by_block.setdefault(entry.block, {})[entry.target] = entry
+        by_block.setdefault(entry.name, {})[entry.target_name] = entry
 
     targets = list(DEGREE_TARGETS)
     r2_lines = [
@@ -488,11 +474,11 @@ def plot_mechanism(
         corrs.r_orth_max,
     ]
     box_labels = [
-        r"$\mathbf{v}_{3,2}$",
+        r"$|\mathbf{v}_{3,2}|$",
         r"$|\mathbf{v}_{3,3}|$",
-        r"$\mathbf{v}_{3,4}$",
-        r"$\mathbf{u}_k \perp \mathbf{1}$ (med)",
-        r"$\mathbf{u}_k \perp \mathbf{1}$ (max)",
+        r"$|\mathbf{v}_{3,4}|$",
+        r"$\mathbf{u}_k$ (median)",
+        r"$\mathbf{u}_k$ (max)",
     ]
 
     with figure(
@@ -514,7 +500,7 @@ def plot_mechanism(
         ax.set_ylim(-0.15, 1.0)
         ax.tick_params(axis="x", labelrotation=20)
         for label in ax.get_xticklabels():
-            label.set_horizontalalignment("right")
+            label.set_horizontalalignment("center")
         ax.grid(visible=False, axis="x", which="both")
 
 
