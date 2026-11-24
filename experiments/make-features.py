@@ -58,7 +58,9 @@ Array3D = TypeAliasType(
 )
 
 
-class FeatureDataset(NamedTuple):
+class FeatureVector(NamedTuple):
+    """A single feature vector with its group boundaries and descriptions."""
+
     x: Array1D[np.floating[Any]]
     starts: Array1D[np.integer[Any]]
     descrs: tuple[str, ...]
@@ -67,7 +69,7 @@ class FeatureDataset(NamedTuple):
 # {{{ make_matrix_features
 
 
-def make_matrix_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
+def make_matrix_features(mat: Array2D[np.floating[Any]]) -> FeatureVector:
     """Return the lower triangular entries of the matrix."""
     n, m = mat.shape
     if n != m:
@@ -79,7 +81,7 @@ def make_matrix_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     starts = np.array([0, features.size])
     descrs = ("Lower triangular matrix entries",)
 
-    return FeatureDataset(x=features, starts=starts, descrs=descrs)
+    return FeatureVector(x=features, starts=starts, descrs=descrs)
 
 
 # }}}
@@ -88,7 +90,7 @@ def make_matrix_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
 # {{{ make_scale_features
 
 
-def make_scale_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
+def make_scale_features(mat: Array2D[np.floating[Any]]) -> FeatureVector:
     """Return the Frobenius norm, spectral radius and entry range."""
     n, m = mat.shape
     if n != m:
@@ -102,7 +104,7 @@ def make_scale_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     starts = np.array([0, 1, 2])
     descrs = ("Frobenius Norm", "Spectral Radius")
 
-    return FeatureDataset(x=features, starts=starts, descrs=descrs)
+    return FeatureVector(x=features, starts=starts, descrs=descrs)
 
 
 # }}}
@@ -111,7 +113,7 @@ def make_scale_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
 # {{{ make_eig_features
 
 
-def make_eig_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
+def make_eig_features(mat: Array2D[np.floating[Any]]) -> FeatureVector:
     """Return the eigenvalues of the symmetric matrix."""
     n, m = mat.shape
     if n != m:
@@ -122,7 +124,7 @@ def make_eig_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     # so they're normalized enough.
     eigs, _ = np.linalg.eigh(mat)
 
-    return FeatureDataset(
+    return FeatureVector(
         x=eigs, starts=np.array([0, eigs.size]), descrs=("Eigenvalues",)
     )
 
@@ -162,7 +164,7 @@ def _make_community_labels(mat: Array2D[np.floating[Any]]) -> Array1D[np.integer
 def _make_local_graph_features(
     mat: Array2D[np.floating[Any]],
     labels: Array1D[np.integer[Any]],
-) -> FeatureDataset:
+) -> FeatureVector:
     features = []
     starts = [0]
     descrs = []
@@ -214,12 +216,12 @@ def _make_local_graph_features(
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Local Assortativity")
 
-    return FeatureDataset(
+    return FeatureVector(
         x=np.hstack(features), starts=np.array(starts), descrs=tuple(descrs)
     )
 
 
-def make_local_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
+def make_local_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureVector:
     """Return per-node graph measures for abs, positive and negative weights."""
     amat = np.abs(mat)
     labels = _make_community_labels(amat)
@@ -228,7 +230,7 @@ def make_local_graph_features(mat: Array2D[np.floating[Any]]) -> FeatureDataset:
     fpos = _make_local_graph_features(np.maximum(mat, 0.0), labels)
     fneg = _make_local_graph_features(np.maximum(-mat, 0.0), labels)
 
-    return FeatureDataset(
+    return FeatureVector(
         x=np.concatenate([fabs.x, fpos.x, np.nan_to_num(fneg.x)]),
         starts=np.concatenate([
             fabs.starts,
@@ -404,7 +406,7 @@ def _make_global_graph_features(
     mat: Array2D[np.floating[Any]],
     *,
     eps: float = 1.0e-12,
-) -> FeatureDataset:
+) -> FeatureVector:
     import igraph as ig
 
     ig.set_random_number_generator(random.Random(42))  # ruff: ignore[suspicious-non-cryptographic-random-usage]
@@ -468,7 +470,7 @@ def _make_global_graph_features(
     starts.append(starts[-1] + np.size(features[-1]))
     descrs.append("Transitivity")
 
-    return FeatureDataset(
+    return FeatureVector(
         x=np.nan_to_num(np.hstack(features)),
         starts=np.array(starts),
         descrs=tuple(descrs),
@@ -477,13 +479,13 @@ def _make_global_graph_features(
 
 def make_global_graph_features(
     mat: Array2D[np.floating[Any]],
-) -> FeatureDataset:
+) -> FeatureVector:
     """Return global graph measures for abs, positive and negative weights."""
     fabs = _make_global_graph_features(np.abs(mat))
     fpos = _make_global_graph_features(np.maximum(mat, 0.0))
     fneg = _make_global_graph_features(np.maximum(-mat, 0.0))
 
-    return FeatureDataset(
+    return FeatureVector(
         x=np.concatenate([fabs.x, fpos.x, fneg.x]),
         starts=np.concatenate([
             fabs.starts,
@@ -512,7 +514,7 @@ def make_dmd_features(
     resolution: int = 64,
     maxit: int = 32,
     full_matrix: bool = False,
-) -> FeatureDataset:
+) -> FeatureVector:
     """Return DMD eigenvalue magnitudes and mode strengths."""
     # NOTE: the DMD run is pretty slow, so we try to do it on the GPU
     try:  # ruff: ignore[too-many-statements-in-try-clause]
@@ -616,7 +618,7 @@ def make_dmd_features(
         starts = np.cumsum([0, strengths.size, eigs.size])
         descrs = ("DMD Strengths", "DMD Eigs")
 
-        ds = FeatureDataset(x=features, starts=starts, descrs=descrs)
+        ds = FeatureVector(x=features, starts=starts, descrs=descrs)
 
     # }}}
 
@@ -633,7 +635,7 @@ def make_image_features(
     binary: Array2D[np.integer[Any]],
     *,
     size: int = 32,
-) -> FeatureDataset:
+) -> FeatureVector:
     """Return a block-average of the equi-M set image to a ``size x size`` image."""
     height, width = binary.shape
     if height % size != 0 or width % size != 0:
@@ -642,7 +644,7 @@ def make_image_features(
     blocks = binary.reshape(size, height // size, size, width // size)
     features = blocks.mean(axis=(1, 3), dtype=np.float64).reshape(-1)
 
-    return FeatureDataset(
+    return FeatureVector(
         x=features,
         starts=np.array([0, features.size]),
         descrs=("Image",),
@@ -692,7 +694,7 @@ def make_fourier_features(
     nsamples: int = 128,
     eps: float = 5.0e-4,
     normalize: bool = True,
-) -> FeatureDataset:
+) -> FeatureVector:
     """Compute Fourier descriptors of the boundary contour."""
     import cv2  # ty: ignore[import-not-found]
 
@@ -748,7 +750,7 @@ def make_fourier_features(
     descriptors = np.concatenate([values.real, values.imag])
     starts = np.cumsum([0, values.size, values.size])
 
-    return FeatureDataset(
+    return FeatureVector(
         x=descriptors,
         starts=starts,
         descrs=("Descriptor Real", "Descriptor Imag"),
@@ -764,7 +766,7 @@ def make_fourier_features(
 def make_landmarks_features(
     binary: Array2D[np.integer[Any]],
     bbox: tuple[float, float, float, float],
-) -> FeatureDataset:
+) -> FeatureVector:
     """Compute geometric measures of the boundary contour."""
     import cv2  # ty: ignore[import-not-found]
 
@@ -817,7 +819,7 @@ def make_landmarks_features(
     ])
     starts = np.cumsum([0, *([1] * features.size)])
 
-    return FeatureDataset(
+    return FeatureVector(
         x=features,
         starts=starts,
         descrs=(
