@@ -253,4 +253,10 @@ figure7:
         data/dataset-features-dmd.npz \
         data/dataset-features-ae-dmd.npz
 
+[doc("Generate plots for Figure 8")]
+figure8:
+    {{ PYTHON }} experiments/classify-task-decoding.py \
+        run --force --device cuda --method mlp \
+        data/dataset-features-ae-dmd.npz
+
 # }}}

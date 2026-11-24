@@ -131,9 +131,12 @@ def plot_confusion(
     balanced_acc: float,
     overwrite: bool = False,
 ) -> None:
-    """Plot the aggregated confusion matrix of the out-of-fold predictions."""
+    """Plot the row-normalized confusion matrix (%) of out-of-fold predictions."""
     nclasses = len(class_names)
-    vmax = max(np.max(cm), 1)
+    row_sums = np.sum(cm, axis=1, keepdims=True)
+    cm_pct = 100.0 * np.divide(
+        cm, row_sums, out=np.zeros_like(cm, dtype=np.float64), where=row_sums > 0
+    )
 
     with figure(
         basename.with_stem(f"{basename.stem}-confusion-{method}"),
@@ -143,31 +146,30 @@ def plot_confusion(
         ax = fig.gca()
         ax.grid(visible=False)
 
-        im = ax.imshow(cm, cmap="Blues", vmin=0, vmax=vmax)
+        im = ax.imshow(cm_pct, cmap="Blues", vmin=0.0, vmax=100.0)
         ax.set_xticks(range(nclasses))
         ax.set_yticks(range(nclasses))
         ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize="medium")
         ax.set_yticklabels(class_names, fontsize="medium")
         ax.set_xlabel("Predicted")
         ax.set_ylabel("True")
-        ax.set_title(rf"{method.upper()} (bal. acc. ${balanced_acc:.3f}$)")
 
-        for i, j in np.ndindex(cm.shape):
+        for i, j in np.ndindex(cm_pct.shape):
             if cm[i, j] == 0:
                 continue
 
-            color = "white" if cm[i, j] > 0.5 * vmax else "black"
+            color = "white" if cm_pct[i, j] > 50.0 else "black"
             ax.text(
                 j,
                 i,
-                str(cm[i, j]),
+                f"{cm_pct[i, j]:.1f}",
                 ha="center",
                 va="center",
                 color=color,
                 fontsize="small",
             )
 
-        fig.colorbar(im, cax=make_colorbar_axes(ax), label="Count")
+        fig.colorbar(im, cax=make_colorbar_axes(ax), label="Percentage (\\%)")
 
 
 # }}}
