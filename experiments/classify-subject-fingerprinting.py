@@ -158,8 +158,7 @@ def plot_task_accuracy(
         ax.set_xlabel("Held-out condition")
         ax.set_ylabel("Balanced accuracy")
         ax.set_ylim((0.0, 1.05))
-        ax.set_title(rf"Subject fingerprinting ({method.upper()})")
-        ax.legend(fontsize="small")
+        ax.legend()
 
 
 # }}}

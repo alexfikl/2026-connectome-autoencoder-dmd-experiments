@@ -101,6 +101,10 @@ def plot_scale_regression(
         ) as fig:
             (ax,) = fig.axes
             struct = result.is_structural
+            if struct is None:
+                raise ValueError(
+                    f"missing structural labels for feature family '{result.name}'"
+                )
             func = ~struct  # ty: ignore[unsupported-operator]
             ax.scatter(
                 result.y_true[func],
@@ -190,9 +194,9 @@ def main(
             x_all,
             y_fro,
             subject_index,
-            is_structural,
             name=name,
             target_name="||A||_F",
+            is_structural=is_structural,
             n_splits=n_splits,
             n_repeats=n_repeats,
             seed=seed,
@@ -201,9 +205,9 @@ def main(
             x_all,
             y_rho,
             subject_index,
-            is_structural,
             name=name,
             target_name="rho(A)",
+            is_structural=is_structural,
             n_splits=n_splits,
             n_repeats=n_repeats,
             seed=seed,

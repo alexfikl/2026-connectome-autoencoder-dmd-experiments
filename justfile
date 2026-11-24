@@ -271,7 +271,6 @@ figure8:
 figure9:
     {{ PYTHON }} experiments/visualize-probe-mechanism.py \
         --device cuda --force --method mlp \
-        --cache data/stage3-probe-mechanism.npz \
         data/dataset-features-ae-dmd.npz \
         data/dataset-features-matrix.npz
 

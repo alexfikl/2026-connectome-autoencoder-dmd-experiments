@@ -535,18 +535,18 @@ class RegressionResult(NamedTuple):
     """Target value for each sample."""
     y_pred: Array1D[np.floating[Any]]
     """Mean out-of-fold prediction for each sample."""
-    is_structural: Array1D[np.bool]
-    """Whether each sample is a structural matrix."""
+    is_structural: Array1D[np.bool] | None = None
+    """Whether each sample is a structural matrix, if known."""
 
 
 def run_ridge_cv(
     x: Array2D[np.floating[Any]],
     y: Array1D[np.floating[Any]],
     subject_index: SubjectIndex,
-    is_structural: Array1D[np.bool],
     *,
     name: str,
     target_name: str,
+    is_structural: Array1D[np.bool] | None = None,
     n_splits: int = 5,
     n_repeats: int = 5,
     n_bootstrap: int = 1000,

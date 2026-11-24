@@ -6,15 +6,16 @@ from __future__ import annotations
 import logging
 import math
 import pathlib
-from collections.abc import Sequence
-from dataclasses import asdict, dataclass
-from typing import Any, Literal, get_args
+from collections.abc import Iterator, Sequence
+from typing import Any, NamedTuple, get_args
 
 import numpy as np
 import torch
 
 import commonlib  # ruff: ignore[unused-import]
 from classifylib import (
+    ClassificationMethod,
+    ClassificationResult,
     FeatureDataset,
     bootstrap_balanced_accuracy_ci,
     bootstrap_identification_ci,
@@ -50,9 +51,10 @@ Example:
         data/dataset-features-matrix.npz
 """
 
-ClassificationMethod = Literal["lda", "mlp"]
 
-_BLOCK_SHORT_NAMES: dict[str, str] = {
+# {{{ helpers
+
+BLOCK_SHORT_NAMES: dict[str, str] = {
     "Leading eigenvalue moduli": "Eigenvalues",
     "Control sensitivity (log)": "Control",
     "Attractor node magnitudes": "Magnitudes",
@@ -60,8 +62,14 @@ _BLOCK_SHORT_NAMES: dict[str, str] = {
     "Full AE-DMD": "Full",
 }
 
+DEGREE_TARGETS: dict[str, str] = {
+    "||A1||_2": r"$\norm{\matr{A}\vect{1}}_2$",
+    "std(A1)": r"$\mathrm{std}(\matr{A}\vect{1})$",
+    "1^T A 1": r"$\vect{1}^\top \matr{A} \vect{1}$",
+}
 
-def _block_selections(ds: FeatureDataset) -> list[tuple[str, int | None]]:
+
+def block_selections(ds: FeatureDataset) -> list[tuple[str, int | None]]:
     """Return the named feature blocks used by the mechanism analysis."""
     return [
         *((descr, i) for i, descr in enumerate(ds.descrs)),
@@ -69,8 +77,17 @@ def _block_selections(ds: FeatureDataset) -> list[tuple[str, int | None]]:
     ]
 
 
-def _reconstruct_matrices(ds: FeatureDataset) -> Array3D[np.floating[Any]]:
+def iter_blocks(ds: FeatureDataset) -> Iterator[tuple[str, FeatureDataset]]:
+    """Yield each named feature block and its dataset view."""
+    for name, idx in block_selections(ds):
+        yield name, (ds if idx is None else select_feature_group(ds, idx))
+
+
+def reconstruct_matrices(ds: FeatureDataset) -> Array3D[np.floating[Any]]:
     """Reconstruct symmetric zero-diagonal matrices from lower-triangular features."""
+    # NOTE: it's easier to take the matrix feature file instead of all the
+    # separate files, so we do a little dance here to reconstruct the matrices
+
     x, _, _ = flatten_feature_datasets(ds)
     m = x.shape[1]
     n = (1 + math.isqrt(1 + 8 * m)) // 2
@@ -81,31 +98,33 @@ def _reconstruct_matrices(ds: FeatureDataset) -> Array3D[np.floating[Any]]:
     mats = np.zeros((x.shape[0], n, n), dtype=np.float64)
     mats[:, rows, cols] = x
     mats[:, cols, rows] = x
+
     return mats
+
+
+# }}}
 
 
 # {{{ block-wise classification
 
 
-@dataclass(frozen=True)
-class BlockScores:
+class BlockScores(NamedTuple):
     name: str
     nfeatures: int
-    task_lda: tuple[float, float, float, float]
-    task_mlp: tuple[float, float, float, float]
-    fp_lda: tuple[float, float, float, float]
-    fp_mlp: tuple[float, float, float, float]
+    task: tuple[ClassificationResult, ...]
+    fp: tuple[ClassificationResult, ...]
 
 
-def _eval_task_block(
+def evaluate_task_decoding(
     ds: FeatureDataset,
     *,
+    name: str,
     method: ClassificationMethod,
     n_splits: int,
     n_repeats: int,
     seed: int,
     device: torch.device | str,
-) -> tuple[float, float, float, float]:
+) -> ClassificationResult:
     x, y, subject_ids = flatten_feature_datasets(ds)
     oof_preds, fold_bacc = run_subject_grouped_cv(
         x,
@@ -120,22 +139,28 @@ def _eval_task_block(
         device=device,
     )
     ci_lo, ci_hi = bootstrap_balanced_accuracy_ci(y, oof_preds, subject_ids, seed=seed)
-    return (
-        float(np.mean(fold_bacc)),
-        float(np.std(fold_bacc)),
-        float(ci_lo),
-        float(ci_hi),
+    return ClassificationResult(
+        label=name,
+        nfeatures=x.shape[1],
+        nclasses=len(ds.class_names),
+        method=method,
+        mean_bacc=float(np.mean(fold_bacc)),
+        std_bacc=float(np.std(fold_bacc)),
+        ci_lo=float(ci_lo),
+        ci_hi=float(ci_hi),
     )
 
 
-def _eval_fp_block(
+def evaluate_fingerprinting(
     ds: FeatureDataset,
     *,
+    name: str,
     method: ClassificationMethod,
     seed: int,
     device: torch.device | str,
-) -> tuple[float, float, float, float]:
+) -> ClassificationResult:
     x = ds.to_tensor()
+    _, nsubjects, nfeatures = x.shape
     oof_preds, fold_bacc = run_leave_one_condition_out_cv(
         x,
         method=method,
@@ -144,53 +169,65 @@ def _eval_fp_block(
         device=device,
     )
     ci_lo, ci_hi = bootstrap_identification_ci(oof_preds, seed=seed)
-    return (
-        float(np.mean(fold_bacc)),
-        float(np.std(fold_bacc)),
-        float(ci_lo),
-        float(ci_hi),
+    return ClassificationResult(
+        label=name,
+        nfeatures=nfeatures,
+        nclasses=nsubjects,
+        method=method,
+        mean_bacc=float(np.mean(fold_bacc)),
+        std_bacc=float(np.std(fold_bacc)),
+        ci_lo=float(ci_lo),
+        ci_hi=float(ci_hi),
     )
 
 
 def evaluate_blocks(
     ds_ae: FeatureDataset,
     *,
+    methods: Sequence[ClassificationMethod] = ("mlp",),
     n_splits: int = 5,
     n_repeats: int = 5,
     seed: int = 42,
     device: torch.device | str = "cpu",
 ) -> list[BlockScores]:
-    """Evaluate 7-way task and fingerprinting per Family I block."""
-    selections = _block_selections(ds_ae)
+    """Evaluate task decoding and fingerprinting per Family I block."""
+    if not methods:
+        raise ValueError("at least one classification method is required")
 
     results: list[BlockScores] = []
-    for name, idx in selections:
-        sub = ds_ae if idx is None else select_feature_group(ds_ae, idx)
-        nfeat = int(sub.x[0].shape[1])
+    for name, sub in iter_blocks(ds_ae):
+        nfeatures = int(sub.x[0].shape[1])
 
-        log.info("Evaluating block '%s' (%d features)...", name, nfeat)
+        log.info("Evaluating block '%s' (%d features)...", name, nfeatures)
+        tk_results = []
+        fp_results = []
+        for method in methods:
+            result = evaluate_task_decoding(
+                sub,
+                name=name,
+                method=method,
+                n_splits=n_splits,
+                n_repeats=n_repeats,
+                seed=seed,
+                device=device,
+            )
+            tk_results.append(result)
+
+            result = evaluate_fingerprinting(
+                sub,
+                name=name,
+                method=method,
+                seed=seed,
+                device=device,
+            )
+            fp_results.append(result)
+
         results.append(
             BlockScores(
                 name=name,
-                nfeatures=nfeat,
-                task_lda=_eval_task_block(
-                    sub,
-                    method="lda",
-                    n_splits=n_splits,
-                    n_repeats=n_repeats,
-                    seed=seed,
-                    device=device,
-                ),
-                task_mlp=_eval_task_block(
-                    sub,
-                    method="mlp",
-                    n_splits=n_splits,
-                    n_repeats=n_repeats,
-                    seed=seed,
-                    device=device,
-                ),
-                fp_lda=_eval_fp_block(sub, method="lda", seed=seed, device=device),
-                fp_mlp=_eval_fp_block(sub, method="mlp", seed=seed, device=device),
+                nfeatures=nfeatures,
+                task=tuple(tk_results),
+                fp=tuple(fp_results),
             )
         )
 
@@ -203,8 +240,7 @@ def evaluate_blocks(
 # {{{ probe-subspace alignment in R^200 & scalar degree moments
 
 
-@dataclass(frozen=True)
-class NodeCorrelations:
+class NodeCorrelations(NamedTuple):
     r_d: Array1D[np.floating[Any]]
     r_d2: Array1D[np.floating[Any]]
     r_ad2: Array1D[np.floating[Any]]
@@ -212,8 +248,7 @@ class NodeCorrelations:
     r_orth_max: Array1D[np.floating[Any]]
 
 
-@dataclass(frozen=True)
-class DegreeMomentR2:
+class DegreeMomentR2(NamedTuple):
     block: str
     target: str
     r2_mean: float
@@ -238,7 +273,7 @@ def compute_node_correlations(
     idx = ds_ae.descrs.index("Attractor node magnitudes")
     ds_mag = select_feature_group(ds_ae, idx)
     mags, _, _ = flatten_feature_datasets(ds_mag)
-    if mats.shape[0] != mags.shape[0] or mats.shape[1] != mags.shape[1]:
+    if mats.shape[:2] != mags.shape[:2]:
         raise ValueError(
             f"shape mismatch between matrices {mats.shape} and magnitudes {mags.shape}"
         )
@@ -253,14 +288,14 @@ def compute_node_correlations(
     r_orth_med = np.empty(total, dtype=np.float64)
     r_orth_max = np.empty(total, dtype=np.float64)
 
-    for idx, (mat, mag) in enumerate(zip(mats, mags, strict=True)):
+    for i, (mat, mag) in enumerate(zip(mats, mags, strict=True)):
         d = mat @ ones
         d2 = d * d
         ad2 = mat @ d2
 
-        r_d[idx] = _pearsonr(mag, np.abs(d))
-        r_d2[idx] = _pearsonr(mag, d2)
-        r_ad2[idx] = _pearsonr(mag, np.abs(ad2))
+        r_d[i] = _pearsonr(mag, np.abs(d))
+        r_d2[i] = _pearsonr(mag, d2)
+        r_ad2[i] = _pearsonr(mag, np.abs(ad2))
 
         _, eigvecs = np.linalg.eigh(mat)
         proj = np.abs(eigvecs.T @ ones_unit)
@@ -272,8 +307,8 @@ def compute_node_correlations(
             abs(_pearsonr(mag, np.abs(eigvecs[:, k])))
             for k in np.flatnonzero(orth_mask)
         ])
-        r_orth_med[idx] = float(np.median(orth_rs))
-        r_orth_max[idx] = float(np.max(orth_rs))
+        r_orth_med[i] = float(np.median(orth_rs))
+        r_orth_max[i] = float(np.max(orth_rs))
 
     return NodeCorrelations(
         r_d=r_d,
@@ -302,21 +337,15 @@ def compute_degree_moment_r2(
 
     _, _, subject_ids = flatten_feature_datasets(ds_ae)
     subject_index = make_subject_index(subject_ids)
-    nsamples = subject_ids.size  # ty: ignore[missing-attribute]
-    is_struct = np.zeros(nsamples, dtype=np.bool_)
-
-    blocks = _block_selections(ds_ae)
 
     results: list[DegreeMomentR2] = []
-    for bname, idx in blocks:
-        sub = ds_ae if idx is None else select_feature_group(ds_ae, idx)
+    for bname, sub in iter_blocks(ds_ae):
         x, _, _ = flatten_feature_datasets(sub)
-        for tname, y in targets.items():
+        for tname in DEGREE_TARGETS:
             res = run_ridge_cv(
                 x,
-                y,
+                targets[tname],
                 subject_index,
-                is_struct,
                 name=bname,
                 target_name=tname,
                 n_splits=n_splits,
@@ -342,9 +371,21 @@ def compute_degree_moment_r2(
 # {{{ reporting & plotting
 
 
-def _fmt_score(vals: tuple[float, float, float, float]) -> str:
-    mean, std, lo, hi = vals
-    return f"${mean:.3f} \\pm {std:.3f}$ & $[{lo:.3f}, {hi:.3f}]$"
+def _select_result(
+    results: Sequence[ClassificationResult],
+    method: ClassificationMethod,
+) -> ClassificationResult:
+    for res in results:
+        if res.method == method:
+            return res
+    raise ValueError(f"method {method!r} was not evaluated")
+
+
+def _fmt_score(res: ClassificationResult) -> str:
+    return (
+        f"${res.mean_bacc:.3f} \\pm {res.std_bacc:.3f}$ & "
+        f"$[{res.ci_lo:.3f}, {res.ci_hi:.3f}]$"
+    )
 
 
 def _med_iqr(arr: Array1D[np.floating[Any]]) -> tuple[float, float, float]:
@@ -356,21 +397,25 @@ def log_summary(
     blocks: Sequence[BlockScores],
     corrs: NodeCorrelations,
     r2: Sequence[DegreeMomentR2],
+    *,
+    method: ClassificationMethod = "mlp",
 ) -> None:
+    method_label = method.upper()
     lines = [
         r"\begin{tabular}{@{}lrrrrr@{}}",
         r"\toprule",
         (
             r"\textbf{AE-DMD block} & \textbf{Size}"
-            r" & \textbf{Task (MLP)} & \textbf{95\% CI}"
-            r" & \textbf{FP (MLP)} & \textbf{95\% CI} \\"
+            rf" & \textbf{{Task ({method_label})}} & \textbf{{95\% CI}}"
+            rf" & \textbf{{FP ({method_label})}} & \textbf{{95\% CI}} \\"
         ),
         r"\midrule",
     ]
     for b in blocks:
+        task = _select_result(b.task, method)
+        fp = _select_result(b.fp, method)
         lines.append(
-            f"{b.name} & {b.nfeatures} & "
-            f"{_fmt_score(b.task_mlp)} & {_fmt_score(b.fp_mlp)} \\\\"
+            f"{b.name} & {b.nfeatures:,} & {_fmt_score(task)} & {_fmt_score(fp)} \\\\"
         )
     lines.extend([r"\bottomrule", r"\end{tabular}"])
     log.info("Family I block-wise table:\n%s", "\n".join(lines))
@@ -388,30 +433,31 @@ def log_summary(
     )
 
     size_by_block = {b.name: b.nfeatures for b in blocks}
-    targets = ["||A1||_2", "std(A1)", "1^T A 1"]
     by_block: dict[str, dict[str, DegreeMomentR2]] = {}
     for entry in r2:
         by_block.setdefault(entry.block, {})[entry.target] = entry
 
+    targets = list(DEGREE_TARGETS)
     r2_lines = [
-        r"\begin{tabular}{@{}lrrrr@{}}",
+        r"\begin{tabular}{@{}lr" + "r" * len(targets) + "@{}}",
         r"\toprule",
-        (
-            r"\textbf{AE-DMD block} & \textbf{Size}"
-            r" & \textbf{$\norm{\matr{A}\vect{1}}_2$}"
-            r" & \textbf{$\mathrm{std}(\matr{A}\vect{1})$}"
-            r" & \textbf{$\vect{1}^\top \matr{A} \vect{1}$} \\"
-        ),
+        " & ".join(
+            [r"\textbf{AE-DMD block}", r"\textbf{Size}"]
+            + [rf"\textbf{{{DEGREE_TARGETS[t]}}}" for t in targets]
+        )
+        + r" \\",
         r"\midrule",
     ]
-    for bname, entries in by_block.items():
+    block_names = list(by_block)
+    for i, bname in enumerate(block_names):
+        entries = by_block[bname]
         vals = " & ".join(f"${entries[t].r2_mean:.3f}$" for t in targets)
         cis = " & ".join(
             f"$[{entries[t].r2_ci_lo:.3f}, {entries[t].r2_ci_hi:.3f}]$" for t in targets
         )
-        r2_lines.append(f"{bname} & {size_by_block[bname]} & {vals} \\\\")
+        r2_lines.append(f"{bname} & {size_by_block[bname]:,} & {vals} \\\\")
         r2_lines.append(f" & & {cis} \\\\")
-        if bname != list(by_block)[-1]:
+        if i + 1 < len(block_names):
             r2_lines.append(r"\addlinespace[2pt]")
     r2_lines.extend([r"\bottomrule", r"\end{tabular}"])
     log.info("Degree-moment Ridge R^2 table:\n%s", "\n".join(r2_lines))
@@ -426,26 +472,26 @@ def plot_mechanism(
     overwrite: bool = False,
 ) -> None:
     """Plot Family I block-wise decoding and R^200 probe-subspace correlations."""
-    labels = [_BLOCK_SHORT_NAMES.get(b.name, b.name) for b in blocks]
+    labels = [BLOCK_SHORT_NAMES.get(b.name, b.name) for b in blocks]
     xpos = np.arange(len(blocks))
     width = 0.36
 
-    task_vals = [getattr(b, f"task_{method}") for b in blocks]
-    fp_vals = [getattr(b, f"fp_{method}") for b in blocks]
+    task = [_select_result(b.task, method) for b in blocks]
+    fp = [_select_result(b.fp, method) for b in blocks]
 
-    task_mean = np.array([v[0] for v in task_vals])
+    task_mean = np.array([res.mean_bacc for res in task])
     task_err = np.maximum(
         np.array([
-            [v[0] - v[2] for v in task_vals],
-            [v[3] - v[0] for v in task_vals],
+            [res.mean_bacc - res.ci_lo for res in task],
+            [res.ci_hi - res.mean_bacc for res in task],
         ]),
         0.0,
     )
-    fp_mean = np.array([v[0] for v in fp_vals])
+    fp_mean = np.array([res.mean_bacc for res in fp])
     fp_err = np.maximum(
         np.array([
-            [v[0] - v[2] for v in fp_vals],
-            [v[3] - v[0] for v in fp_vals],
+            [res.mean_bacc - res.ci_lo for res in fp],
+            [res.ci_hi - res.mean_bacc for res in fp],
         ]),
         0.0,
     )
@@ -471,8 +517,8 @@ def plot_mechanism(
             capsize=3,
             label="Fingerprinting",
         )
-        ax.axhline(1.0 / 7.0, color="C0", ls="--", lw=1.2, alpha=0.8)
-        ax.axhline(1.0 / 48.0, color="C1", ls=":", lw=1.2, alpha=0.8)
+        ax.axhline(task[0].chance, color="C0", ls="--", lw=1.2, alpha=0.8)
+        ax.axhline(fp[0].chance, color="C1", ls=":", lw=1.2, alpha=0.8)
         ax.set_xticks(xpos)
         ax.set_xticklabels(labels, rotation=20, ha="right")
         ax.set_ylabel("Balanced accuracy")
@@ -512,7 +558,9 @@ def plot_mechanism(
         ax.axhline(0.0, color="k", ls="--", lw=1.0, alpha=0.6)
         ax.set_ylabel(r"Pearson $r$ with $|\hat{z}_i|$")
         ax.set_ylim(-0.15, 1.0)
-        ax.set_xticklabels(box_labels, rotation=20, ha="right")
+        ax.tick_params(axis="x", labelrotation=20)
+        for label in ax.get_xticklabels():
+            label.set_horizontalalignment("right")
         ax.grid(visible=False, axis="x", which="both")
 
 
@@ -527,62 +575,39 @@ def main(
     n_splits: int = 5,
     n_repeats: int = 5,
     seed: int = 42,
-    cachefile: pathlib.Path | None = None,
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
 ) -> int:
-    if not ae_file.exists():
-        log.error("AE-DMD feature file does not exist: '%s'.", ae_file)
-        return 1
-    if not matrix_file.exists():
-        log.error("Matrix feature file does not exist: '%s'.", matrix_file)
-        return 1
-
     device = torch.get_default_device()
     log.info("Device: %s", device)
 
-    if cachefile is not None and cachefile.exists() and not overwrite:
-        log.info("Loading cached Stage 3 results from '%s'.", cachefile)
-        cached = np.load(cachefile, allow_pickle=True)
-        blocks = [BlockScores(**row) for row in cached["blocks"][()]]
-        corrs = NodeCorrelations(
-            r_d=cached["r_d"],
-            r_d2=cached["r_d2"],
-            r_ad2=cached["r_ad2"],
-            r_orth_med=cached["r_orth_med"],
-            r_orth_max=cached["r_orth_max"],
-        )
-        r2 = [DegreeMomentR2(**row) for row in cached["r2"][()]]
-    else:
+    try:
         ds_ae = load_feature_datasets(ae_file, binary=False)
         ds_mat = load_feature_datasets(matrix_file, binary=False)
         if ds_ae.class_names != ds_mat.class_names:
             raise ValueError(
                 f"class mismatch: {ds_ae.class_names} vs {ds_mat.class_names}"
             )
-        mats = _reconstruct_matrices(ds_mat)
+    except Exception as exc:
+        log.error("Failed to evaluate '%s' and '%s': %s", ae_file, matrix_file, exc)
+        return 1
 
-        blocks = evaluate_blocks(
-            ds_ae,
-            n_splits=n_splits,
-            n_repeats=n_repeats,
-            seed=seed,
-            device=device,
-        )
-        corrs = compute_node_correlations(ds_ae, mats)
-        r2 = compute_degree_moment_r2(
-            ds_ae, mats, n_splits=n_splits, n_repeats=n_repeats, seed=seed
-        )
-        if cachefile is not None:
-            np.savez(
-                cachefile,
-                blocks=np.array([asdict(b) for b in blocks], dtype=object),
-                r2=np.array([asdict(entry) for entry in r2], dtype=object),
-                **asdict(corrs),
-            )
-            log.info("Saved Stage 3 cache to '%s'.", cachefile)
+    mats = reconstruct_matrices(ds_mat)
 
-    log_summary(blocks, corrs, r2)
+    blocks = evaluate_blocks(
+        ds_ae,
+        methods=(method,),
+        n_splits=n_splits,
+        n_repeats=n_repeats,
+        seed=seed,
+        device=device,
+    )
+    corrs = compute_node_correlations(ds_ae, mats)
+    r2 = compute_degree_moment_r2(
+        ds_ae, mats, n_splits=n_splits, n_repeats=n_repeats, seed=seed
+    )
+
+    log_summary(blocks, corrs, r2, method=method)
 
     if outfile is None:
         outfile = ae_file.with_stem(f"{ae_file.stem}-mechanism").with_suffix("")
@@ -625,15 +650,44 @@ if __name__ == "__main__":
         "--method",
         choices=get_args(ClassificationMethod),
         default="mlp",
-        help="Classifier shown in panel (a)",
+        help="Classifier used in the block table and panel (a)",
     )
-    parser.add_argument("--n-splits", type=int, default=5)
-    parser.add_argument("--n-repeats", type=int, default=5)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--cache", type=pathlib.Path, default=None)
-    parser.add_argument("-o", "--outfile", type=pathlib.Path, default=None)
-    parser.add_argument("--force", action="store_true")
-    parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument(
+        "--n-splits",
+        type=int,
+        default=5,
+        help="Number of subject-grouped CV folds",
+    )
+    parser.add_argument(
+        "--n-repeats",
+        type=int,
+        default=5,
+        help="Number of repeated CV runs",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for CV splits, bootstraps, and MLP initialization",
+    )
+    parser.add_argument(
+        "-o",
+        "--outfile",
+        type=pathlib.Path,
+        default=None,
+        help="Basename for output plots",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force overwrite of existing files",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Only show error messages",
+    )
     args = parser.parse_args()
 
     if not args.quiet:
@@ -650,7 +704,6 @@ if __name__ == "__main__":
                 n_splits=args.n_splits,
                 n_repeats=args.n_repeats,
                 seed=args.seed,
-                cachefile=args.cache,
                 outfile=args.outfile,
                 overwrite=args.force,
             )
