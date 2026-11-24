@@ -173,40 +173,36 @@ def evaluate_blocks(
 # }}}
 
 
-# {{{ probe-subspace alignment in R^200 & scalar degree moments
+# {{{ compute_node_correlations
 
 
 class NodeCorrelations(NamedTuple):
-    r_d: Array1D[np.floating[Any]]
-    r_d2: Array1D[np.floating[Any]]
-    r_ad2: Array1D[np.floating[Any]]
+    r_v32: Array1D[np.floating[Any]]
+    r_v33: Array1D[np.floating[Any]]
+    r_v34: Array1D[np.floating[Any]]
     r_orth_med: Array1D[np.floating[Any]]
     r_orth_max: Array1D[np.floating[Any]]
 
 
-class DegreeMomentR2(NamedTuple):
-    block: str
-    target: str
-    r2_mean: float
-    r2_ci_lo: float
-    r2_ci_hi: float
-
-
-def _pearsonr(u: Array1D[np.floating[Any]], v: Array1D[np.floating[Any]]) -> float:
+def pearsonr(u: Array1D[np.floating[Any]], v: Array1D[np.floating[Any]]) -> float:
+    # NOTE: scipy.stats.pearsonr is a bit slow here, so we implemented it ourselves
     u_c = u - np.mean(u)
     v_c = v - np.mean(v)
-    denom = float(np.linalg.norm(u_c) * np.linalg.norm(v_c))
+
+    denom = np.linalg.norm(u_c) * np.linalg.norm(v_c)
     if denom < 1.0e-15:
         return 0.0
-    return float(np.dot(u_c, v_c) / denom)
+
+    return np.dot(u_c, v_c) / denom
 
 
 def compute_node_correlations(
     ds_ae: FeatureDataset,
     mats: Array3D[np.floating[Any]],
 ) -> NodeCorrelations:
-    """Compute per-connectome R^200 correlations between |z_N| and P(A) vs u_k."""
+    """Compute per-connectome correlations between |z_N| and P(A) vs u_k."""
     idx = ds_ae.descrs.index("Attractor node magnitudes")
+
     ds_mag = select_feature_group(ds_ae, idx)
     mags, _, _ = flatten_feature_datasets(ds_mag)
     if mats.shape[:2] != mags.shape[:2]:
@@ -215,44 +211,66 @@ def compute_node_correlations(
         )
 
     total, n = mags.shape
-    ones = np.ones(n, dtype=np.float64)
+    ones = np.ones(n, dtype=mats.dtype)
     ones_unit = ones / np.sqrt(n)
 
-    r_d = np.empty(total, dtype=np.float64)
-    r_d2 = np.empty(total, dtype=np.float64)
-    r_ad2 = np.empty(total, dtype=np.float64)
+    r_v32 = np.empty(total, dtype=np.float64)
+    r_v33 = np.empty(total, dtype=np.float64)
+    r_v34 = np.empty(total, dtype=np.float64)
     r_orth_med = np.empty(total, dtype=np.float64)
     r_orth_max = np.empty(total, dtype=np.float64)
 
     for i, (mat, mag) in enumerate(zip(mats, mags, strict=True)):
         d = mat @ ones
-        d2 = d * d
-        ad2 = mat @ d2
 
-        r_d[i] = _pearsonr(mag, np.abs(d))
-        r_d2[i] = _pearsonr(mag, d2)
-        r_ad2[i] = _pearsonr(mag, np.abs(ad2))
+        # NOTE: these are the first 3 vectors from P(A) in Proposition 3
+        v32 = d * d
+        ad2 = mat @ v32
+        v33 = 2.0 * d * ad2
+        v34 = ad2 * ad2
+
+        r_v32[i] = pearsonr(mag, v32)
+        r_v33[i] = pearsonr(mag, np.abs(v33))
+        r_v34[i] = pearsonr(mag, v34)
 
         _, eigvecs = np.linalg.eigh(mat)
         proj = np.abs(eigvecs.T @ ones_unit)
-        orth_mask = proj < 0.05
-        if not np.any(orth_mask):
-            orth_mask = proj <= np.median(proj)
+        orth_idx = np.flatnonzero(proj < 0.05)
+        if orth_idx.size == 0:
+            raise ValueError(
+                f"no eigenvector of connectome {i} is orthogonal to 1: "
+                f"min |u_k^T 1| / sqrt(d) = {np.min(proj):.4f}"
+            )
 
+        # NOTE: compute the absolute correlation with the eigenvectors of *mat*
+        # that are orthogonal to 1 (anti-correlated is fine here, still a line)
         orth_rs = np.array([
-            abs(_pearsonr(mag, np.abs(eigvecs[:, k])))
-            for k in np.flatnonzero(orth_mask)
+            abs(pearsonr(mag, np.abs(eigvecs[:, k]))) for k in orth_idx
         ])
-        r_orth_med[i] = float(np.median(orth_rs))
-        r_orth_max[i] = float(np.max(orth_rs))
+        r_orth_med[i] = np.median(orth_rs)
+        r_orth_max[i] = np.max(orth_rs)
 
     return NodeCorrelations(
-        r_d=r_d,
-        r_d2=r_d2,
-        r_ad2=r_ad2,
+        r_v32=r_v32,
+        r_v33=r_v33,
+        r_v34=r_v34,
         r_orth_med=r_orth_med,
         r_orth_max=r_orth_max,
     )
+
+
+# }}}
+
+
+# {{{ compute_degree_moment_r2
+
+
+class DegreeMomentR2(NamedTuple):
+    block: str
+    target: str
+    r2_mean: float
+    r2_ci_lo: float
+    r2_ci_hi: float
 
 
 def compute_degree_moment_r2(
@@ -358,12 +376,12 @@ def log_summary(
 
     log.info(
         "Functional R^200 Pearson r with |z_N| (median [IQR]): "
-        "|A1|=%.3f [%.3f, %.3f], (A1)^2=%.3f [%.3f, %.3f], "
-        "|A(A1)^2|=%.3f [%.3f, %.3f], orth med=%.3f [%.3f, %.3f], "
+        "v_3,2=%.3f [%.3f, %.3f], |v_3,3|=%.3f [%.3f, %.3f], "
+        "v_3,4=%.3f [%.3f, %.3f], orth med=%.3f [%.3f, %.3f], "
         "orth max=%.3f [%.3f, %.3f]",
-        *_med_iqr(corrs.r_d),
-        *_med_iqr(corrs.r_d2),
-        *_med_iqr(corrs.r_ad2),
+        *_med_iqr(corrs.r_v32),
+        *_med_iqr(corrs.r_v33),
+        *_med_iqr(corrs.r_v34),
         *_med_iqr(corrs.r_orth_med),
         *_med_iqr(corrs.r_orth_max),
     )
@@ -463,16 +481,16 @@ def plot_mechanism(
         ax.legend(fontsize=16)
 
     box_data = [
-        corrs.r_d,
-        corrs.r_d2,
-        corrs.r_ad2,
+        corrs.r_v32,
+        corrs.r_v33,
+        corrs.r_v34,
         corrs.r_orth_med,
         corrs.r_orth_max,
     ]
     box_labels = [
-        r"$|\mathbf{A}\mathbf{1}|$",
-        r"$(\mathbf{A}\mathbf{1})^2$",
-        r"$|\mathbf{A}(\mathbf{A}\mathbf{1})^2|$",
+        r"$\mathbf{v}_{3,2}$",
+        r"$|\mathbf{v}_{3,3}|$",
+        r"$\mathbf{v}_{3,4}$",
         r"$\mathbf{u}_k \perp \mathbf{1}$ (med)",
         r"$\mathbf{u}_k \perp \mathbf{1}$ (max)",
     ]
@@ -517,19 +535,32 @@ def main(
     device = torch.get_default_device()
     log.info("Device: %s", device)
 
+    if outfile is None:
+        outfile = ae_file.with_stem(f"{ae_file.stem}-mechanism").with_suffix("")
+
     try:
         ds_ae = load_feature_datasets(ae_file, binary=False)
-        ds_mat = load_feature_datasets(matrix_file, binary=False)
-        if ds_ae.class_names != ds_mat.class_names:
-            raise ValueError(
-                f"class mismatch: {ds_ae.class_names} vs {ds_mat.class_names}"
-            )
     except Exception as exc:
-        log.error("Failed to evaluate '%s' and '%s': %s", ae_file, matrix_file, exc)
+        log.error("Failed to load '%s': %s", ae_file, exc)
+        return 1
+
+    try:
+        ds_mat = load_feature_datasets(matrix_file, binary=False)
+    except Exception as exc:
+        log.error("Failed to load '%s': %s", matrix_file, exc)
+        return 1
+
+    if ds_ae.class_names != ds_mat.class_names:
+        log.error(
+            "Feature classes in '%s' and '%s' do not match: %s vs %s",
+            ae_file,
+            matrix_file,
+            ds_ae.class_names,
+            ds_mat.class_names,
+        )
         return 1
 
     mats = reconstruct_matrices(ds_mat)
-
     blocks = evaluate_blocks(
         ds_ae,
         methods=(method,),
@@ -538,15 +569,13 @@ def main(
         seed=seed,
         device=device,
     )
+
     corrs = compute_node_correlations(ds_ae, mats)
     r2 = compute_degree_moment_r2(
         ds_ae, mats, n_splits=n_splits, n_repeats=n_repeats, seed=seed
     )
 
     log_summary(blocks, corrs, r2, method=method)
-
-    if outfile is None:
-        outfile = ae_file.with_stem(f"{ae_file.stem}-mechanism").with_suffix("")
     plot_mechanism(outfile, blocks, corrs, method=method, overwrite=overwrite)
 
     return 0
