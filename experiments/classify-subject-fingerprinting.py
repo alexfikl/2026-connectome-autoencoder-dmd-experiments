@@ -15,10 +15,9 @@ import commonlib  # ruff: ignore[unused-import]
 from classifylib import (
     ClassificationMethod,
     ClassificationResult,
-    bootstrap_identification_ci,
+    classify_fingerprinting,
     format_latex_table,
     load_feature_datasets,
-    run_leave_one_condition_out_cv,
     save_summary,
     select_feature_group,
 )
@@ -41,76 +40,6 @@ Examples:
     > {SCRIPT_PATH.name} run --method lda data/dataset-features-matrix.npz
     > {SCRIPT_PATH.name} summary --device cuda data/dataset-features-*.npz
 """
-
-
-# {{{ evaluate_dataset
-
-
-def evaluate_dataset(
-    filename: pathlib.Path,
-    *,
-    method: ClassificationMethod = "mlp",
-    zscore_features: bool = True,
-    seed: int = 42,
-    device: torch.device | str | None = None,
-    group: int | None = None,
-) -> tuple[
-    ClassificationResult,
-    Array1D[np.floating[Any]],
-    tuple[str, ...],
-]:
-    ds = load_feature_datasets(filename)
-    if group is not None:
-        ds = select_feature_group(ds, group)
-
-    x = ds.to_tensor()
-    ntasks, nsubjects, nfeatures = x.shape
-
-    log.info(
-        "Evaluating '%s' (%s, z=%s): %d tasks x %d subjects, %d features.",
-        filename.stem,
-        method.upper(),
-        zscore_features,
-        ntasks,
-        nsubjects,
-        nfeatures,
-    )
-
-    oof_preds, fold_bacc = run_leave_one_condition_out_cv(
-        x,
-        method=method,
-        zscore_features=zscore_features,
-        seed=seed,
-        device=device,
-    )
-
-    mean_bacc = np.mean(fold_bacc)
-    std_bacc = np.std(fold_bacc)
-    ci_lo, ci_hi = bootstrap_identification_ci(oof_preds, seed=seed)
-
-    log.info(
-        "Bal. Acc.: %.4f +/- %.4f (95%% CI [%.4f, %.4f])",
-        mean_bacc,
-        std_bacc,
-        ci_lo,
-        ci_hi,
-    )
-
-    result = ClassificationResult(
-        label=ds.label,
-        nfeatures=nfeatures,
-        nclasses=nsubjects,
-        method=method,
-        mean_bacc=mean_bacc,
-        std_bacc=std_bacc,
-        ci_lo=ci_lo,
-        ci_hi=ci_hi,
-    )
-
-    return result, fold_bacc, ds.class_names
-
-
-# }}}
 
 
 # {{{ plots
@@ -180,25 +109,57 @@ def main(
     device = torch.get_default_device()
     log.info("Device: %s", device)
 
-    try:
-        result, fold_bacc, class_names = evaluate_dataset(
-            filename,
-            method=method,
-            zscore_features=zscore_features,
-            seed=seed,
-            device=device,
-            group=group,
-        )
-    except Exception as exc:
-        log.error("Failed to evaluate '%s': %s", filename, exc)
-        return 1
-
     suffix = "-zscore" if zscore_features else ""
     basename = (
         filename.with_stem(f"{filename.stem}{suffix}").with_suffix("")
         if outfile is None
         else outfile.with_suffix("")
     )
+
+    try:
+        ds = load_feature_datasets(filename)
+    except Exception as exc:
+        log.error("Failed to load '%s': %s", filename, exc)
+        return 1
+
+    if group is not None:
+        try:
+            ds = select_feature_group(ds, group)
+        except Exception as exc:
+            log.error("Failed to select group %d from '%s': %s", group, filename, exc)
+            return 1
+
+    x = ds.to_tensor()
+    ntasks, nsubjects, nfeatures = x.shape
+
+    log.info(
+        "Evaluating '%s' (%s, z=%s): %d tasks x %d subjects, %d features.",
+        filename.stem,
+        method.upper(),
+        zscore_features,
+        ntasks,
+        nsubjects,
+        nfeatures,
+    )
+    result, cv = classify_fingerprinting(
+        x,
+        label=ds.label,
+        method=method,
+        zscore_features=zscore_features,
+        seed=seed,
+        device=device,
+    )
+    log.info(
+        "Bal. Acc.: %.4f +/- %.4f (95%% CI [%.4f, %.4f])",
+        result.mean_bacc,
+        result.std_bacc,
+        result.ci_lo,
+        result.ci_hi,
+    )
+
+    fold_bacc = cv.fold_bacc
+    class_names = ds.class_names
+
     plot_task_accuracy(
         basename,
         fold_bacc,
@@ -225,14 +186,35 @@ def summary(
 
     rows: list[tuple[ClassificationResult, ...]] = []
     for filename in filenames:
+        ds = load_feature_datasets(filename)
+        x = ds.to_tensor()
+        ntasks, nsubjects, nfeatures = x.shape
+
         results = []
         for method in methods:
-            result, _, _ = evaluate_dataset(
-                filename,
+            log.info(
+                "Evaluating '%s' (%s, z=%s): %d tasks x %d subjects, %d features.",
+                filename.stem,
+                method.upper(),
+                zscore_features,
+                ntasks,
+                nsubjects,
+                nfeatures,
+            )
+            result, _ = classify_fingerprinting(
+                x,
+                label=ds.label,
                 method=method,
                 zscore_features=zscore_features,
                 seed=seed,
                 device=device,
+            )
+            log.info(
+                "Bal. Acc.: %.4f +/- %.4f (95%% CI [%.4f, %.4f])",
+                result.mean_bacc,
+                result.std_bacc,
+                result.ci_lo,
+                result.ci_hi,
             )
             results.append(result)
 

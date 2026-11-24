@@ -210,6 +210,7 @@ def select_feature_group(
     ngroups = len(ds.descrs)
     if index < 0:
         index += ngroups
+
     if not (0 <= index < ngroups):
         raise ValueError(f"feature group index {index!r} out of range [0, {ngroups})")
 
@@ -314,9 +315,9 @@ def fit_and_predict(
 
 class GroupedCVResult(NamedTuple):
     oof_preds: Array2D[np.integer[Any]]
-    """Out-of-fold predictions of shape ``(n_repeats, nsamples)``."""
+    """Out-of-fold predictions, one row per repeat or held-out condition."""
     fold_bacc: Array1D[np.floating[Any]]
-    """Balanced accuracy of each fold, of length ``n_splits * n_repeats``."""
+    """Balanced accuracy of each fold."""
 
 
 def run_subject_grouped_cv(
@@ -508,6 +509,92 @@ def bootstrap_identification_ci(
     tail = 0.5 * (100.0 - percentile)
     lo, hi = np.percentile(vals, [tail, 100.0 - tail])
     return lo, hi
+
+
+# }}}
+
+
+# {{{ evaluate
+
+
+def classify_task_decoding(
+    x: Array2D[np.floating[Any]],
+    y: Array1D[np.integer[Any]],
+    subject_ids: Array1D[np.integer[Any]],
+    *,
+    label: str,
+    method: ClassificationMethod = "mlp",
+    zscore_features: bool = True,
+    n_splits: int = 5,
+    n_repeats: int = 5,
+    seed: int = 42,
+    device: torch.device | str | None = None,
+) -> tuple[ClassificationResult, GroupedCVResult]:
+    """Run subject-grouped task decoding and summarize its accuracy.
+
+    Labels are assumed to be contiguous integers starting at zero.
+    """
+    nclasses = int(np.max(y)) + 1
+    cv = run_subject_grouped_cv(
+        x,
+        y,
+        subject_ids,
+        nclasses=nclasses,
+        method=method,
+        zscore_features=zscore_features,
+        n_splits=n_splits,
+        n_repeats=n_repeats,
+        seed=seed,
+        device=device,
+    )
+    ci_lo, ci_hi = bootstrap_balanced_accuracy_ci(
+        y, cv.oof_preds, subject_ids, seed=seed
+    )
+
+    result = ClassificationResult(
+        label=label,
+        nfeatures=x.shape[1],
+        nclasses=nclasses,
+        method=method,
+        mean_bacc=float(np.mean(cv.fold_bacc)),
+        std_bacc=float(np.std(cv.fold_bacc)),
+        ci_lo=float(ci_lo),
+        ci_hi=float(ci_hi),
+    )
+    return result, cv
+
+
+def classify_fingerprinting(
+    x: Array3D[np.floating[Any]],
+    *,
+    label: str,
+    method: ClassificationMethod = "mlp",
+    zscore_features: bool = True,
+    seed: int = 42,
+    device: torch.device | str | None = None,
+) -> tuple[ClassificationResult, GroupedCVResult]:
+    """Run leave-one-condition-out fingerprinting and summarize its accuracy."""
+    _, nsubjects, nfeatures = x.shape
+    cv = run_leave_one_condition_out_cv(
+        x,
+        method=method,
+        zscore_features=zscore_features,
+        seed=seed,
+        device=device,
+    )
+    ci_lo, ci_hi = bootstrap_identification_ci(cv.oof_preds, seed=seed)
+
+    result = ClassificationResult(
+        label=label,
+        nfeatures=nfeatures,
+        nclasses=nsubjects,
+        method=method,
+        mean_bacc=float(np.mean(cv.fold_bacc)),
+        std_bacc=float(np.std(cv.fold_bacc)),
+        ci_lo=float(ci_lo),
+        ci_hi=float(ci_hi),
+    )
+    return result, cv
 
 
 # }}}

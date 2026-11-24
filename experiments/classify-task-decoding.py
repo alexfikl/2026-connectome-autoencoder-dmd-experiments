@@ -15,17 +15,16 @@ import commonlib  # ruff: ignore[unused-import]
 from classifylib import (
     ClassificationMethod,
     ClassificationResult,
-    bootstrap_balanced_accuracy_ci,
+    classify_task_decoding,
     flatten_feature_datasets,
     format_latex_table,
     load_feature_datasets,
-    run_subject_grouped_cv,
     save_summary,
     select_feature_group,
 )
 from nneuroutil.helpers import FuzzyChoiceAction
 from nneuroutil.interop.torch import available_device_names, torch_default_device
-from nneuroutil.typing import Array1D, Array2D
+from nneuroutil.typing import Array2D
 from nneuroutil.visualization import figure, make_colorbar_axes
 
 log = logging.getLogger("lib.classify_task_decoding")
@@ -95,88 +94,6 @@ def plot_confusion(
 # }}}
 
 
-# {{{ evaluate_dataset
-
-
-def evaluate_dataset(
-    filename: pathlib.Path,
-    *,
-    method: ClassificationMethod = "mlp",
-    binary: bool = False,
-    zscore_features: bool = True,
-    n_splits: int = 5,
-    n_repeats: int = 5,
-    seed: int = 42,
-    device: torch.device | str | None = None,
-    group: int | None = None,
-) -> tuple[
-    ClassificationResult,
-    Array1D[np.integer[Any]],
-    Array2D[np.integer[Any]],
-    tuple[str, ...],
-]:
-    ds = load_feature_datasets(filename, binary=binary)
-    if group is not None:
-        ds = select_feature_group(ds, group)
-
-    x, y, subject_ids = flatten_feature_datasets(ds)
-    class_names = ds.class_names
-    nclasses = len(class_names)
-    unique_subjects = np.unique(subject_ids)
-
-    log.info(
-        "Evaluating '%s' (%s, %s, z=%s): %d samples (%d subjects), %d features.",
-        filename.stem,
-        "binary" if binary else "multiclass",
-        method.upper(),
-        zscore_features,
-        x.shape[0],
-        unique_subjects.size,
-        x.shape[1],
-    )
-
-    oof_preds, fold_bacc = run_subject_grouped_cv(
-        x,
-        y,
-        subject_ids,
-        nclasses=nclasses,
-        method=method,
-        zscore_features=zscore_features,
-        n_splits=n_splits,
-        n_repeats=n_repeats,
-        seed=seed,
-        device=device,
-    )
-
-    mean_bacc = np.mean(fold_bacc)
-    std_bacc = np.std(fold_bacc)
-    ci_lo, ci_hi = bootstrap_balanced_accuracy_ci(y, oof_preds, subject_ids, seed=seed)
-
-    log.info(
-        "Bal. Acc.: %.4f +/- %.4f (95%% CI [%.4f, %.4f])",
-        mean_bacc,
-        std_bacc,
-        ci_lo,
-        ci_hi,
-    )
-
-    result = ClassificationResult(
-        label=ds.label,
-        nfeatures=x.shape[1],
-        nclasses=nclasses,
-        method=method,
-        mean_bacc=mean_bacc,
-        std_bacc=std_bacc,
-        ci_lo=ci_lo,
-        ci_hi=ci_hi,
-    )
-
-    return result, y, oof_preds, class_names
-
-
-# }}}
-
-
 # {{{ main
 
 
@@ -198,26 +115,6 @@ def main(
     device = torch.get_default_device()
     log.info("Device: %s", device)
 
-    try:
-        res, y, oof_preds, class_names = evaluate_dataset(
-            filename,
-            method=method,
-            binary=binary,
-            zscore_features=zscore_features,
-            n_splits=n_splits,
-            n_repeats=n_repeats,
-            seed=seed,
-            device=device,
-            group=group,
-        )
-    except Exception as exc:
-        log.error("Failed to evaluate '%s': %s", filename, exc)
-        return 1
-
-    y_rep = np.tile(y, n_repeats)
-    cm = confusion_matrix(y_rep, np.ravel(oof_preds), labels=list(range(res.nclasses)))
-    overall_bacc = balanced_accuracy_score(y_rep, np.ravel(oof_preds))
-
     suffix = "-binary" if binary else "-multiclass"
     if zscore_features:
         suffix += "-zscore"
@@ -226,6 +123,62 @@ def main(
         if outfile is None
         else outfile.with_suffix("")
     )
+
+    try:
+        ds = load_feature_datasets(filename, binary=binary)
+    except Exception as exc:
+        log.error("Failed to load '%s': %s", filename, exc)
+        return 1
+
+    if group is not None:
+        try:
+            ds = select_feature_group(ds, group)
+        except Exception as exc:
+            log.error("Failed to select group %d from '%s': %s", group, filename, exc)
+            return 1
+
+    x, y, subject_ids = flatten_feature_datasets(ds)
+    class_names = ds.class_names
+    unique_subjects = np.unique(subject_ids)
+
+    log.info(
+        "Evaluating '%s' (%s, %s, z=%s): %d samples (%d subjects), %d features.",
+        filename.stem,
+        "binary" if binary else "multiclass",
+        method.upper(),
+        zscore_features,
+        x.shape[0],
+        unique_subjects.size,
+        x.shape[1],
+    )
+
+    result, cv = classify_task_decoding(
+        x,
+        y,
+        subject_ids,
+        label=ds.label,
+        method=method,
+        zscore_features=zscore_features,
+        n_splits=n_splits,
+        n_repeats=n_repeats,
+        seed=seed,
+        device=device,
+    )
+
+    log.info(
+        "Bal. Acc.: %.4f +/- %.4f (95%% CI [%.4f, %.4f])",
+        result.mean_bacc,
+        result.std_bacc,
+        result.ci_lo,
+        result.ci_hi,
+    )
+
+    y_rep = np.tile(y, n_repeats)
+    cm = confusion_matrix(
+        y_rep, np.ravel(cv.oof_preds), labels=list(range(result.nclasses))
+    )
+    overall_bacc = balanced_accuracy_score(y_rep, np.ravel(cv.oof_preds))
+
     plot_confusion(
         basename,
         cm,
@@ -255,17 +208,41 @@ def summary(
 
     rows: list[tuple[ClassificationResult, ...]] = []
     for filename in filenames:
+        ds = load_feature_datasets(filename, binary=binary)
+        x, y, subject_ids = flatten_feature_datasets(ds)
+        unique_subjects = np.unique(subject_ids)
+
         results = []
         for method in methods:
-            result, _, _, _ = evaluate_dataset(
-                filename,
+            log.info(
+                "Evaluating '%s' (%s, %s, z=%s): %d samples (%d subjects), "
+                "%d features.",
+                filename.stem,
+                "binary" if binary else "multiclass",
+                method.upper(),
+                zscore_features,
+                x.shape[0],
+                unique_subjects.size,
+                x.shape[1],
+            )
+            result, _ = classify_task_decoding(
+                x,
+                y,
+                subject_ids,
+                label=ds.label,
                 method=method,
-                binary=binary,
                 zscore_features=zscore_features,
                 n_splits=n_splits,
                 n_repeats=n_repeats,
                 seed=seed,
                 device=device,
+            )
+            log.info(
+                "Bal. Acc.: %.4f +/- %.4f (95%% CI [%.4f, %.4f])",
+                result.mean_bacc,
+                result.std_bacc,
+                result.ci_lo,
+                result.ci_hi,
             )
             results.append(result)
 

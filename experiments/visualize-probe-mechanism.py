@@ -17,14 +17,12 @@ from classifylib import (
     ClassificationMethod,
     ClassificationResult,
     FeatureDataset,
-    bootstrap_balanced_accuracy_ci,
-    bootstrap_identification_ci,
+    classify_fingerprinting,
+    classify_task_decoding,
     flatten_feature_datasets,
     load_feature_datasets,
     make_subject_index,
-    run_leave_one_condition_out_cv,
     run_ridge_cv,
-    run_subject_grouped_cv,
     select_feature_group,
 )
 from nneuroutil.helpers import FuzzyChoiceAction
@@ -115,72 +113,6 @@ class BlockScores(NamedTuple):
     fp: tuple[ClassificationResult, ...]
 
 
-def evaluate_task_decoding(
-    ds: FeatureDataset,
-    *,
-    name: str,
-    method: ClassificationMethod,
-    n_splits: int,
-    n_repeats: int,
-    seed: int,
-    device: torch.device | str,
-) -> ClassificationResult:
-    x, y, subject_ids = flatten_feature_datasets(ds)
-    oof_preds, fold_bacc = run_subject_grouped_cv(
-        x,
-        y,
-        subject_ids,
-        nclasses=len(ds.class_names),
-        method=method,
-        zscore_features=True,
-        n_splits=n_splits,
-        n_repeats=n_repeats,
-        seed=seed,
-        device=device,
-    )
-    ci_lo, ci_hi = bootstrap_balanced_accuracy_ci(y, oof_preds, subject_ids, seed=seed)
-    return ClassificationResult(
-        label=name,
-        nfeatures=x.shape[1],
-        nclasses=len(ds.class_names),
-        method=method,
-        mean_bacc=float(np.mean(fold_bacc)),
-        std_bacc=float(np.std(fold_bacc)),
-        ci_lo=float(ci_lo),
-        ci_hi=float(ci_hi),
-    )
-
-
-def evaluate_fingerprinting(
-    ds: FeatureDataset,
-    *,
-    name: str,
-    method: ClassificationMethod,
-    seed: int,
-    device: torch.device | str,
-) -> ClassificationResult:
-    x = ds.to_tensor()
-    _, nsubjects, nfeatures = x.shape
-    oof_preds, fold_bacc = run_leave_one_condition_out_cv(
-        x,
-        method=method,
-        zscore_features=True,
-        seed=seed,
-        device=device,
-    )
-    ci_lo, ci_hi = bootstrap_identification_ci(oof_preds, seed=seed)
-    return ClassificationResult(
-        label=name,
-        nfeatures=nfeatures,
-        nclasses=nsubjects,
-        method=method,
-        mean_bacc=float(np.mean(fold_bacc)),
-        std_bacc=float(np.std(fold_bacc)),
-        ci_lo=float(ci_lo),
-        ci_hi=float(ci_hi),
-    )
-
-
 def evaluate_blocks(
     ds_ae: FeatureDataset,
     *,
@@ -197,37 +129,41 @@ def evaluate_blocks(
     results: list[BlockScores] = []
     for name, sub in iter_blocks(ds_ae):
         nfeatures = int(sub.x[0].shape[1])
+        x_task, y_task, subject_ids = flatten_feature_datasets(sub)
+        x_fp = sub.to_tensor()
 
         log.info("Evaluating block '%s' (%d features)...", name, nfeatures)
-        tk_results = []
-        fp_results = []
+        tasks = []
+        fps = []
         for method in methods:
-            result = evaluate_task_decoding(
-                sub,
-                name=name,
+            result, _ = classify_task_decoding(
+                x_task,
+                y_task,
+                subject_ids,
+                label=name,
                 method=method,
                 n_splits=n_splits,
                 n_repeats=n_repeats,
                 seed=seed,
                 device=device,
             )
-            tk_results.append(result)
+            tasks.append(result)
 
-            result = evaluate_fingerprinting(
-                sub,
-                name=name,
+            result, _ = classify_fingerprinting(
+                x_fp,
+                label=name,
                 method=method,
                 seed=seed,
                 device=device,
             )
-            fp_results.append(result)
+            fps.append(result)
 
         results.append(
             BlockScores(
                 name=name,
                 nfeatures=nfeatures,
-                task=tuple(tk_results),
-                fp=tuple(fp_results),
+                task=tuple(tasks),
+                fp=tuple(fps),
             )
         )
 
