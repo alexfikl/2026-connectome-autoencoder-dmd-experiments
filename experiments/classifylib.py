@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from typing import Any, Literal, NamedTuple, cast
 
 import numpy as np
@@ -264,8 +264,8 @@ def fit_and_predict(
     x_train: list[Array2D[np.floating[Any]]],
     y_train: list[int],
     x_test: Array2D[np.floating[Any]],
-    method: ClassificationMethod,
     *,
+    method: ClassificationMethod = "mlp",
     seed: int | None = None,
     device: torch.device | str | None = None,
 ) -> Array1D[np.integer[Any]]:
@@ -325,10 +325,10 @@ def run_subject_grouped_cv(
     subject_ids: Array1D[np.integer[Any]],
     *,
     nclasses: int,
-    method: ClassificationMethod,
-    zscore_features: bool,
-    n_splits: int,
-    n_repeats: int,
+    method: ClassificationMethod = "mlp",
+    zscore_features: bool = True,
+    n_splits: int = 5,
+    n_repeats: int = 5,
     seed: int | None = None,
     device: torch.device | str | None = None,
 ) -> GroupedCVResult:
@@ -364,7 +364,7 @@ def run_subject_grouped_cv(
             [x_train[y_train == c] for c in range(nclasses)],
             list(range(nclasses)),
             x_test,
-            method,
+            method=method,
             seed=(seed + fold_idx) if seed is not None else seed,
             device=device,
         )
@@ -384,40 +384,38 @@ def run_subject_grouped_cv(
 def run_leave_one_condition_out_cv(
     x: Array3D[np.floating[Any]],
     *,
-    method: ClassificationMethod,
-    zscore_features: bool,
-    seed: int,
-    device: torch.device | str,
+    method: ClassificationMethod = "mlp",
+    zscore_features: bool = True,
+    seed: int | None = None,
+    device: torch.device | str | None = None,
 ) -> GroupedCVResult:
     """Run leave-one-condition-out CV on ``(ntasks, nsubjects, nfeatures)``."""
     from sklearn.metrics import balanced_accuracy_score
     from sklearn.preprocessing import StandardScaler
 
     ntasks, nsubjects, nfeatures = x.shape
-    y_train_list = list(range(nsubjects))
+    y_train = list(range(nsubjects))
     y_test = np.arange(nsubjects, dtype=np.int64)
 
     oof_preds = np.empty((ntasks, nsubjects), dtype=np.int64)
     fold_bacc = np.empty(ntasks, dtype=np.float64)
 
     for t in range(ntasks):
-        x_tr_np = np.delete(x, t, axis=0)
-        x_te_np = x[t]
+        x_train = np.delete(x, t, axis=0)
+        x_test = x[t]
 
         if zscore_features:
             scaler = StandardScaler()
-            tr_flat = scaler.fit_transform(np.reshape(x_tr_np, (-1, nfeatures)))
-            x_te_np = scaler.transform(x_te_np)
-            x_tr_np = np.reshape(tr_flat, (ntasks - 1, nsubjects, nfeatures))
-
-        x_train_list = [x_tr_np[:, s, :] for s in range(nsubjects)]
+            x_train = scaler.fit_transform(np.reshape(x_train, (-1, nfeatures)))
+            x_train = np.reshape(x_train, (ntasks - 1, nsubjects, nfeatures))
+            x_test = scaler.transform(x_test)
 
         y_pred = fit_and_predict(
-            x_train_list,
-            y_train_list,
-            x_te_np,
-            method,
-            seed=seed + t,
+            [x_train[:, s, :] for s in range(nsubjects)],
+            y_train,
+            x_test,
+            method=method,
+            seed=(seed + t) if seed is not None else seed,
             device=device,
         )
 
@@ -449,40 +447,10 @@ def make_subject_index(subject_ids: Array1D[np.integer[Any]]) -> SubjectIndex:
     )
 
 
-def make_subject_rows(
-    subject_ids: Array1D[np.integer[Any]],
-) -> list[Array1D[np.integer[Any]]]:
-    """Return the row indices of each subject in ``subject_ids``."""
-    return make_subject_index(subject_ids).rows
-
-
 # }}}
 
 
-# {{{ bootstrap_subject_ci
-
-
-def _bootstrap_subject_ci(
-    metric: Callable[[Array1D[np.integer[Any]]], float],
-    n_subjects: int,
-    *,
-    n_bootstrap: int = 1000,
-    seed: int = 42,
-) -> tuple[float, float]:
-    """Compute a 95% bootstrap CI by resampling subjects.
-
-    :arg metric: callable that takes the sampled subject indices and returns
-        the score of interest.
-    """
-    rng = np.random.default_rng(seed)
-
-    vals = np.empty(n_bootstrap, dtype=np.float64)
-    for b in range(n_bootstrap):
-        sampled = rng.integers(0, n_subjects, size=n_subjects)
-        vals[b] = metric(sampled)
-
-    lo, hi = np.percentile(vals, [2.5, 97.5])
-    return lo, hi
+# {{{ bootstrap
 
 
 def bootstrap_balanced_accuracy_ci(
@@ -496,18 +464,20 @@ def bootstrap_balanced_accuracy_ci(
     """Compute 95% bootstrap CI over subjects for balanced accuracy."""
     from sklearn.metrics import balanced_accuracy_score
 
-    subj_rows = make_subject_rows(subject_ids)
+    subj_rows = make_subject_index(subject_ids).rows
     n_repeats = oof_preds.shape[0]
+    rng = np.random.default_rng(seed)
 
-    def metric(sampled: Array1D[np.integer[Any]]) -> float:
+    vals = np.empty(n_bootstrap, dtype=np.float64)
+    for b in range(n_bootstrap):
+        sampled = rng.integers(0, len(subj_rows), size=len(subj_rows))
         idx = np.concatenate([subj_rows[s] for s in sampled])
-        return balanced_accuracy_score(
+        vals[b] = balanced_accuracy_score(
             np.tile(y_true[idx], n_repeats), np.ravel(oof_preds[:, idx])
         )
 
-    return _bootstrap_subject_ci(
-        metric, len(subj_rows), n_bootstrap=n_bootstrap, seed=seed
-    )
+    lo, hi = np.percentile(vals, [2.5, 97.5])
+    return lo, hi
 
 
 def bootstrap_identification_ci(
@@ -519,11 +489,15 @@ def bootstrap_identification_ci(
     """Compute 95% bootstrap CI over subjects for identification accuracy."""
     _ntasks, nsubjects = oof_preds.shape
     correct = oof_preds == np.arange(nsubjects)[None, :]
+    rng = np.random.default_rng(seed)
 
-    def metric(sampled: Array1D[np.integer[Any]]) -> float:
-        return np.mean(np.take(correct, sampled, axis=1))
+    vals = np.empty(n_bootstrap, dtype=np.float64)
+    for b in range(n_bootstrap):
+        sampled = rng.integers(0, nsubjects, size=nsubjects)
+        vals[b] = np.mean(np.take(correct, sampled, axis=1))
 
-    return _bootstrap_subject_ci(metric, nsubjects, n_bootstrap=n_bootstrap, seed=seed)
+    lo, hi = np.percentile(vals, [2.5, 97.5])
+    return lo, hi
 
 
 # }}}
