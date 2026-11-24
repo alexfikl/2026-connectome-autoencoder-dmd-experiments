@@ -19,7 +19,6 @@ from classifylib import (
     flatten_feature_datasets,
     format_latex_table,
     load_feature_datasets,
-    make_subject_rows,
     run_subject_grouped_cv,
     save_summary,
     select_feature_group,
@@ -104,7 +103,6 @@ def evaluate_dataset(
     zscore_features: bool,
     n_splits: int,
     n_repeats: int,
-    n_permutations: int,
     seed: int,
     device: torch.device | str,
     group: int | None = None,
@@ -150,39 +148,12 @@ def evaluate_dataset(
     std_bacc = np.std(fold_bacc)
     ci_lo, ci_hi = bootstrap_balanced_accuracy_ci(y, oof_preds, subject_ids, seed=seed)
 
-    p_val: float | None = None
-    perm_str = ""
-    if n_permutations > 0:
-        rng = np.random.default_rng(seed)
-        null_baccs = np.empty(n_permutations, dtype=np.float64)
-        subj_rows = make_subject_rows(subject_ids)
-        for p in range(n_permutations):
-            y_perm = np.copy(y)
-            for rows in subj_rows:
-                y_perm[rows] = rng.permutation(y_perm[rows])
-            _, p_bacc = run_subject_grouped_cv(
-                x,
-                y_perm,
-                subject_ids,
-                nclasses=nclasses,
-                method=method,
-                zscore_features=zscore_features,
-                n_splits=n_splits,
-                n_repeats=n_repeats,
-                seed=seed + 1000 + p,
-                device=device,
-            )
-            null_baccs[p] = np.mean(p_bacc)
-        p_val = (np.sum(null_baccs >= mean_bacc) + 1) / (n_permutations + 1)
-        perm_str = f" | perm p={p_val:.4g} (null={np.mean(null_baccs):.4f})"
-
     log.info(
-        "Bal. Acc.: %.4f +/- %.4f (95%% CI [%.4f, %.4f])%s",
+        "Bal. Acc.: %.4f +/- %.4f (95%% CI [%.4f, %.4f])",
         mean_bacc,
         std_bacc,
         ci_lo,
         ci_hi,
-        perm_str,
     )
 
     result = ClassificationResult(
@@ -194,7 +165,6 @@ def evaluate_dataset(
         std_bacc=std_bacc,
         ci_lo=ci_lo,
         ci_hi=ci_hi,
-        p_val=p_val,
     )
 
     return result, y, oof_preds, class_names
@@ -208,7 +178,6 @@ def main(
     zscore_features: bool = True,
     n_splits: int = 5,
     n_repeats: int = 5,
-    n_permutations: int = 0,
     seed: int = 42,
     group: int | None = None,
     outfile: pathlib.Path | None = None,
@@ -227,7 +196,6 @@ def main(
             zscore_features=zscore_features,
             n_splits=n_splits,
             n_repeats=n_repeats,
-            n_permutations=n_permutations,
             seed=seed,
             device=device,
             group=group,
@@ -267,7 +235,6 @@ def summary(
     zscore_features: bool = True,
     n_splits: int = 5,
     n_repeats: int = 5,
-    n_permutations: int = 0,
     seed: int = 42,
     outfile: pathlib.Path | None = None,
     overwrite: bool = False,
@@ -285,7 +252,6 @@ def summary(
                 zscore_features=zscore_features,
                 n_splits=n_splits,
                 n_repeats=n_repeats,
-                n_permutations=n_permutations,
                 seed=seed,
                 device=device,
             )
@@ -296,7 +262,6 @@ def summary(
                 zscore_features=zscore_features,
                 n_splits=n_splits,
                 n_repeats=n_repeats,
-                n_permutations=n_permutations,
                 seed=seed,
                 device=device,
             )
@@ -354,16 +319,10 @@ if __name__ == "__main__":
         help="Number of repeated CV runs",
     )
     common.add_argument(
-        "--n-permutations",
-        type=int,
-        default=0,
-        help="Number of subject-level label permutations (0 to skip)",
-    )
-    common.add_argument(
         "--seed",
         type=int,
         default=42,
-        help="Random seed for CV splits and permutations",
+        help="Random seed for CV splits, bootstraps, and MLP initialization",
     )
     common.add_argument(
         "--no-zscore",
@@ -451,7 +410,6 @@ if __name__ == "__main__":
                     zscore_features=args.zscore,
                     n_splits=args.n_splits,
                     n_repeats=args.n_repeats,
-                    n_permutations=args.n_permutations,
                     seed=args.seed,
                     group=args.group,
                     overwrite=args.force,
@@ -465,7 +423,6 @@ if __name__ == "__main__":
                     zscore_features=args.zscore,
                     n_splits=args.n_splits,
                     n_repeats=args.n_repeats,
-                    n_permutations=args.n_permutations,
                     seed=args.seed,
                     outfile=args.outfile,
                     overwrite=args.force,

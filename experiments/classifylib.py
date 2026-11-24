@@ -241,9 +241,6 @@ class ClassificationResult(NamedTuple):
     ci_hi: float
     """Upper bound of the bootstrap confidence interval for balanced accuracy."""
 
-    p_val: float | None = None
-    """Permutation test p-value, or ``None`` when not computed."""
-
     @property
     def chance(self) -> float:
         return 1.0 / self.nclasses
