@@ -12,7 +12,6 @@ import torch
 from torch import nn
 from torch.utils.data import TensorDataset
 
-import nneuroutil.array_api_extras as xpx
 from nneuroutil.data import SlicedDataLoader
 from nneuroutil.helpers import TicTocTimer
 
@@ -141,17 +140,12 @@ def classify_multilayer_perceptron(
     learning_rate_init: float = 1.0e-3,
     batch_size: int = 4096,
     max_iter: int = 200,
-    early_stopping: bool = False,
-    validation_fraction: float = 0.1,
-    n_iter_no_change: int = 10,
-    tol: float = 1.0e-4,
-    rng: xpx.RandomGenerator | None = None,
 ) -> MultilayerPerceptronClassifier:
     """Train a multi-layer perceptron (MLP) classifier for multi-class data.
 
     This mirrors the essential options of :class:`sklearn.neural_network.MLPClassifier`:
     the network is trained with Adam on a categorical cross-entropy loss with an
-    optional L2 penalty and optional early stopping on a held-out validation set.
+    optional L2 penalty.
 
     :arg features: sequence of 2D tensors containing sample features for each
         class, each of shape ``(n_samples_i, nfeatures)``.
@@ -166,13 +160,6 @@ def classify_multilayer_perceptron(
     :arg learning_rate_init: initial learning rate for the Adam optimizer.
     :arg batch_size: number of samples per gradient step.
     :arg max_iter: maximum number of epochs.
-    :arg early_stopping: if *True*, hold out a fraction of the training data and
-        stop when the validation loss stops improving.
-    :arg validation_fraction: fraction of the training data held out for early
-        stopping when *early_stopping* is *True*.
-    :arg n_iter_no_change: number of epochs without improvement before stopping.
-    :arg tol: minimum improvement in the validation loss to count as progress.
-    :arg random_state: seed used for the train/validation split and batching.
     """
 
     if len(features) != len(labels):
@@ -209,11 +196,6 @@ def classify_multilayer_perceptron(
     if max_iter <= 0:
         raise ValueError(f"'max_iter' must be positive: {max_iter}")
 
-    if not 0.0 <= validation_fraction < 1.0:
-        raise ValueError(
-            f"'validation_fraction' must be in [0, 1): {validation_fraction}"
-        )
-
     # concatenate the per-class features and build the matching index targets
     x = torch.cat(list(features), dim=0)
     y = torch.cat([
@@ -231,33 +213,17 @@ def classify_multilayer_perceptron(
         device=device,
     )
 
-    # {{{ split a validation set for early stopping
-
-    x_train, y_train = x, y
-    x_validate = y_validate = None
-    if early_stopping and validation_fraction > 0.0:
-        from nneuroutil.data import random_split
-
-        (x_train, y_train), (x_validate, y_validate) = random_split(
-            (x, y), (1.0 - validation_fraction, validation_fraction), rng=rng
-        )
-
-    # }}}
-
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate_init)
 
+    # NOTE: a 'torch.Generator' is not seeded by 'torch.manual_seed', so draw a
+    # seed from the global RNG to keep the batch order reproducible
     generator = torch.Generator(device=device)
+    generator.manual_seed(int(torch.randint(0, 2**62, (1,), device="cpu").item()))
 
-    n = x_train.shape[0]
-    best_loss = float("inf")
-    best_state: dict[str, torch.Tensor] | None = None
-    best_epoch = -1
-    num_bad_epochs = 0
+    n = x.shape[0]
 
     for epoch in range(max_iter):
-        # {{{ training
-
         model.train()
         perm = torch.randperm(n, generator=generator, device=device)
 
@@ -272,7 +238,7 @@ def classify_multilayer_perceptron(
             # NOTE: match scikit-learn's L2 penalty, which only regularizes the
             # weight matrices and is scaled by the batch size, We can't use
             # torch's weight_decay here, because that regularizes differently
-            loss = criterion(model(x_train[idx]), y_train[idx])
+            loss = criterion(model(x[idx]), y[idx])
             loss = loss + 0.5 * alpha * _l2_penalty(model) / n_batch
 
             # update
@@ -285,49 +251,7 @@ def classify_multilayer_perceptron(
 
         loss_train = loss_epoch / n
 
-        # }}}
-
-        # {{{ validation
-
-        if x_validate is not None and y_validate is not None:
-            model.eval()
-            with torch.no_grad():
-                loss_validate = criterion(model(x_validate), y_validate).item()
-
-            log.info(
-                "[%03d/%03d] train %.5e validate %.5e",
-                epoch + 1,
-                max_iter,
-                loss_train,
-                loss_validate,
-            )
-
-            if loss_validate < best_loss - tol:
-                best_loss = loss_validate
-                best_state = copy.deepcopy(model.state_dict())
-                best_epoch = epoch + 1
-                num_bad_epochs = 0
-            else:
-                num_bad_epochs += 1
-
-            if num_bad_epochs >= n_iter_no_change:
-                log.info(
-                    "Early stopping at epoch %03d (best %03d, loss %.5e)",
-                    epoch + 1,
-                    best_epoch,
-                    best_loss,
-                )
-                break
-        else:
-            log.info("[%03d/%03d] train %.5e", epoch + 1, max_iter, loss_train)
-
-        # }}}
-
-    if best_state is not None:
-        model.load_state_dict(best_state)
-        log.info(
-            "Restored best model from epoch %03d (loss %.5e)", best_epoch, best_loss
-        )
+        log.info("[%03d/%03d] train %.5e", epoch + 1, max_iter, loss_train)
 
     return MultilayerPerceptronClassifier(
         model, class_labels, dtype=dtype, device=device

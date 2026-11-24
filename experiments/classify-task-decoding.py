@@ -75,8 +75,9 @@ def fit_and_predict(
         clf = classify_multilayer_perceptron(
             [xi.float() for xi in x_train_list],
             y_train_list,
+            alpha=1.0,
             learning_rate_init=1.0e-2,
-            max_iter=400,
+            max_iter=200,
         )
         return clf.predict(x_test)
 
