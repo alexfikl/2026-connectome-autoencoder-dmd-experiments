@@ -441,16 +441,28 @@ def summary(
 
         rows.append((res_lda, res_mlp))
 
-    table = format_latex_table(rows)
-    if outfile is None:
-        print(table)
-    else:
+    print(format_latex_table(rows))
+
+    if outfile is not None and rows:
         if outfile.exists() and not overwrite:
             log.error("Output file '%s' exists (use --force to overwrite).", outfile)
             return 1
 
-        outfile.write_text(f"{table}\n", encoding="utf-8")
-        log.info("Wrote summary table to '%s'.", outfile)
+        np.savez(
+            outfile,
+            labels=np.array([r[0].label for r in rows]),
+            nfeatures=np.array([r[0].nfeatures for r in rows], dtype=np.int64),
+            chance=np.float64(1.0 / rows[0][0].nsubjects),
+            lda_mean=np.array([r[0].mean_bacc for r in rows], dtype=np.float64),
+            lda_std=np.array([r[0].std_bacc for r in rows], dtype=np.float64),
+            lda_ci_lo=np.array([r[0].ci_lo for r in rows], dtype=np.float64),
+            lda_ci_hi=np.array([r[0].ci_hi for r in rows], dtype=np.float64),
+            mlp_mean=np.array([r[1].mean_bacc for r in rows], dtype=np.float64),
+            mlp_std=np.array([r[1].std_bacc for r in rows], dtype=np.float64),
+            mlp_ci_lo=np.array([r[1].ci_lo for r in rows], dtype=np.float64),
+            mlp_ci_hi=np.array([r[1].ci_hi for r in rows], dtype=np.float64),
+        )
+        log.info("Wrote summary arrays to '%s'.", outfile)
 
     return 0
 
@@ -541,7 +553,7 @@ if __name__ == "__main__":
         "--outfile",
         type=pathlib.Path,
         default=None,
-        help="Optional output .tex file (defaults to stdout)",
+        help="Optional output .npz file saving summary arrays for plotting",
     )
 
     args = parser.parse_args()
