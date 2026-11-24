@@ -15,9 +15,9 @@ from classifylib import (
     ClassificationMethod,
     ClassificationResult,
     bootstrap_balanced_accuracy_ci,
-    fit_and_predict,
     format_latex_table,
     make_subject_rows,
+    run_subject_grouped_cv,
     save_summary,
 )
 from commonlib import (
@@ -97,69 +97,6 @@ def plot_confusion(
 # }}}
 
 
-def run_cross_validation(
-    x: Array2D[np.floating[Any]],
-    y: Array1D[np.integer[Any]],
-    groups: Array1D[np.integer[Any]],
-    *,
-    nclasses: int,
-    method: ClassificationMethod,
-    zscore_features: bool,
-    n_splits: int,
-    n_repeats: int,
-    seed: int,
-    device: torch.device | str,
-) -> tuple[Array2D[np.integer[Any]], list[float], list[float]]:
-    """Run repeated subject-grouped K-fold CV on ``(nsamples, nfeatures)``."""
-    from sklearn.metrics import balanced_accuracy_score, f1_score
-    from sklearn.model_selection import RepeatedKFold
-    from sklearn.preprocessing import StandardScaler
-
-    unique_subjects = np.unique(groups)
-    rkf = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=seed)
-
-    nsamples = x.shape[0]
-    oof_preds = np.empty((n_repeats, nsamples), dtype=np.int64)
-    fold_bacc: list[float] = []
-    fold_f1: list[float] = []
-
-    for fold_idx, (train_idx, test_idx) in enumerate(rkf.split(unique_subjects)):
-        rep = fold_idx // n_splits
-        train_mask = np.isin(groups, unique_subjects[train_idx])
-        test_mask = np.isin(groups, unique_subjects[test_idx])
-
-        x_tr_np = x[train_mask]
-        y_tr_np = y[train_mask]
-        x_te_np = x[test_mask]
-        y_te_np = y[test_mask]
-
-        if zscore_features:
-            scaler = StandardScaler()
-            x_tr_np = scaler.fit_transform(x_tr_np)
-            x_te_np = scaler.transform(x_te_np)
-
-        x_train_list = [
-            torch.from_numpy(x_tr_np[y_tr_np == c]).to(device) for c in range(nclasses)
-        ]
-        y_train_list = list(range(nclasses))
-        x_test_t = torch.from_numpy(x_te_np).to(device)
-
-        y_pred_t = fit_and_predict(
-            x_train_list,
-            y_train_list,
-            x_test_t,
-            method,
-            seed=seed + fold_idx,
-        )
-        y_pred = y_pred_t.detach().cpu().numpy()
-
-        oof_preds[rep, test_mask] = y_pred
-        fold_bacc.append(balanced_accuracy_score(y_te_np, y_pred))
-        fold_f1.append(f1_score(y_te_np, y_pred, average="macro"))
-
-    return oof_preds, fold_bacc, fold_f1
-
-
 def evaluate_dataset(
     filename: pathlib.Path,
     *,
@@ -197,7 +134,7 @@ def evaluate_dataset(
         x.shape[1],
     )
 
-    oof_preds, fold_bacc, fold_f1 = run_cross_validation(
+    oof_preds, fold_bacc, fold_f1 = run_subject_grouped_cv(
         x,
         y,
         groups,
@@ -225,7 +162,7 @@ def evaluate_dataset(
             y_perm = np.copy(y)
             for rows in subj_rows:
                 y_perm[rows] = rng.permutation(y_perm[rows])
-            _, p_bacc, _ = run_cross_validation(
+            _, p_bacc, _ = run_subject_grouped_cv(
                 x,
                 y_perm,
                 groups,

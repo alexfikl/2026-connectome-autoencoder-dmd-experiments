@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections.abc import Sequence
-from typing import Any, get_args
+from typing import get_args
 
 import numpy as np
 import torch
@@ -15,12 +15,12 @@ from classifylib import (
     ClassificationMethod,
     ClassificationResult,
     bootstrap_identification_ci,
-    fit_and_predict,
     format_latex_table,
+    run_leave_one_condition_out_cv,
     save_summary,
+    to_tensor,
 )
-from commonlib import FeatureDataset, load_feature_datasets, select_feature_group
-from nneuroutil.typing import Array2D, Array3D
+from commonlib import load_feature_datasets, select_feature_group
 
 log = logging.getLogger("lib.classify_subject_fingerprinting")
 
@@ -39,64 +39,6 @@ Examples:
     > {SCRIPT_PATH.name} run --method lda data/dataset-features-matrix.npz
     > {SCRIPT_PATH.name} summary --device cuda data/dataset-features-*.npz
 """
-
-
-def to_tensor(ds: FeatureDataset) -> Array3D[np.floating[Any]]:
-    """Stack matched-subject features to ``(ntasks, nsubjects, nfeatures)``."""
-    shapes = {np.asarray(x).shape for x in ds.x}
-    if len(shapes) != 1:
-        raise ValueError("expected all classes to have the same shape")
-
-    return np.stack([np.asarray(x) for x in ds.x], axis=0)
-
-
-def run_cross_validation(
-    x: Array3D[np.floating[Any]],
-    *,
-    method: ClassificationMethod,
-    zscore_features: bool,
-    seed: int,
-    device: torch.device | str,
-) -> tuple[Array2D[np.integer[Any]], list[float]]:
-    """Run leave-one-condition-out CV on ``(ntasks, nsubjects, nfeatures)``."""
-    from sklearn.metrics import balanced_accuracy_score
-    from sklearn.preprocessing import StandardScaler
-
-    ntasks, nsubjects, nfeatures = x.shape
-    y_train_list = list(range(nsubjects))
-    y_test = np.arange(nsubjects, dtype=np.int64)
-
-    oof_preds = np.empty((ntasks, nsubjects), dtype=np.int64)
-    fold_bacc: list[float] = []
-
-    for t in range(ntasks):
-        x_tr_np = np.delete(x, t, axis=0)
-        x_te_np = x[t]
-
-        if zscore_features:
-            scaler = StandardScaler()
-            tr_flat = scaler.fit_transform(np.reshape(x_tr_np, (-1, nfeatures)))
-            x_te_np = scaler.transform(x_te_np)
-            x_tr_np = np.reshape(tr_flat, (ntasks - 1, nsubjects, nfeatures))
-
-        x_train_list = [
-            torch.from_numpy(x_tr_np[:, s, :]).to(device) for s in range(nsubjects)
-        ]
-        x_test_t = torch.from_numpy(x_te_np).to(device)
-
-        y_pred_t = fit_and_predict(
-            x_train_list,
-            y_train_list,
-            x_test_t,
-            method,
-            seed=seed + t,
-        )
-        y_pred = y_pred_t.detach().cpu().numpy()
-
-        oof_preds[t] = y_pred
-        fold_bacc.append(float(balanced_accuracy_score(y_test, y_pred)))
-
-    return oof_preds, fold_bacc
 
 
 def evaluate_dataset(
@@ -129,7 +71,7 @@ def evaluate_dataset(
         nfeatures,
     )
 
-    oof_preds, fold_bacc = run_cross_validation(
+    oof_preds, fold_bacc = run_leave_one_condition_out_cv(
         x,
         method=method,
         zscore_features=zscore_features,
@@ -151,7 +93,7 @@ def evaluate_dataset(
             for t in range(ntasks):
                 x_perm[t] = x_perm[t][rng.permutation(nsubjects)]
 
-            _, p_bacc = run_cross_validation(
+            _, p_bacc = run_leave_one_condition_out_cv(
                 x_perm,
                 method=method,
                 zscore_features=zscore_features,

@@ -6,12 +6,11 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections.abc import Sequence
-from typing import Any, NamedTuple
 
 import numpy as np
 
+from classifylib import RegressionResult, make_subject_index, run_ridge_cv
 from commonlib import flatten_feature_datasets, load_feature_datasets
-from nneuroutil.typing import Array1D, Array2D
 from nneuroutil.visualization import figure
 
 log = logging.getLogger("lib.visualize_scale_regression")
@@ -32,107 +31,6 @@ Example:
         data/dataset-features-dmd.npz \\
         data/dataset-features-ae-dmd.npz
 """
-
-
-# {{{ regression
-
-
-class RegressionResult(NamedTuple):
-    name: str
-    target_name: str
-    r2_mean: float
-    r2_ci_lo: float
-    r2_ci_hi: float
-    y_true: Array1D[np.floating[Any]]
-    y_pred: Array1D[np.floating[Any]]
-    is_structural: Array1D[np.bool]
-
-
-class SubjectIndex(NamedTuple):
-    unique: Array1D[np.integer[Any]]
-    idx: Array1D[np.integer[Any]]
-    rows: list[Array1D[np.integer[Any]]]
-
-
-def make_subject_index(groups: Array1D[np.integer[Any]]) -> SubjectIndex:
-    """Map each sample to its subject and collect the rows of each subject."""
-    unique, idx = np.unique(groups, return_inverse=True)
-    return SubjectIndex(
-        unique=unique,
-        idx=idx,
-        rows=[np.flatnonzero(idx == s) for s in range(unique.size)],
-    )
-
-
-def run_ridge_cv(
-    x: Array2D[np.floating[Any]],
-    y: Array1D[np.floating[Any]],
-    subjects: SubjectIndex,
-    is_structural: Array1D[np.bool],
-    *,
-    name: str,
-    target_name: str,
-    n_splits: int = 5,
-    n_repeats: int = 5,
-    n_bootstrap: int = 1000,
-    seed: int = 42,
-) -> RegressionResult:
-    """Run repeated subject-grouped K-fold Ridge regression."""
-    from sklearn.linear_model import RidgeCV
-    from sklearn.metrics import r2_score
-    from sklearn.model_selection import RepeatedKFold
-    from sklearn.preprocessing import StandardScaler
-
-    rkf = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=seed)
-    alphas = np.logspace(-3, 5, 25)
-
-    nsamples = x.shape[0]
-    oof_pred = np.empty((n_repeats, nsamples), dtype=y.dtype)
-    fold_r2 = np.empty(n_splits * n_repeats, dtype=x.dtype)
-
-    # go through all the folds: fit + compute the R2 scores
-    for fold_idx, (train_idx, test_idx) in enumerate(rkf.split(subjects.unique)):
-        rep = fold_idx // n_splits
-        train_mask = np.isin(subjects.idx, train_idx)
-        test_mask = np.isin(subjects.idx, test_idx)
-
-        scaler = StandardScaler()
-        x_tr_s = scaler.fit_transform(x[train_mask])
-        x_te_s = scaler.transform(x[test_mask])
-
-        reg = RidgeCV(alphas=alphas, cv=min(5, train_idx.size))
-        reg.fit(x_tr_s, y[train_mask])
-        pred = reg.predict(x_te_s)
-
-        oof_pred[rep, test_mask] = pred
-        fold_r2[fold_idx] = r2_score(y[test_mask], pred)
-
-    y_pred_mean = np.mean(oof_pred, axis=0)
-
-    # compute confidence intervals
-    rng = np.random.default_rng(seed)
-    boot_r2 = np.empty(n_bootstrap, dtype=x.dtype)
-
-    for b in range(n_bootstrap):
-        sampled = rng.integers(0, len(subjects.rows), size=len(subjects.rows))
-        idx = np.concatenate([subjects.rows[s] for s in sampled])
-        boot_r2[b] = r2_score(y[idx], y_pred_mean[idx])
-
-    ci_lo, ci_hi = np.percentile(boot_r2, [2.5, 97.5])
-
-    return RegressionResult(
-        name=name,
-        target_name=target_name,
-        r2_mean=np.mean(fold_r2),
-        r2_ci_lo=ci_lo,
-        r2_ci_hi=ci_hi,
-        y_true=y,
-        y_pred=y_pred_mean,
-        is_structural=is_structural,
-    )
-
-
-# }}}
 
 
 # {{{ plots

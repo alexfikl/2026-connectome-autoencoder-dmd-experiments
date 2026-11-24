@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import logging
 import math
 import pathlib
@@ -17,6 +16,11 @@ import torch
 from classifylib import (
     bootstrap_balanced_accuracy_ci,
     bootstrap_identification_ci,
+    make_subject_index,
+    run_leave_one_condition_out_cv,
+    run_ridge_cv,
+    run_subject_grouped_cv,
+    to_tensor,
 )
 from commonlib import (
     FeatureDataset,
@@ -59,14 +63,12 @@ _BLOCK_SHORT_NAMES: dict[str, str] = {
 }
 
 
-def _import_sibling(name: str) -> Any:
-    path = SCRIPT_PATH.parent / name
-    spec = importlib.util.spec_from_file_location(name.removesuffix(".py"), path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"could not load sibling module: '{path}'")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+def _block_selections(ds: FeatureDataset) -> list[tuple[str, int | None]]:
+    """Return the named feature blocks used by the mechanism analysis."""
+    return [
+        *((descr, i) for i, descr in enumerate(ds.descrs)),
+        ("Full AE-DMD", None),
+    ]
 
 
 def _reconstruct_matrices(ds: FeatureDataset) -> Array3D[np.floating[Any]]:
@@ -98,7 +100,6 @@ class BlockScores:
 
 
 def _eval_task_block(
-    task_mod: Any,
     ds: FeatureDataset,
     *,
     method: ClassificationMethod,
@@ -108,7 +109,7 @@ def _eval_task_block(
     device: torch.device | str,
 ) -> tuple[float, float, float, float]:
     x, y, groups = flatten_feature_datasets(ds)
-    oof_preds, fold_bacc, _ = task_mod.run_cross_validation(
+    oof_preds, fold_bacc, _ = run_subject_grouped_cv(
         x,
         y,
         groups,
@@ -130,15 +131,14 @@ def _eval_task_block(
 
 
 def _eval_fp_block(
-    fp_mod: Any,
     ds: FeatureDataset,
     *,
     method: ClassificationMethod,
     seed: int,
     device: torch.device | str,
 ) -> tuple[float, float, float, float]:
-    x = fp_mod.to_tensor(ds)
-    oof_preds, fold_bacc = fp_mod.run_cross_validation(
+    x = to_tensor(ds)
+    oof_preds, fold_bacc = run_leave_one_condition_out_cv(
         x,
         method=method,
         zscore_features=True,
@@ -163,13 +163,7 @@ def evaluate_blocks(
     device: torch.device | str = "cpu",
 ) -> list[BlockScores]:
     """Evaluate 7-way task and fingerprinting per Family I block."""
-    task_mod = _import_sibling("classify-task-decoding.py")
-    fp_mod = _import_sibling("classify-subject-fingerprinting.py")
-
-    selections: list[tuple[str, int | None]] = [
-        *((descr, i) for i, descr in enumerate(ds_ae.descrs)),
-        ("Full AE-DMD", None),
-    ]
+    selections = _block_selections(ds_ae)
 
     results: list[BlockScores] = []
     for name, idx in selections:
@@ -182,7 +176,6 @@ def evaluate_blocks(
                 name=name,
                 nfeatures=nfeat,
                 task_lda=_eval_task_block(
-                    task_mod,
                     sub,
                     method="lda",
                     n_splits=n_splits,
@@ -191,7 +184,6 @@ def evaluate_blocks(
                     device=device,
                 ),
                 task_mlp=_eval_task_block(
-                    task_mod,
                     sub,
                     method="mlp",
                     n_splits=n_splits,
@@ -199,12 +191,8 @@ def evaluate_blocks(
                     seed=seed,
                     device=device,
                 ),
-                fp_lda=_eval_fp_block(
-                    fp_mod, sub, method="lda", seed=seed, device=device
-                ),
-                fp_mlp=_eval_fp_block(
-                    fp_mod, sub, method="mlp", seed=seed, device=device
-                ),
+                fp_lda=_eval_fp_block(sub, method="lda", seed=seed, device=device),
+                fp_mlp=_eval_fp_block(sub, method="mlp", seed=seed, device=device),
             )
         )
 
@@ -306,8 +294,6 @@ def compute_degree_moment_r2(
     seed: int = 42,
 ) -> list[DegreeMomentR2]:
     """Predict functional scalar moments of A1 from Family I blocks via RidgeCV."""
-    scale_mod = _import_sibling("visualize-scale-regression.py")
-
     d = np.sum(mats, axis=2)
     targets = {
         "||A1||_2": np.linalg.norm(d, axis=1),
@@ -316,20 +302,17 @@ def compute_degree_moment_r2(
     }
 
     _, _, groups = flatten_feature_datasets(ds_ae)
-    subjects = scale_mod.make_subject_index(groups)
+    subjects = make_subject_index(groups)
     is_struct = np.zeros(groups.size, dtype=np.bool_)  # ty: ignore[missing-attribute]
 
-    blocks: list[tuple[str, int | None]] = [
-        *((descr, i) for i, descr in enumerate(ds_ae.descrs)),
-        ("Full AE-DMD", None),
-    ]
+    blocks = _block_selections(ds_ae)
 
     results: list[DegreeMomentR2] = []
     for bname, idx in blocks:
         sub = ds_ae if idx is None else select_feature_group(ds_ae, idx)
         x, _, _ = flatten_feature_datasets(sub)
         for tname, y in targets.items():
-            res = scale_mod.run_ridge_cv(
+            res = run_ridge_cv(
                 x,
                 y,
                 subjects,

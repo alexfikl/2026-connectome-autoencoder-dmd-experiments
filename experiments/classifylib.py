@@ -6,12 +6,15 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections.abc import Callable, Sequence
-from typing import Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import numpy as np
 import torch
 
-from nneuroutil.typing import Array1D, Array2D
+from nneuroutil.typing import Array1D, Array2D, Array3D
+
+if TYPE_CHECKING:
+    from commonlib import FeatureDataset
 
 log = logging.getLogger("lib.classifylib")
 
@@ -75,11 +78,148 @@ def fit_and_predict(
     raise ValueError(f"unknown method: {method!r}")
 
 
+def to_tensor(ds: FeatureDataset) -> Array3D[np.floating[Any]]:
+    """Stack matched-subject features to ``(ntasks, nsubjects, nfeatures)``."""
+    shapes = {np.asarray(x).shape for x in ds.x}
+    if len(shapes) != 1:
+        raise ValueError("expected all classes to have the same shape")
+
+    return np.stack([np.asarray(x) for x in ds.x], axis=0)
+
+
+def run_subject_grouped_cv(
+    x: Array2D[np.floating[Any]],
+    y: Array1D[np.integer[Any]],
+    groups: Array1D[np.integer[Any]],
+    *,
+    nclasses: int,
+    method: ClassificationMethod,
+    zscore_features: bool,
+    n_splits: int,
+    n_repeats: int,
+    seed: int,
+    device: torch.device | str,
+) -> tuple[Array2D[np.integer[Any]], list[float], list[float]]:
+    """Run repeated subject-grouped K-fold CV on ``(nsamples, nfeatures)``."""
+    from sklearn.metrics import balanced_accuracy_score, f1_score
+    from sklearn.model_selection import RepeatedKFold
+    from sklearn.preprocessing import StandardScaler
+
+    unique_subjects = np.unique(groups)
+    rkf = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=seed)
+
+    nsamples = x.shape[0]
+    oof_preds = np.empty((n_repeats, nsamples), dtype=np.int64)
+    fold_bacc: list[float] = []
+    fold_f1: list[float] = []
+
+    for fold_idx, (train_idx, test_idx) in enumerate(rkf.split(unique_subjects)):
+        rep = fold_idx // n_splits
+        train_mask = np.isin(groups, unique_subjects[train_idx])
+        test_mask = np.isin(groups, unique_subjects[test_idx])
+
+        x_tr_np = x[train_mask]
+        y_tr_np = y[train_mask]
+        x_te_np = x[test_mask]
+        y_te_np = y[test_mask]
+
+        if zscore_features:
+            scaler = StandardScaler()
+            x_tr_np = scaler.fit_transform(x_tr_np)
+            x_te_np = scaler.transform(x_te_np)
+
+        x_train_list = [
+            torch.from_numpy(x_tr_np[y_tr_np == c]).to(device) for c in range(nclasses)
+        ]
+        y_train_list = list(range(nclasses))
+        x_test_t = torch.from_numpy(x_te_np).to(device)
+
+        y_pred_t = fit_and_predict(
+            x_train_list,
+            y_train_list,
+            x_test_t,
+            method,
+            seed=seed + fold_idx,
+        )
+        y_pred = y_pred_t.detach().cpu().numpy()
+
+        oof_preds[rep, test_mask] = y_pred
+        fold_bacc.append(balanced_accuracy_score(y_te_np, y_pred))
+        fold_f1.append(f1_score(y_te_np, y_pred, average="macro"))
+
+    return oof_preds, fold_bacc, fold_f1
+
+
+def run_leave_one_condition_out_cv(
+    x: Array3D[np.floating[Any]],
+    *,
+    method: ClassificationMethod,
+    zscore_features: bool,
+    seed: int,
+    device: torch.device | str,
+) -> tuple[Array2D[np.integer[Any]], list[float]]:
+    """Run leave-one-condition-out CV on ``(ntasks, nsubjects, nfeatures)``."""
+    from sklearn.metrics import balanced_accuracy_score
+    from sklearn.preprocessing import StandardScaler
+
+    ntasks, nsubjects, nfeatures = x.shape
+    y_train_list = list(range(nsubjects))
+    y_test = np.arange(nsubjects, dtype=np.int64)
+
+    oof_preds = np.empty((ntasks, nsubjects), dtype=np.int64)
+    fold_bacc: list[float] = []
+
+    for t in range(ntasks):
+        x_tr_np = np.delete(x, t, axis=0)
+        x_te_np = x[t]
+
+        if zscore_features:
+            scaler = StandardScaler()
+            tr_flat = scaler.fit_transform(np.reshape(x_tr_np, (-1, nfeatures)))
+            x_te_np = scaler.transform(x_te_np)
+            x_tr_np = np.reshape(tr_flat, (ntasks - 1, nsubjects, nfeatures))
+
+        x_train_list = [
+            torch.from_numpy(x_tr_np[:, s, :]).to(device) for s in range(nsubjects)
+        ]
+        x_test_t = torch.from_numpy(x_te_np).to(device)
+
+        y_pred_t = fit_and_predict(
+            x_train_list,
+            y_train_list,
+            x_test_t,
+            method,
+            seed=seed + t,
+        )
+        y_pred = y_pred_t.detach().cpu().numpy()
+
+        oof_preds[t] = y_pred
+        fold_bacc.append(float(balanced_accuracy_score(y_test, y_pred)))
+
+    return oof_preds, fold_bacc
+
+
+class SubjectIndex(NamedTuple):
+    unique: Array1D[np.integer[Any]]
+    idx: Array1D[np.integer[Any]]
+    rows: list[Array1D[np.integer[Any]]]
+
+
+def make_subject_index(groups: Array1D[np.integer[Any]]) -> SubjectIndex:
+    """Map each sample to its subject and collect the rows of each subject."""
+    unique, idx = np.unique(groups, return_inverse=True)
+    return SubjectIndex(
+        unique=unique,
+        idx=idx,
+        rows=[np.flatnonzero(idx == s) for s in range(unique.size)],
+    )
+
+
 def make_subject_rows(
     groups: Array1D[np.integer[Any]],
 ) -> list[Array1D[np.integer[Any]]]:
     """Return the row indices of each subject in ``groups``."""
-    return [np.flatnonzero(groups == s) for s in np.unique(groups)]
+    return make_subject_index(groups).rows
 
 
 def _bootstrap_subject_ci(
@@ -146,6 +286,91 @@ def bootstrap_identification_ci(
         return float(np.mean(np.take(correct, sampled, axis=1)))
 
     return _bootstrap_subject_ci(metric, nsubjects, n_bootstrap=n_bootstrap, seed=seed)
+
+
+# {{{ regression
+
+
+class RegressionResult(NamedTuple):
+    name: str
+    target_name: str
+    r2_mean: float
+    r2_ci_lo: float
+    r2_ci_hi: float
+    y_true: Array1D[np.floating[Any]]
+    y_pred: Array1D[np.floating[Any]]
+    is_structural: Array1D[np.bool]
+
+
+def run_ridge_cv(
+    x: Array2D[np.floating[Any]],
+    y: Array1D[np.floating[Any]],
+    subjects: SubjectIndex,
+    is_structural: Array1D[np.bool],
+    *,
+    name: str,
+    target_name: str,
+    n_splits: int = 5,
+    n_repeats: int = 5,
+    n_bootstrap: int = 1000,
+    seed: int = 42,
+) -> RegressionResult:
+    """Run repeated subject-grouped K-fold Ridge regression."""
+    from sklearn.linear_model import RidgeCV
+    from sklearn.metrics import r2_score
+    from sklearn.model_selection import RepeatedKFold
+    from sklearn.preprocessing import StandardScaler
+
+    rkf = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=seed)
+    alphas = np.logspace(-3, 5, 25)
+
+    nsamples = x.shape[0]
+    oof_pred = np.empty((n_repeats, nsamples), dtype=y.dtype)
+    fold_r2 = np.empty(n_splits * n_repeats, dtype=x.dtype)
+
+    # go through all the folds: fit + compute the R2 scores
+    for fold_idx, (train_idx, test_idx) in enumerate(rkf.split(subjects.unique)):
+        rep = fold_idx // n_splits
+        train_mask = np.isin(subjects.idx, train_idx)
+        test_mask = np.isin(subjects.idx, test_idx)
+
+        scaler = StandardScaler()
+        x_tr_s = scaler.fit_transform(x[train_mask])
+        x_te_s = scaler.transform(x[test_mask])
+
+        reg = RidgeCV(alphas=alphas, cv=min(5, train_idx.size))
+        reg.fit(x_tr_s, y[train_mask])
+        pred = reg.predict(x_te_s)
+
+        oof_pred[rep, test_mask] = pred
+        fold_r2[fold_idx] = r2_score(y[test_mask], pred)
+
+    y_pred_mean = np.mean(oof_pred, axis=0)
+
+    # compute confidence intervals
+    rng = np.random.default_rng(seed)
+    boot_r2 = np.empty(n_bootstrap, dtype=x.dtype)
+
+    for b in range(n_bootstrap):
+        sampled = rng.integers(0, len(subjects.rows), size=len(subjects.rows))
+        idx = np.concatenate([subjects.rows[s] for s in sampled])
+        boot_r2[b] = r2_score(y[idx], y_pred_mean[idx])
+
+    ci_lo, ci_hi = np.percentile(boot_r2, [2.5, 97.5])
+
+    return RegressionResult(
+        name=name,
+        target_name=target_name,
+        r2_mean=np.mean(fold_r2),
+        r2_ci_lo=ci_lo,
+        r2_ci_hi=ci_hi,
+        y_true=y,
+        y_pred=y_pred_mean,
+        is_structural=is_structural,
+    )
+
+
+# }}}
 
 
 # {{{ table
