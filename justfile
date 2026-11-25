@@ -245,7 +245,7 @@ figure2:
 [doc("Generate plots for Figure 4, 5, and 6")]
 figure456:
     {{ PYTHON }} experiments/nn-autoencoder-dmd.py --force infer \
-        data/Emotion_LR_Task-ae-dmd-m45-r64-n32-c16c0f32c730.pkl
+        data/Emotion_LR_Task-ae-dmd-m45.pkl
 
 [doc("Generate plots for Figure 7")]
 figure7:
