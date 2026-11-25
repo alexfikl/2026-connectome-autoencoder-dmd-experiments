@@ -205,6 +205,10 @@ ablation filename dataidx="0" *ARGS:
 
 # {{{ tables
 
+[doc("Generate Table 5")]
+table5:
+    {{ PYTHON }} experiments/summarize-training.py data/ae-dmd
+
 [doc("Generate Table 6")]
 table6:
     {{ PYTHON }} experiments/classify-task-decoding.py summary \
