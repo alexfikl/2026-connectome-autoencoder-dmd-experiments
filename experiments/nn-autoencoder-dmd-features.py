@@ -53,22 +53,11 @@ def compute_features(
     features are either invariant to it or are lifted to the state space, where
     the node coordinates are shared between matrices.
 
-    * ``eigvals``: the eigenvalues of the operator ``dmdc.A``, sorted by decreasing
-      modulus.
-    * ``jac_map``, ``jac_stats``: the gradient norm
-      :math:`|\nabla_c \log |z_N||` of the decoded final log-norm with respect to
-      the (physical) control, on the grid, and its (mean, std, median, p90, max).
-    * ``inset_fraction``: fraction of the grid predicted in the set (decoded final
-      norm below the escape radius). The following describe the decoded final states
-      of these points, which approximate the attractors in the node space.
-    * ``attractor_node_magnitude``: ``(d,)`` mean over the points of the per-node
-      magnitude ``|z_i|`` of the final state.
-    * ``attractor_node_phase``: ``(2, d)`` mean over the points of the unit phasor
-      ``z_i / |z_i| * conj(c / |c|)``, i.e. the phase of each node relative to the
-      control, as its (cos, sin) components. The modulus of the mean is the
-      coherence of the phase over the points.
-    * ``attractor_energy``: the first 8 normalized squared singular values of the
-      final states (uncentered), i.e. how many directions the attractors span.
+    The returned dictionary contains the operator eigenvalues (``eigvals``), the
+    control-sensitivity map and its statistics (``jac_map``, ``jac_stats``), the
+    in-set fraction, and the terminal node magnitudes, phases, and energy
+    spectrum (``attractor_*``). See :func:`make_feature_vector` for the subset
+    used in the benchmarks.
     """
     scale = max(abs(b) for b in bbox)
 

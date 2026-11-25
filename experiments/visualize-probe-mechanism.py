@@ -38,10 +38,9 @@ SCRIPT_LONG_HELP = f"""\
 Analyze the probe-subspace mechanism for Autoencoder-DMD (Family I) on
 functional connectomes.
 
-Evaluates two questions:
-1. Which block of Family I carries 7-way task and fingerprinting signal.
-2. How the Family I blocks relate to the probe-subspace vectors (A1, (A1)^2,
-   A(A1)^2) vs. eigenvectors orthogonal to 1, and to scalar moments of A1.
+Compares the Family I feature blocks against the probe-subspace vectors
+(A1, (A1)^2, A(A1)^2) and the eigenvectors orthogonal to 1, and reports their
+task decoding and fingerprinting accuracy.
 
 Example:
 

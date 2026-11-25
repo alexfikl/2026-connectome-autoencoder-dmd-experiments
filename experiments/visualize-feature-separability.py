@@ -24,18 +24,12 @@ log = logging.getLogger("lib.visualize_feature_separability")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
-Diagnose feature separability and discriminative power for classification.
+Visualize feature separability and discriminative power for classification.
 
-Only the functional (fMRI) classes are used by default. Pass ``--binary`` to
-pool all functional scans against the structural scans, using subject-grouped
-cross-validation.
-
-Evaluates high- and low-dimensional features for:
-1. Representational dissimilarity (class centroid distance matrix).
-2. Supervised linear discriminant analysis (LDA) spectrum and Fisher projection.
-3. Feature effect size distributions (vectorized ANOVA eta^2 and F-statistic).
-4. Cross-validated linear decoding performance and confusion matrix.
-5. Task vs. subject variance ratio (if repeated-measures/matched subjects).
+Plots class-centroid distances, LDA projections and spectra, ANOVA effect
+sizes, cross-validated decoding, and task/subject variance ratios. Only the
+functional (fMRI) classes are used by default; pass ``--binary`` to compare
+all functional scans against the structural scans.
 
 Example:
 
@@ -67,16 +61,17 @@ def compute_centroid_rdm(
 
 
 class LdaResults(NamedTuple):
+    """Held-out LDA coordinates, class centroids, and balanced accuracy.
+
+    The coordinates have shape ``(n_test, k - 1)`` and the projected centroids
+    have shape ``(nclasses, k - 1)``.
+    """
+
     test_coords: Array2D[np.floating[Any]]
-    """Held-out test scan coordinates of shape ``(n_test, k - 1)``."""
     test_labels: Array1D[np.integer[Any]]
-    """Class index for each held-out test scan."""
     proj_centroids: Array2D[np.floating[Any]]
-    """Projected training class centroids of shape ``(nclasses, k - 1)``."""
     explained_variance_ratio: Array1D[np.floating[Any]]
-    """Ratio of between-class variance explained by each canonical component."""
     test_accuracy: float
-    """Balanced accuracy on held-out test scans."""
 
 
 def _split_subjects(
@@ -200,12 +195,11 @@ def compute_gsvd_lda(
 
 
 class DecodingResults(NamedTuple):
+    """Confusion matrix and per-class/overall balanced accuracy."""
+
     confusion_matrix: Array2D[np.floating[Any]]
-    """Normalized confusion matrix (true rows, predicted columns)."""
     per_class_accuracy: Array1D[np.floating[Any]]
-    """Balanced per-class accuracy (recall)."""
     overall_accuracy: float
-    """Mean balanced accuracy across classes."""
 
 
 def compute_cross_validated_decoding(
@@ -246,16 +240,13 @@ def compute_cross_validated_decoding(
 
 
 class VarianceDecomposition(NamedTuple):
+    """Task and subject variance components and their ratio."""
+
     ms_task: Array1D[np.floating[Any]]
-    """Mean squares for task condition."""
     ms_subject: Array1D[np.floating[Any]]
-    """Mean squares for individual subjects."""
     eta2_task: Array1D[np.floating[Any]]
-    """Task effect size."""
     eta2_subject: Array1D[np.floating[Any]]
-    """Subject effect size."""
     ratio: Array1D[np.floating[Any]]
-    """Ratio of task to subject mean squares."""
 
 
 def compute_task_subject_variance(
@@ -332,7 +323,7 @@ def plot_rdm(
     *,
     overwrite: bool = False,
 ) -> None:
-    """Plot Representational Dissimilarity Matrix."""
+    """Plot the class-centroid RDM."""
     labels = list(label_names)
     nclasses = len(labels)
 
@@ -699,12 +690,12 @@ def main(
         else:
             var_decomp = compute_task_subject_variance(x, labels, subject_ids)
 
-        # 1. RDM
-        log.info("Computing Representational Dissimilarity Matrix...")
+        # class-centroid distances
+        log.info("Computing centroid RDM...")
         rdm = compute_centroid_rdm(x, labels)
         plot_rdm(basename, rdm, ds.class_names, overwrite=overwrite)
 
-        # 2. Held-out PCA+LDA
+        # held-out PCA+LDA
         log.info("Computing held-out PCA+LDA projection...")
         lda = compute_pca_lda(x, labels, subject_ids, zscore=zscore)
         log.info("Held-out PCA+LDA balanced accuracy: %.2f%%", lda.test_accuracy * 100)
@@ -717,7 +708,7 @@ def main(
             overwrite=overwrite,
         )
 
-        # 2b. Held-out G-SVD LDA
+        # held-out G-SVD LDA
         log.info("Computing held-out G-SVD LDA projection...")
         gsvd_lda = compute_gsvd_lda(x, labels, subject_ids, zscore=zscore)
         log.info(
@@ -733,14 +724,14 @@ def main(
             overwrite=overwrite,
         )
 
-        # 3. Effect sizes
-        log.info("Computing vectorized ANOVA effect sizes...")
+        # ANOVA effect sizes
+        log.info("Computing ANOVA effect sizes...")
         features = [np.asarray(xi) for xi in ds.x]
         scores = compute_anova_scores(features, eps=EPS)
         plot_effect_size_dist(basename, scores, overwrite=overwrite)
 
-        # 4. Cross-validated linear decoding
-        log.info("Evaluating cross-validated decodability (%d-fold)...", cv_folds)
+        # cross-validated decoding
+        log.info("Evaluating cross-validated decoding (%d-fold)...", cv_folds)
         decoding = compute_cross_validated_decoding(
             x,
             labels,
@@ -754,7 +745,7 @@ def main(
         )
         plot_decoding_cv(basename, decoding, ds.class_names, overwrite=overwrite)
 
-        # 5. Task vs Subject variance
+        # task vs subject variance
         if var_decomp is not None:
             log.info("Plotting task vs subject variance decomposition...")
             plot_task_vs_subject_ratio(basename, var_decomp, overwrite=overwrite)

@@ -17,13 +17,11 @@ log = logging.getLogger("summarize_training")
 
 SCRIPT_PATH = pathlib.Path(__file__)
 SCRIPT_LONG_HELP = f"""\
-Summarize Koopman autoencoder training metrics and test losses across all
-condition directories in an ae-dmd output folder, exporting a booktabs-friendly
-LaTeX table (mean ± std per condition).
+Summarize training metrics and test losses across the condition directories in
+an ae-dmd output folder.
 
-Examples:
+Example:
 
-    > {SCRIPT_PATH.name} ../data/ae-dmd
     > {SCRIPT_PATH.name} ../data/ae-dmd -o summary.tex
 """
 
