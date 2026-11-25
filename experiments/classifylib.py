@@ -651,9 +651,8 @@ def run_ridge_cv(
 
     nsamples = x.shape[0]
     oof_pred = np.empty((n_repeats, nsamples), dtype=y.dtype)
-    fold_r2 = np.empty(n_splits * n_repeats, dtype=x.dtype)
 
-    # go through all the folds: fit + compute the R2 scores
+    # go through all the folds: fit + store out-of-fold predictions
     for fold_idx, (train_idx, test_idx) in enumerate(rkf.split(subject_index.unique)):
         rep = fold_idx // n_splits
         train_mask = np.isin(subject_index.idx, train_idx)
@@ -663,16 +662,15 @@ def run_ridge_cv(
         x_train = scaler.fit_transform(x[train_mask])
         x_test = scaler.transform(x[test_mask])
         y_train = y[train_mask]
-        y_test = y[test_mask]
 
         reg = RidgeCV(alphas=alphas, cv=min(5, train_idx.size))
         reg.fit(x_train, y_train)
         pred = reg.predict(x_test)
 
         oof_pred[rep, test_mask] = pred
-        fold_r2[fold_idx] = r2_score(y_test, pred)
 
     y_pred_mean = np.mean(oof_pred, axis=0)
+    r2_mean = float(r2_score(y, y_pred_mean))
 
     # compute confidence intervals
     rng = np.random.default_rng(seed)
@@ -689,7 +687,7 @@ def run_ridge_cv(
     return RegressionResult(
         name=name,
         target_name=target_name,
-        r2_mean=np.mean(fold_r2),
+        r2_mean=r2_mean,
         r2_ci_lo=ci_lo,
         r2_ci_hi=ci_hi,
         y_true=y,
