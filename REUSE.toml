@@ -4,7 +4,7 @@
 version = 1
 SPDX-PackageName = "fractal-dmd-autoencoder"
 SPDX-PackageSupplier = "Alexandru Fikl <alexfikl@gmail.com>"
-SPDX-PackageDownloadLocation = "https://github.com/alexfikl/2026-fractal-dmd-autoencoder"
+SPDX-PackageDownloadLocation = "https://github.com/alexfikl/2026-connectome-autoencoder-dmd-experiments"
 
 [[annotations]]
 path = [".gitignore"]

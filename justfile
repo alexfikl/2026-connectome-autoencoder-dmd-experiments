@@ -136,7 +136,7 @@ make_features name *FILES:
     {{ PYTHON }} experiments/make-features.py --force \
         --outfile data/dataset-features-{{ name }}.npz \
         --features {{ name }} \
-        {{ FILES }} || true
+        {{ FILES }}
 
 [doc("Construct DMD autoencoder features from trained models")]
 make_ae_features dirname:
@@ -236,7 +236,7 @@ table7b:
 
 [private]
 figure2_run filename *ARGS:
-    {{ PYTHON }} experiments/visualize-effective-rank.py \
+    {{ PYTHON }} experiments/visualize-effective-rank.py --force \
         --maxit 32 --resolution 64 --escape-radius 100 {{ ARGS }} \
         {{ filename }}
 
