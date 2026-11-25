@@ -42,6 +42,7 @@ dependencies = [
     "rich",
     "scienceplots>=2.2",
     "scikit-learn>=1.7",
+    "torch>=2.7",
 ]
 
 [dependency-groups]
