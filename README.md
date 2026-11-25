@@ -1,6 +1,7 @@
 # Koopman Autoencoder Reconstruction of Fractal Connectome Geometry
 
 [![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](https://spdx.org/licenses/MIT.html)
+[![Zenodo repository](https://zenodo.org/badge/DOI/10.5281/zenodo.24530423.svg)](https://doi.org/10.5281/zenodo.24530423)
 
 This code accompanies the paper by the same name. It contains the scripts used to
 generate the feature files, figures and tables in the paper.

@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "Koopman Autoencoder Reconstruction of Fractal Connectome Geometry"
+authors:
+  - family-names: Fikl
+    given-names: Alexandru
+    email: alexfikl@gmail.com
+license: MIT
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.24530423
+    description: "Zenodo repository"
+repository-code: "https://github.com/alexfikl/2026-connectome-autoencoder-dmd-experiments"
+preferred-citation:
+  type: article
+  authors:
+    - family-names: Arambașa
+      given-names: Vlad
+    - family-names: Fikl
+      given-names: Alexandru
+    - family-names: Kaslik
+      given-names: Eva
+  title: "Koopman Autoencoder Reconstruction of Fractal Connectome Geometry"
+  year: 2026
