@@ -13,9 +13,9 @@ with the paper). If you want to reproduce the results exactly, it is highly
 recommended to use these dependencies. However, if the results do not reproduce
 with newer versions, this is likely a bug!
 
-PyTorch is an optional dependency and is not part of `requirements.txt`. It is
-required for training the autoencoder and for all the classification experiments,
-so it has to be installed separately (see below).
+PyTorch is included in `requirements.txt` and pinned with the rest of the
+dependencies, so a single install covers training, feature extraction and the
+classification experiments.
 
 Besides this, the user is expected to have
 
@@ -44,11 +44,11 @@ or
 uv pip sync requirements.txt
 ```
 
-Then install the PyTorch build matching your GPU and driver (see
-[pytorch.org](https://pytorch.org/get-started/locally/) for the right index URL)
-```bash
-pip install torch
-```
+The pinned PyTorch wheel is the default PyPI build, which is CUDA-enabled on
+Linux. If your GPU needs a different CUDA toolkit, or you want a CPU-only build,
+install the matching wheel from
+[pytorch.org](https://pytorch.org/get-started/locally/) after syncing; this
+replaces the pinned build.
 
 # Reproducing the results
 

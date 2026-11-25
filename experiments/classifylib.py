@@ -612,7 +612,7 @@ class RegressionResult(NamedTuple):
     """Name of the regression target, e.g. ``||A||_F``."""
 
     r2_mean: float
-    """Mean :math:`R^2` over the CV folds."""
+    """Pooled out-of-fold :math:`R^2` of the repeat-averaged predictions."""
     r2_ci_lo: float
     """Lower bound of the bootstrap confidence interval for :math:`R^2`."""
     r2_ci_hi: float
