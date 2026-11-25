@@ -4,7 +4,7 @@ array-api-compat==1.16.0
     # via
     #   fractal-dmd-autoencoder (pyproject.toml)
     #   nneuroutil
-cloudpickle==3.1.2
+cloudpickle==3.1.3
     # via joblib
 constantdict==2025.3
     # via orbitkit
@@ -28,7 +28,7 @@ matplotlib==3.11.2
     #   scienceplots
 mdurl==0.1.2
     # via markdown-it-py
-narwhals==2.28.0
+narwhals==2.29.0
     # via scikit-learn
 networkx==3.6.1 ; python_full_version < '3.12'
     # via fractal-dmd-autoencoder (pyproject.toml)
@@ -45,7 +45,7 @@ numpy==2.4.6 ; python_full_version < '3.12'
     #   orbitkit
     #   scikit-learn
     #   scipy
-numpy==2.5.4 ; python_full_version >= '3.12'
+numpy==2.5.5 ; python_full_version >= '3.12'
     # via
     #   fractal-dmd-autoencoder (pyproject.toml)
     #   contourpy
@@ -54,9 +54,9 @@ numpy==2.5.4 ; python_full_version >= '3.12'
     #   orbitkit
     #   scikit-learn
     #   scipy
-orbitkit @ git+https://github.com/alexfikl/orbitkit.git@7d1b5faec06f38ffc16b0d20dbba4e1015396db3#egg=orbitkit
+orbitkit @ git+https://github.com/alexfikl/orbitkit.git@695aeb5a0f3332416c8b1130bbd482d5b092d219#egg=orbitkit
     # via fractal-dmd-autoencoder (pyproject.toml)
-packaging==26.3
+packaging==26.4
     # via matplotlib
 pillow==13.0.0
     # via matplotlib
