@@ -55,7 +55,6 @@ dev = [
     "uv",
 ]
 flax = [ "flax" ]
-torch = [ "torch" ]
 
 [tool.ruff]
 line-length = 88
