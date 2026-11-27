@@ -44,8 +44,7 @@ uv pip sync requirements.txt
 The pinned PyTorch wheel is the default PyPI build, which is CUDA-enabled on
 Linux. If your GPU needs a different CUDA toolkit, or you want a CPU-only build,
 install the matching wheel from
-[pytorch.org](https://pytorch.org/get-started/locally/) after syncing; this
-replaces the pinned build.
+[pytorch.org](https://pytorch.org/get-started/locally/) after syncing.
 
 # Reproducing the results
 
@@ -87,20 +86,28 @@ The resulting images are converted to the `.npz` format with
 just dataset-equim data
 ```
 
+Note that, even though each render is 1-2 minutes at most, there are about 400
+of them, so this will take a while.
+
 ## Features
 
 The feature files are the most expensive part of the pipeline. The autoencoder
-features are by far the slowest to compute, so start them first. The full
-pipeline is
+features are by far the slowest to compute, so start them first. You'll need to
+run
 ```bash
-# 1. Convert the HCP .mat files
+# `just dataset-hcp` needs to run first to generate the required .npz files
+just train
+```
+
+The full pipeline is then
+```bash
+# 1. Convert the HCP .mat files to .npz files
 just dataset-hcp
 
-# 2. Convert the equi-M set images
+# 2. Convert the equi-M set images to .npz files
 just dataset-equim data
 
-# 3. Train an autoencoder for every connectome and compute its features.
-#    This trains 8 conditions x 48 matrices and takes the longest.
+# 3. Train an autoencoder for every connectome
 just train
 
 # 4. Assemble all the feature files used in the paper
@@ -134,10 +141,10 @@ just figure9
 
 # License
 
-The MATLAB mat files from the `data` folder are derived from MRI and fMRI
-datasets from the [Human Connectome Project](https://www.humanconnectome.org/).
-Users of these datasets must comply with the HCP Data Use Terms, as appropriate.
-They are licensed under the CC-BY-NC-4.0 (Non-commercial) license.
+The original MATLAB mat files folder are derived from MRI and fMRI datasets
+from the [Human Connectome Project](https://www.humanconnectome.org/). Users of
+these datasets must comply with the HCP Data Use Terms, as appropriate. They
+are licensed under the CC-BY-NC-4.0 (Non-commercial) license.
 
 The code itself and other files in this repository are provided under the
 standard MIT license.
