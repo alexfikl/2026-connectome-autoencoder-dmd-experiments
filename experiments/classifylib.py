@@ -634,6 +634,7 @@ def run_ridge_cv(
     name: str,
     target_name: str,
     is_structural: Array1D[np.bool] | None = None,
+    zscore_features: bool = True,
     n_splits: int = 5,
     n_repeats: int = 5,
     n_bootstrap: int = 1000,
@@ -658,10 +659,16 @@ def run_ridge_cv(
         train_mask = np.isin(subject_index.idx, train_idx)
         test_mask = np.isin(subject_index.idx, test_idx)
 
-        scaler = StandardScaler()
-        x_train = scaler.fit_transform(x[train_mask])
-        x_test = scaler.transform(x[test_mask])
+        x_train = x[train_mask]
+        x_test = x[test_mask]
         y_train = y[train_mask]
+
+        if zscore_features:
+            scaler = StandardScaler()
+
+            x_train = scaler.fit_transform(x[train_mask])
+            x_test = scaler.transform(x[test_mask])
+            y_train = y[train_mask]
 
         reg = RidgeCV(alphas=alphas, cv=min(5, train_idx.size))
         reg.fit(x_train, y_train)
